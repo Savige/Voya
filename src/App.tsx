@@ -1,131 +1,128 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent } from 'react'
-import { BedDouble, Calendar, Car, ChevronDown, ChevronUp, Compass, DollarSign, ExternalLink, Info, Map as MapIcon, MapPin, Moon, Plane, Search, Sun, UtensilsCrossed, X } from 'lucide-react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type CSSProperties,
+  type FormEvent,
+  type ReactNode,
+  type TransitionEvent,
+} from 'react'
+import {
+  DndContext,
+  DragOverlay,
+  pointerWithin,
+  type DragEndEvent,
+  type DragMoveEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+  PointerSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
+import {
+  BedDouble,
+  Briefcase,
+  Calendar,
+  Car,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Compass,
+  DollarSign,
+  Ellipsis,
+  ExternalLink,
+  Info,
+  Luggage,
+  Map as MapIcon,
+  MapPin,
+  Moon,
+  Plane,
+  ShoppingBag,
+  TriangleAlert,
+  Search,
+  Sun,
+  UtensilsCrossed,
+  X,
+  LogIn,
+  LogOut,
+  User,
+  History,
+  CircleSlash,
+  Trash2,
+} from 'lucide-react'
 import { DayPicker, type DateRange } from 'react-day-picker'
 import 'react-day-picker/style.css'
+import { AirportCombobox } from './AirportCombobox'
+import type { AirportRecord } from './data/airports'
+import { formatAirportOptionLabel, getAirportByIata } from './data/airportLookup'
+import {
+  clearAuthSession,
+  loadAuthSession,
+  loginUser,
+  migrateLegacyTripsIfNeeded,
+  normalizeEmail,
+  registerUser,
+  tripsStorageKey,
+  type AuthSession,
+} from './auth'
+import { getSupabase, isSupabaseConfigured } from './supabaseClient'
+import { authSessionFromSupabaseUser, fetchUserTripsState, upsertProfileDisplayName, upsertUserTrips } from './tripsRemote'
+import { buildFlightRouteDisplay, loadTripsState, saveTripsState } from './tripStorage'
+import {
+  EMPTY_TRIP_BOOKINGS,
+  type CarBooking,
+  type FlightBooking,
+  type MustDo,
+  type PackListItem,
+  type RestaurantBooking,
+  type Stay,
+  type StayActivity,
+  type Trip,
+  type TripsState,
+  type VisitPlace,
+} from './tripTypes'
+import {
+  BRAND_DASHBOARD_SUBTITLE,
+  BRAND_FOOTER_TAGLINE,
+  BRAND_HOME_HEADLINE,
+  BRAND_HOME_KICKER,
+  BRAND_HOME_SUBTEXT,
+  BRAND_NAME,
+  formatDocumentTitle,
+} from './brand'
+import { ConfirmDialog } from './ConfirmDialog'
+import { CurrencySelect } from './CurrencySelect'
+import { formatMoneyAmount, loadDisplayCurrency, saveDisplayCurrency } from './currency'
+import { createMapMarkerContent } from './mapMarkers'
+import {
+  buildMapPointsFromTrip,
+  buildRouteEvents,
+  buildRoutePointsWithTs,
+  defaultMapCategoryVisibility,
+  MAP_CATEGORY_LABELS,
+  MAP_CATEGORIES,
+  MAP_LEGEND_LABELS,
+  resolveReturnThresholdTs,
+  splitOutboundReturnPath,
+  type MapCategory,
+  type MapPoint,
+} from './mapItinerary'
 
-type MustDo = {
-  id: string
-  text: string
-  done: boolean
-  createdAt: number
+const MAP_LEGEND_ICON: Record<MapCategory, typeof BedDouble> = {
+  accommodation: BedDouble,
+  place: MapPin,
+  flight: Plane,
+  rental: Car,
+  dining: UtensilsCrossed,
+  activity: Compass,
 }
 
-type PackListItem = {
-  id: string
-  text: string
-  category: string
-  done: boolean
-  createdAt: number
-}
-
-type VisitPlace = {
-  id: string
-  label: string
-  lat?: number
-  lon?: number
-  cost?: string
-  createdAt: number
-}
-
-type Stay = {
-  id: string
-  location: string
-  address: string
-  startDate: string
-  endDate: string
-  /** Free-text price value, e.g. "$420 total" or "120/night". */
-  price: string
-  /** Paste a link from your booking confirmation email (opens in a new tab). */
-  bookingUrl: string
-  /** Optional confirmation / reservation number from the email. */
-  confirmationRef: string
-  activities: StayActivity[]
-  createdAt: number
-}
-
-type StayActivity = {
-  id: string
-  date: string
-  name: string
-  time: string
-  cost: string
-  notes: string
-  photoUrl?: string
-  googleMapsUri?: string
-  placeLabel?: string
-  category?: string
-  primaryType?: string
-  types?: string[]
-  createdAt: number
-}
-
-type CarBooking = {
-  id: string
-  company: string
-  pickupLocation: string
-  dropoffLocation: string
-  pickupDate: string
-  dropoffDate: string
-  confirmation: string
-  price: string
-  createdAt: number
-}
-
-type FlightBooking = {
-  id: string
-  route: string
-  departDate: string
-  returnDate: string
-  confirmation: string
-  price: string
-  createdAt: number
-}
-
-type RestaurantBooking = {
-  id: string
-  name: string
-  reservationDate: string
-  confirmation: string
-  cost: string
-  notes: string
-  createdAt: number
-}
-
-type AccommodationBooking = {
-  id: string
-  name: string
-  checkIn: string
-  checkOut: string
-  confirmation: string
-  createdAt: number
-}
-
-type TripBookings = {
-  rentalCars: CarBooking[]
-  flights: FlightBooking[]
-  restaurants: RestaurantBooking[]
-  accommodations: AccommodationBooking[]
-}
-
-type Trip = {
-  id: string
-  country: string
-  startDate: string
-  endDate: string
-  createdAt: number
-  mustDos: MustDo[]
-  packList: PackListItem[]
-  visitPlaces: VisitPlace[]
-  stays: Stay[]
-  bookings: TripBookings
-}
-
-type TripsState = {
-  trips: Trip[]
-  selectedTripId: string | null
-}
-
-const STORAGE_KEY = 'trips:v1'
 const THEME_KEY = 'itinerary:theme'
 const PACK_LIST_CATEGORIES = ['Clothes', 'Documents', 'Tech', 'Toiletries', 'Other'] as const
 const FALLBACK_DESTINATIONS = ['New York', 'New Orleans', 'New Zealand', 'Nepal', 'Netherlands', 'Nairobi', 'London', 'Tokyo', 'Sydney']
@@ -532,6 +529,154 @@ const haversineKm = (a: { lat: number; lon: number }, b: { lat: number; lon: num
   return 2 * R * Math.asin(Math.sqrt(h))
 }
 
+
+/** Full-day week calendar: hours 0–23 (24 rows) covering 0:00–24:00. */
+const CAL_START_HOUR = 0
+const CAL_END_HOUR = 24
+const CAL_PX_PER_HOUR = 44
+const CAL_SNAP_MINUTES = 15
+const CAL_EVENT_DURATION_MIN = 60
+/** First hour row visible in the scroll viewport (6am). */
+const CAL_VIEW_START_HOUR = 6
+/** One past last visible hour row in default viewport (exclusive; shows through 9pm). */
+const CAL_VIEW_END_HOUR_EXCLUSIVE = 22
+const CAL_VIEWPORT_HEIGHT_PX = (CAL_VIEW_END_HOUR_EXCLUSIVE - CAL_VIEW_START_HOUR) * CAL_PX_PER_HOUR
+/** Duration of the horizontal slide when edge-nudging the visible calendar week while dragging. */
+const CAL_EDGE_SLIDE_MS = 260
+/** Edge nudge while dragging advances the calendar by this many trip days (matches toolbar week step). */
+const CAL_EDGE_SHIFT_DAYS = 7
+
+const snapCalendarMinutes = (m: number) => Math.round(m / CAL_SNAP_MINUTES) * CAL_SNAP_MINUTES
+
+const parseTimeToMinutes = (time: string): number | null => {
+  const t = time.trim()
+  if (!t) return null
+  const m = t.match(/^(\d{1,2}):(\d{2})/)
+  if (!m) return null
+  const h = Number(m[1])
+  const min = Number(m[2])
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) return null
+  return h * 60 + min
+}
+
+/** Normalize to HH:mm for calendar / activity time fields (handles optional seconds from inputs). */
+const normalizeHhMmTime = (raw: string): string => {
+  const t = raw.trim()
+  const m = t.match(/^(\d{1,2}):(\d{2})/)
+  if (!m) return t
+  const h = Math.min(23, Math.max(0, parseInt(m[1], 10)))
+  const min = Math.min(59, Math.max(0, parseInt(m[2], 10)))
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`
+}
+
+const parseLegacyFlightRoute = (route: string): { from?: string; to?: string } => {
+  const m = route.trim().match(/\b([A-Za-z]{3})\s*(?:→|->|to|-|—|–)\s*([A-Za-z]{3})\b/i)
+  if (!m) return {}
+  return { from: m[1].toUpperCase(), to: m[2].toUpperCase() }
+}
+
+const formatMinutesToTime = (total: number): string => {
+  const lo = 0
+  const hi = 24 * 60 - CAL_SNAP_MINUTES
+  const clamped = Math.max(lo, Math.min(hi, snapCalendarMinutes(total)))
+  const h = Math.floor(clamped / 60)
+  const m = clamped % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+}
+
+function hashStringToUint32(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0
+  return h >>> 0
+}
+
+/** Deterministic vertical slot for activities with no parseable time until the user sets one. */
+function untimedLayoutMinutes(activityId: string, dayIso: string): number {
+  const h = hashStringToUint32(`${dayIso}|${activityId}`)
+  const maxStart = 24 * 60 - CAL_EVENT_DURATION_MIN
+  const span = Math.max(CAL_SNAP_MINUTES, maxStart)
+  const raw = h % span
+  return snapCalendarMinutes(Math.min(maxStart, raw))
+}
+
+function effectiveActivityStartMinutes(activity: StayActivity, dayIso: string): number {
+  const parsed = parseTimeToMinutes(activity.time)
+  if (parsed !== null) return parsed
+  return untimedLayoutMinutes(activity.id, dayIso)
+}
+
+function activityHasConfirmation(activity: StayActivity, stay?: Stay | null): boolean {
+  if (activity.confirmationRef?.trim()) return true
+  return Boolean(stay?.confirmationRef?.trim())
+}
+
+function isActivityImportant(activity: StayActivity, stay?: Stay | null): boolean {
+  return parseTimeToMinutes(activity.time) !== null && activityHasConfirmation(activity, stay)
+}
+
+type CalOverlapLayout = { leftPct: number; widthPct: number }
+
+type CalSlideStripPanes =
+  | { mode: 'next'; left: string[]; right: string[] }
+  | { mode: 'prev'; left: string[]; right: string[] }
+
+type CalDragOverlayPayload = {
+  stayId: string
+  activity: StayActivity
+  stay?: Stay
+  important: boolean
+  inProgress: boolean
+  parsed: number | null
+}
+
+function computeCalendarOverlapLayouts(items: CalendarDayItem[], dayIso: string): Map<string, CalOverlapLayout> {
+  type Ev = { id: string; startMin: number; endMin: number }
+  const events: Ev[] = items.map(({ stayId, activity }) => {
+    const startMin = effectiveActivityStartMinutes(activity, dayIso)
+    const endMin = Math.min(startMin + CAL_EVENT_DURATION_MIN, 24 * 60)
+    return { id: `${stayId}-${activity.id}`, startMin, endMin }
+  })
+  events.sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin)
+
+  const colEnd: number[] = []
+  const colOf = new Map<string, number>()
+  for (const e of events) {
+    let col = colEnd.findIndex((end) => end <= e.startMin)
+    if (col === -1) {
+      col = colEnd.length
+      colEnd.push(e.endMin)
+    } else {
+      colEnd[col] = e.endMin
+    }
+    colOf.set(e.id, col)
+  }
+
+  const out = new Map<string, CalOverlapLayout>()
+  for (const e of events) {
+    const overlapping = events.filter((o) => o.startMin < e.endMin && o.endMin > e.startMin)
+    const laneCount = Math.max(overlapping.length > 0 ? Math.max(...overlapping.map((o) => colOf.get(o.id)!)) + 1 : 1, 1)
+    const col = colOf.get(e.id)!
+    out.set(e.id, {
+      leftPct: (col / laneCount) * 100,
+      widthPct: 100 / laneCount,
+    })
+  }
+  return out
+}
+
+const findStayIdForDate = (stays: Stay[], dayIso: string): string | null => {
+  for (const s of stays) {
+    if (s.startDate <= dayIso && dayIso < s.endDate) return s.id
+  }
+  return null
+}
+
+/** Stay that covers the day, or first stay on the trip to store activities when no stay covers that date. */
+const resolveStayIdForActivityStorage = (stays: Stay[], dayIso: string): string | null => {
+  if (stays.length === 0) return null
+  return findStayIdForDate(stays, dayIso) ?? stays[0]?.id ?? null
+}
+
 function normalizeBookingUrl(raw: string): string {
   const t = raw.trim()
   if (!t) return ''
@@ -549,23 +694,18 @@ function parseAmount(raw?: string): number {
   return match ? Number(match[0]) : 0
 }
 
-function formatMoney(value: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
-}
-
+/** Trip itinerary days from start through end **inclusive** (end day is included for travel / wrap-up). */
 function enumerateStayDays(startDate: string, endDate: string): string[] {
   const start = parseIsoDate(startDate)
   const end = parseIsoDate(endDate)
   if (!start || !end) return []
+  if (start.getTime() > end.getTime()) return []
   const days: string[] = []
   const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate())
   const endMs = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime()
-  while (cur.getTime() < endMs) {
+  while (cur.getTime() <= endMs) {
     days.push(toIsoDate(cur))
     cur.setDate(cur.getDate() + 1)
-  }
-  if (days.length === 0) {
-    days.push(toIsoDate(start))
   }
   return days
 }
@@ -780,174 +920,77 @@ async function fetchLocationHeroImage(location: string): Promise<string | null> 
   }
 }
 
-function loadTripsState(): TripsState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return { trips: [], selectedTripId: null }
-    const parsed = JSON.parse(raw) as any
-    const tripsRaw = parsed?.trips
-    const selectedTripIdRaw = parsed?.selectedTripId
-
-    const trips: Trip[] = Array.isArray(tripsRaw)
-      ? tripsRaw
-          .map((t: any) => ({
-            id: String(t.id ?? ''),
-            country: String(t.country ?? '').trim(),
-            startDate: String(t.startDate ?? ''),
-            endDate: String(t.endDate ?? ''),
-            createdAt: Number(t.createdAt ?? Date.now()),
-            mustDos: Array.isArray(t.mustDos)
-              ? t.mustDos
-                  .map((x: any) => ({
-                    id: String(x.id ?? ''),
-                    text: String(x.text ?? ''),
-                    done: Boolean(x.done),
-                    createdAt: Number(x.createdAt ?? Date.now()),
-                  }))
-                  .filter((x: MustDo) => x.id && x.text.trim().length > 0)
-              : [],
-            packList: Array.isArray(t.packList)
-              ? t.packList
-                  .map((x: any) => ({
-                    id: String(x.id ?? ''),
-                    text: String(x.text ?? '').trim(),
-                    category: String(x.category ?? 'Other').trim() || 'Other',
-                    done: Boolean(x.done),
-                    createdAt: Number(x.createdAt ?? Date.now()),
-                  }))
-                  .filter((x: PackListItem) => x.id && x.text.length > 0)
-              : [],
-            visitPlaces: Array.isArray(t.visitPlaces)
-              ? t.visitPlaces
-                  .map((x: any) => ({
-                    id: String(x.id ?? ''),
-                    label: String(x.label ?? '').trim(),
-                    lat: typeof x.lat === 'number' ? x.lat : undefined,
-                    lon: typeof x.lon === 'number' ? x.lon : undefined,
-                    cost: String(x.cost ?? '').trim(),
-                    createdAt: Number(x.createdAt ?? Date.now()),
-                  }))
-                  .filter((x: VisitPlace) => x.id && x.label.length > 0)
-              : [],
-            stays: Array.isArray(t.stays)
-              ? t.stays
-                  .map((x: any) => ({
-                    id: String(x.id ?? ''),
-                    location: String(x.location ?? '').trim(),
-                    address: String(x.address ?? '').trim(),
-                    startDate: String(x.startDate ?? ''),
-                    endDate: String(x.endDate ?? ''),
-                    price: String(x.price ?? '').trim(),
-                    bookingUrl: String(x.bookingUrl ?? '').trim(),
-                    confirmationRef: String(x.confirmationRef ?? '').trim(),
-                    activities: Array.isArray(x.activities)
-                      ? x.activities
-                          .map((a: any) => ({
-                            id: String(a.id ?? ''),
-                            date: String(a.date ?? ''),
-                            name: String(a.name ?? '').trim(),
-                            time: String(a.time ?? ''),
-                            cost: String(a.cost ?? '').trim(),
-                            notes: String(a.notes ?? '').trim(),
-                            photoUrl: String(a.photoUrl ?? '').trim() || undefined,
-                            googleMapsUri: String(a.googleMapsUri ?? '').trim() || undefined,
-                            placeLabel: String(a.placeLabel ?? '').trim() || undefined,
-                            category: String(a.category ?? '').trim() || undefined,
-                            primaryType: String(a.primaryType ?? '').trim() || undefined,
-                            types: Array.isArray(a.types) ? a.types.map((x: any) => String(x)).filter(Boolean) : undefined,
-                            createdAt: Number(a.createdAt ?? Date.now()),
-                          }))
-                          .filter((a: StayActivity) => a.id && a.name && a.date)
-                      : [],
-                    createdAt: Number(x.createdAt ?? Date.now()),
-                  }))
-                  .filter((x: Stay) => x.id && x.location.length > 0 && x.startDate && x.endDate)
-              : [],
-            bookings: {
-              rentalCars: Array.isArray(t?.bookings?.rentalCars)
-                ? t.bookings.rentalCars
-                    .map((x: any) => ({
-                      id: String(x.id ?? ''),
-                      company: String(x.company ?? '').trim(),
-                      pickupLocation: String(x.pickupLocation ?? '').trim(),
-                      dropoffLocation: String(x.dropoffLocation ?? '').trim(),
-                      pickupDate: String(x.pickupDate ?? ''),
-                      dropoffDate: String(x.dropoffDate ?? ''),
-                      confirmation: String(x.confirmation ?? '').trim(),
-                      price: String(x.price ?? '').trim(),
-                      createdAt: Number(x.createdAt ?? Date.now()),
-                    }))
-                    .filter((x: CarBooking) => x.id && x.company.length > 0)
-                : [],
-              flights: Array.isArray(t?.bookings?.flights)
-                ? t.bookings.flights
-                    .map((x: any) => ({
-                      id: String(x.id ?? ''),
-                      route: String(x.route ?? '').trim(),
-                      departDate: String(x.departDate ?? ''),
-                      returnDate: String(x.returnDate ?? ''),
-                      confirmation: String(x.confirmation ?? '').trim(),
-                      price: String(x.price ?? '').trim(),
-                      createdAt: Number(x.createdAt ?? Date.now()),
-                    }))
-                    .filter((x: FlightBooking) => x.id && x.route.length > 0)
-                : [],
-              restaurants: Array.isArray(t?.bookings?.restaurants)
-                ? t.bookings.restaurants
-                    .map((x: any) => ({
-                      id: String(x.id ?? ''),
-                      name: String(x.name ?? '').trim(),
-                      reservationDate: String(x.reservationDate ?? ''),
-                      confirmation: String(x.confirmation ?? '').trim(),
-                      cost: String(x.cost ?? '').trim(),
-                      notes: String(x.notes ?? '').trim(),
-                      createdAt: Number(x.createdAt ?? Date.now()),
-                    }))
-                    .filter((x: RestaurantBooking) => x.id && x.name.length > 0)
-                : [],
-              accommodations: Array.isArray(t?.bookings?.accommodations)
-                ? t.bookings.accommodations
-                    .map((x: any) => ({
-                      id: String(x.id ?? ''),
-                      name: String(x.name ?? '').trim(),
-                      checkIn: String(x.checkIn ?? ''),
-                      checkOut: String(x.checkOut ?? ''),
-                      confirmation: String(x.confirmation ?? '').trim(),
-                      createdAt: Number(x.createdAt ?? Date.now()),
-                    }))
-                    .filter((x: AccommodationBooking) => x.id && x.name.length > 0)
-                : [],
-            },
-          }))
-          .filter((t: Trip) => t.id && t.country.length > 0)
-      : []
-
-    const selectedTripId =
-      typeof selectedTripIdRaw === 'string' && trips.some((t) => t.id === selectedTripIdRaw) ? selectedTripIdRaw : trips[0]?.id ?? null
-
-    return { trips, selectedTripId }
-  } catch {
-    return { trips: [], selectedTripId: null }
-  }
-}
-
-function saveTripsState(state: TripsState) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-}
-
 type Tab = 'planner' | 'itinerary' | 'budget' | 'map' | 'tips'
+
+const DASHBOARD_TAB_LABELS: Record<Tab, string> = {
+  planner: 'Planner',
+  itinerary: 'Itinerary',
+  budget: 'Budget',
+  map: 'Map',
+  tips: 'Tips',
+}
+
 type View = 'home' | 'dashboard'
 type BookingTab = 'rentalCar' | 'flight' | 'restaurant' | 'accommodation'
+/** Synthetic stay id for trip-booking rows merged into the day schedule (calendar + timeline). */
+const CAL_BOOKING_STAY_ID = '__trip_booking__'
+type CalendarBookingRef = { tab: BookingTab; id: string }
+type CalendarDayItem = {
+  stayId: string
+  stayLocation: string
+  activity: StayActivity
+  bookingRef?: CalendarBookingRef
+}
 
-type MapPoint = {
-  key: string
-  label: string
-  kind: 'stay' | 'place'
-  addressHint?: string
-  lat?: number
-  lon?: number
-  startDate?: string
-  endDate?: string
+const EMPTY_CALENDAR_DAY_ITEMS: CalendarDayItem[] = []
+
+/** Uses the place line from search (name + address) or notes — no separate directions field. */
+function activityDirectionsDestination(a: StayActivity): string {
+  const pl = (a.placeLabel ?? '').trim()
+  if (pl) return pl
+  const n = (a.notes ?? '').trim()
+  if (n) return n
+  return (a.name ?? '').trim()
+}
+
+function directionsDestinationForScheduleItem(item: CalendarDayItem | undefined): string {
+  if (!item) return ''
+  const a = item.activity
+  if (item.bookingRef?.tab === 'rentalCar') {
+    return (a.notes || '').trim() || (a.name || '').trim()
+  }
+  if (item.bookingRef?.tab === 'flight') {
+    const pl = (a.placeLabel ?? '').trim()
+    if (pl) return pl
+    return (a.name || '').trim()
+  }
+  return activityDirectionsDestination(a)
+}
+
+type BookingFilter = BookingTab | 'all'
+type BookingRowKind = BookingTab | 'activity'
+type BookingManagementRow = {
+  id: string
+  kind: BookingRowKind
+  filterKind: BookingTab
+  sortTs: number
+  overlapStartTs: number
+  overlapEndTs: number
+  dateText: string
+  title: string
+  subtitle: string
+  /** Confirmation refs, times, etc. (not the price — see priceAmount). */
+  meta?: string
+  /** Parsed numeric amount for right-aligned currency display. */
+  priceAmount?: number
+  /** When kind is flight, drives baggage icon row in the list. */
+  flightBaggage?: { checked: number; carryOn: number; personal: boolean }
+  removable: boolean
+  removeId?: string
+  removeTab?: BookingTab
+  stayId?: string
+  activityId?: string
+  kindLabel: string
 }
 
 const toIsoDate = (d?: Date) => {
@@ -968,6 +1011,45 @@ const parseIsoDate = (iso?: string) => {
   const [y, m, d] = iso.split('-').map(Number)
   if (!y || !m || !d) return null
   return new Date(y, m - 1, d)
+}
+
+const formatCountdownDuration = (from: Date, to: Date) => {
+  if (to.getTime() <= from.getTime()) return '0s'
+  const unit = (n: number, word: string) => `${n}\u00A0${word}${n === 1 ? '' : 's'}`
+
+  const addYears = (d: Date, n: number) => {
+    const x = new Date(d)
+    x.setFullYear(x.getFullYear() + n)
+    return x
+  }
+  const addMonths = (d: Date, n: number) => {
+    const x = new Date(d)
+    x.setMonth(x.getMonth() + n)
+    return x
+  }
+
+  let years = to.getFullYear() - from.getFullYear()
+  while (years > 0 && addYears(from, years).getTime() > to.getTime()) years -= 1
+  let cursor = addYears(from, years)
+
+  let months = (to.getFullYear() - cursor.getFullYear()) * 12 + (to.getMonth() - cursor.getMonth())
+  while (months > 0 && addMonths(cursor, months).getTime() > to.getTime()) months -= 1
+  cursor = addMonths(cursor, months)
+
+  let remainingSec = Math.floor((to.getTime() - cursor.getTime()) / 1000)
+  const days = Math.floor(remainingSec / 86400)
+  remainingSec -= days * 86400
+  const hours = Math.floor(remainingSec / 3600)
+  remainingSec -= hours * 3600
+  const minutes = Math.floor(remainingSec / 60)
+  const seconds = remainingSec - minutes * 60
+
+  if (years > 0) return `${unit(years, 'year')}, ${unit(months, 'month')}, ${unit(days, 'day')}`
+  if (months > 0) return `${unit(months, 'month')}, ${unit(days, 'day')}, ${unit(hours, 'hour')}`
+  if (days > 0) return `${unit(days, 'day')}, ${unit(hours, 'hour')}, ${unit(minutes, 'minute')}`
+  if (hours > 0) return `${unit(hours, 'hour')}, ${unit(minutes, 'minute')}, ${unit(seconds, 'second')}`
+  if (minutes > 0) return `${unit(minutes, 'minute')}, ${unit(seconds, 'second')}`
+  return unit(seconds, 'second')
 }
 
 const formatDateRangeLabel = (startDate?: string, endDate?: string) => {
@@ -1021,6 +1103,13 @@ const formatSingleDateLabel = (iso?: string) => {
   const date = parseIsoDate(iso)
   if (!date) return ''
   return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(date)
+}
+
+/** Weekday + date for calendar column headers, e.g. Fri, Dec 1 */
+const formatCalendarDayHeaderLabel = (iso?: string) => {
+  const date = parseIsoDate(iso)
+  if (!date) return ''
+  return new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(date)
 }
 
 type PeakSeasonInfo = {
@@ -1271,6 +1360,745 @@ function DateSingleDropdown({
   )
 }
 
+type ItineraryCalendarGridProps = {
+  visibleDays: string[]
+  timelineDays: string[]
+  activitiesByDay: Map<string, CalendarDayItem[]>
+  stays: Stay[]
+  staysByDay: Map<string, Stay[]>
+  todayIso: string
+  nowMinutes: number
+  selectedTimelineDate: string
+  onSelectDay: (iso: string) => void
+  onCalendarActivityDrop: (fromStayId: string, activityId: string, targetDayIso: string, newTime: string) => void
+  onOpenActivityDetail: (stayId: string, activity: StayActivity) => void
+  onOpenBookingFromCalendar?: (tab: BookingTab, id: string) => void
+  weekStartIndex: number
+  onPrevWeek: () => void
+  onNextWeek: () => void
+  canPrev: boolean
+  canNext: boolean
+  /** Shift visible window by one trip day while dragging near left/right edge. */
+  onShiftCalendarDays: (delta: number) => void
+  canShiftCalendarPrev: boolean
+  canShiftCalendarNext: boolean
+  formatDayLabel: (iso: string) => string
+}
+
+const formatCalendarHourLabel = (h: number) => {
+  if (h === 0) return '12 AM'
+  if (h < 12) return `${h} AM`
+  if (h === 12) return '12 PM'
+  return `${h - 12} PM`
+}
+
+function CalendarActivityBlock({
+  activity,
+  stayId,
+  stay,
+  dayIso,
+  gridHeightPx,
+  rangeMin,
+  layout,
+  onOpenDetail,
+  nowMinutes,
+  isTodayColumn,
+  isBookingCalendarItem = false,
+}: {
+  activity: StayActivity
+  stayId: string
+  stay?: Stay
+  dayIso: string
+  gridHeightPx: number
+  rangeMin: number
+  layout: CalOverlapLayout
+  onOpenDetail: () => void
+  nowMinutes: number
+  isTodayColumn: boolean
+  isBookingCalendarItem?: boolean
+}) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `cal-drag-${stayId}-${activity.id}`,
+    data: { stayId, activityId: activity.id },
+    disabled: isBookingCalendarItem,
+  })
+  const startMin = effectiveActivityStartMinutes(activity, dayIso)
+  const parsed = parseTimeToMinutes(activity.time)
+  const timeLine =
+    activity.calendarTimeLabel?.trim() ||
+    (parsed !== null ? activity.time : 'No time')
+  const topPx = ((startMin - CAL_START_HOUR * 60) / rangeMin) * gridHeightPx
+  const heightPx = Math.max(32, Math.min(CAL_PX_PER_HOUR, gridHeightPx - topPx))
+  const important = isBookingCalendarItem
+    ? Boolean(activity.confirmationRef?.trim())
+    : isActivityImportant(activity, stay)
+  const inProgress =
+    isTodayColumn &&
+    parsed !== null &&
+    nowMinutes >= startMin &&
+    nowMinutes < startMin + CAL_EVENT_DURATION_MIN
+  const style: CSSProperties = {
+    top: topPx,
+    height: heightPx,
+    left: `calc(${layout.leftPct}% + 2px)`,
+    width: `calc(${layout.widthPct}% - 4px)`,
+    ...(transform && !isDragging ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` } : {}),
+    zIndex: isDragging ? 20 : 2,
+    opacity: isDragging ? 0 : 1,
+    pointerEvents: isDragging ? 'none' : undefined,
+  }
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`itinerary-calendar-event${important ? ' itinerary-calendar-event--important' : ''}${inProgress ? ' itinerary-calendar-event--in-progress' : ''}`}
+      {...listeners}
+      {...attributes}
+      onClick={() => onOpenDetail()}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpenDetail()
+        }
+      }}
+      role="button"
+      tabIndex={0}
+    >
+      <p className="itinerary-calendar-event-title truncate">{activity.name}</p>
+      <p className="itinerary-calendar-event-time">{timeLine}</p>
+    </div>
+  )
+}
+
+function CalendarDayHeaderCell({
+  dayIso,
+  dayIndex,
+  isSelected,
+  isToday,
+  onHeaderClick,
+  formatDayLabel,
+  staysForDay,
+}: {
+  dayIso: string
+  dayIndex: number
+  isSelected: boolean
+  isToday: boolean
+  onHeaderClick: () => void
+  formatDayLabel: (iso: string) => string
+  staysForDay: Stay[]
+}) {
+  return (
+    <div className={`itinerary-calendar-head-col ${isSelected ? 'is-selected' : ''}${isToday ? ' is-today' : ''}`}>
+      <button type="button" className="itinerary-calendar-col-head" onClick={onHeaderClick}>
+        <span className="itinerary-calendar-col-daynum">Day {dayIndex}</span>
+        <span className="itinerary-calendar-col-date">{formatDayLabel(dayIso)}</span>
+      </button>
+      <div className="itinerary-calendar-acc-strip" title={staysForDay.map((s) => s.location).join(' · ') || undefined}>
+        {staysForDay.length === 0 ? (
+          <span className="itinerary-calendar-acc-strip-empty">No stay</span>
+        ) : (
+          staysForDay.map((s) => (
+            <span key={s.id} className="itinerary-calendar-acc-strip-chip">
+              <BedDouble size={11} aria-hidden className="shrink-0 opacity-80 itinerary-calendar-acc-strip-icon" />
+              <span className="itinerary-calendar-acc-strip-text">{s.location}</span>
+            </span>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Which day column contains the pointer; works when DragOverlay leaves dnd-kit without a valid `over`. */
+function resolveCalendarDropFromPointer(
+  clientX: number,
+  clientY: number,
+  dayIsos: string[],
+): { dayIso: string; top: number; height: number } | null {
+  for (const dayIso of dayIsos) {
+    const el = document.querySelector(`[data-cal-drop-body="${dayIso}"]`) as HTMLElement | null
+    if (!el) continue
+    const r = el.getBoundingClientRect()
+    if (r.width <= 0 || r.height <= 0) continue
+    const pad = 2
+    if (
+      clientX >= r.left - pad &&
+      clientX <= r.right + pad &&
+      clientY >= r.top - pad &&
+      clientY <= r.bottom + pad
+    ) {
+      return { dayIso, top: r.top, height: r.height }
+    }
+  }
+  return null
+}
+
+function CalendarDayGridColumn({
+  dayIso,
+  gridHeightPx,
+  isSelected,
+  isToday,
+  nowMinutes,
+  children,
+}: {
+  dayIso: string
+  gridHeightPx: number
+  isSelected: boolean
+  isToday: boolean
+  nowMinutes: number
+  children: ReactNode
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: `cal-day-${dayIso}` })
+  const hourCount = CAL_END_HOUR - CAL_START_HOUR
+  const nowFrac = nowMinutes / (24 * 60)
+  return (
+    <div className={`itinerary-calendar-col itinerary-calendar-grid-col ${isSelected ? 'is-selected' : ''}${isToday ? ' is-today' : ''}`}>
+      <div
+        ref={setNodeRef}
+        data-cal-drop-body={dayIso}
+        className={`itinerary-calendar-grid-body ${isOver ? 'is-over' : ''}`}
+        style={{ height: gridHeightPx }}
+      >
+        <div className="itinerary-calendar-hour-lines" aria-hidden>
+          {Array.from({ length: hourCount }, (_, i) => (
+            <div key={i} className="itinerary-calendar-hour-line" style={{ height: CAL_PX_PER_HOUR }} />
+          ))}
+        </div>
+        {isToday ? (
+          <div className="itinerary-calendar-now-line" style={{ top: `${nowFrac * 100}%` }} aria-hidden />
+        ) : null}
+        <div className="itinerary-calendar-events-layer">{children}</div>
+      </div>
+    </div>
+  )
+}
+
+function ItineraryCalendarGrid({
+  visibleDays,
+  timelineDays,
+  activitiesByDay,
+  stays,
+  staysByDay,
+  todayIso,
+  nowMinutes,
+  selectedTimelineDate,
+  onSelectDay,
+  onCalendarActivityDrop,
+  onOpenActivityDetail,
+  onOpenBookingFromCalendar,
+  weekStartIndex,
+  onPrevWeek,
+  onNextWeek,
+  canPrev,
+  canNext,
+  onShiftCalendarDays,
+  canShiftCalendarPrev,
+  canShiftCalendarNext,
+  formatDayLabel,
+}: ItineraryCalendarGridProps) {
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const bodySlideRef = useRef<HTMLDivElement | null>(null)
+  const pointerRef = useRef({ x: 0, y: 0 })
+  const isDraggingCalRef = useRef(false)
+  const lastHorizontalNudgeRef = useRef(0)
+  /** When DragOverlay yields over=null on drop, use last hovered cal-day column. */
+  const lastCalDayOverRef = useRef<string | null>(null)
+  const slideBusyRef = useRef(false)
+  const pendingShiftDeltaRef = useRef<number | null>(null)
+  const slideFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [calDragOverlay, setCalDragOverlay] = useState<CalDragOverlayPayload | null>(null)
+  const [calSlideStrip, setCalSlideStrip] = useState<CalSlideStripPanes | null>(null)
+  const [calSlide, setCalSlide] = useState<{ transform: string; transition: string }>({
+    transform: 'translateX(0px)',
+    transition: '',
+  })
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      pointerRef.current = { x: e.clientX, y: e.clientY }
+    }
+    window.addEventListener('pointermove', onMove, { passive: true })
+    return () => window.removeEventListener('pointermove', onMove)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (slideFallbackTimerRef.current !== null) clearTimeout(slideFallbackTimerRef.current)
+    }
+  }, [])
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 8 },
+    }),
+  )
+  const gridHeightPx = (CAL_END_HOUR - CAL_START_HOUR) * CAL_PX_PER_HOUR
+  const rangeMin = (CAL_END_HOUR - CAL_START_HOUR) * 60
+  const hours = useMemo(() => {
+    const out: number[] = []
+    for (let h = CAL_START_HOUR; h < CAL_END_HOUR; h++) out.push(h)
+    return out
+  }, [])
+  const rangeLabelEnd = Math.min(weekStartIndex + visibleDays.length, timelineDays.length)
+
+  const stayById = useMemo(() => new Map(stays.map((s) => [s.id, s])), [stays])
+
+  const layoutDays = useMemo(() => {
+    if (calSlideStrip) return [...calSlideStrip.left, ...calSlideStrip.right]
+    return visibleDays
+  }, [calSlideStrip, visibleDays])
+
+  const layoutByDay = useMemo(() => {
+    const m = new Map<string, Map<string, CalOverlapLayout>>()
+    for (const dayIso of layoutDays) {
+      const items = activitiesByDay.get(dayIso) ?? []
+      const raw = computeCalendarOverlapLayouts(items, dayIso)
+      m.set(dayIso, raw)
+    }
+    return m
+  }, [layoutDays, activitiesByDay])
+
+  /** When the visible week slides away from the source day, keep a mounted draggable until drag end. */
+  const dragAnchorLayoutInfo = useMemo(() => {
+    if (!calDragOverlay) return null
+    const dayIso = calDragOverlay.activity.date
+    if (layoutDays.includes(dayIso)) return null
+    const items = activitiesByDay.get(dayIso) ?? []
+    const raw = computeCalendarOverlapLayouts(items, dayIso)
+    const k = `${calDragOverlay.stayId}-${calDragOverlay.activity.id}`
+    return { dayIso, layout: raw.get(k) ?? { leftPct: 0, widthPct: 100 } }
+  }, [calDragOverlay, layoutDays, activitiesByDay])
+
+  const visibleDaysKey = visibleDays.join('|')
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    if (isDraggingCalRef.current) return
+    if (calSlideStrip) return
+    el.scrollTop = CAL_VIEW_START_HOUR * CAL_PX_PER_HOUR
+  }, [weekStartIndex, visibleDaysKey, calSlideStrip])
+
+  const slideSurfaceStyle: CSSProperties = {
+    transform: calSlide.transform,
+    transition: calSlide.transition,
+    ...(calSlide.transition ? { willChange: 'transform' } : {}),
+  }
+
+  const finishShiftAnimation = () => {
+    if (slideFallbackTimerRef.current !== null) {
+      clearTimeout(slideFallbackTimerRef.current)
+      slideFallbackTimerRef.current = null
+    }
+    const delta = pendingShiftDeltaRef.current
+    if (delta === null) return
+    pendingShiftDeltaRef.current = null
+    onShiftCalendarDays(delta)
+    setCalSlideStrip(null)
+    setCalSlide({ transform: 'translateX(0px)', transition: 'none' })
+    requestAnimationFrame(() => {
+      setCalSlide({ transform: 'translateX(0px)', transition: '' })
+      slideBusyRef.current = false
+    })
+  }
+
+  const beginSlideShift = (dir: 1 | -1): boolean => {
+    if (slideBusyRef.current) return false
+    if ((dir === 1 && !canShiftCalendarNext) || (dir === -1 && !canShiftCalendarPrev)) return false
+
+    const prefersReduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true
+
+    const delta = dir * CAL_EDGE_SHIFT_DAYS
+
+    if (prefersReduced) {
+      onShiftCalendarDays(delta)
+      return true
+    }
+
+    const nextPane =
+      dir === 1 ? timelineDays.slice(weekStartIndex + 7, weekStartIndex + 14) : []
+    const prevPane =
+      dir === -1 ? timelineDays.slice(Math.max(0, weekStartIndex - 7), weekStartIndex) : []
+
+    if (dir === 1 && nextPane.length === 0) return false
+    if (dir === -1 && prevPane.length === 0) return false
+
+    const strip: CalSlideStripPanes =
+      dir === 1
+        ? { mode: 'next', left: visibleDays, right: nextPane }
+        : { mode: 'prev', left: prevPane, right: visibleDays }
+
+    slideBusyRef.current = true
+    pendingShiftDeltaRef.current = delta
+    slideFallbackTimerRef.current = window.setTimeout(() => {
+      slideFallbackTimerRef.current = null
+      finishShiftAnimation()
+    }, CAL_EDGE_SLIDE_MS + 150)
+
+    setCalSlideStrip(strip)
+
+    const txEase = `transform ${CAL_EDGE_SLIDE_MS}ms cubic-bezier(0.25, 0.8, 0.25, 1)`
+
+    if (dir === 1) {
+      setCalSlide({ transform: 'translateX(0%)', transition: 'none' })
+      requestAnimationFrame(() => {
+        setCalSlide({
+          transform: 'translateX(-50%)',
+          transition: txEase,
+        })
+      })
+    } else {
+      setCalSlide({ transform: 'translateX(-50%)', transition: 'none' })
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setCalSlide({
+            transform: 'translateX(0%)',
+            transition: txEase,
+          })
+        })
+      })
+    }
+    return true
+  }
+
+  const handleCalSlideEnd = (e: TransitionEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return
+    if (e.propertyName !== 'transform') return
+    finishShiftAnimation()
+  }
+
+  const handleDragMove = (event: DragMoveEvent) => {
+    if (!event.active) return
+    const el = scrollRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const y = pointerRef.current.y
+    const x = pointerRef.current.x
+    const margin = 56
+    const step = 14
+    if (y < r.top + margin) el.scrollTop -= step
+    else if (y > r.bottom - margin) el.scrollTop += step
+
+    const hMargin = 52
+    const now = performance.now()
+    const horizontalCooldownMs = 380
+    if (now - lastHorizontalNudgeRef.current >= horizontalCooldownMs) {
+      if (x > r.right - hMargin && canShiftCalendarNext) {
+        if (beginSlideShift(1)) lastHorizontalNudgeRef.current = now
+      } else if (x < r.left + hMargin && canShiftCalendarPrev) {
+        if (beginSlideShift(-1)) lastHorizontalNudgeRef.current = now
+      }
+    }
+  }
+
+  const resetCalDragUi = () => {
+    isDraggingCalRef.current = false
+    setCalDragOverlay(null)
+  }
+
+  const handleCalDragStart = (event: DragStartEvent) => {
+    isDraggingCalRef.current = true
+    lastCalDayOverRef.current = null
+    const d = event.active.data.current as { stayId: string; activityId: string } | undefined
+    if (!d) return
+    const stay = stays.find((s) => s.id === d.stayId)
+    const activity = stay?.activities?.find((a) => a.id === d.activityId)
+    if (!activity) return
+    const parsed = parseTimeToMinutes(activity.time)
+    const important = isActivityImportant(activity, stay)
+    const startMin = effectiveActivityStartMinutes(activity, activity.date)
+    const inProgress =
+      activity.date === todayIso &&
+      parsed !== null &&
+      nowMinutes >= startMin &&
+      nowMinutes < startMin + CAL_EVENT_DURATION_MIN
+    setCalDragOverlay({ stayId: d.stayId, activity, stay, important, inProgress, parsed })
+  }
+
+  const handleDragOverCal = (event: DragOverEvent) => {
+    const o = event.over
+    if (!o) return
+    const id = String(o.id)
+    if (id.startsWith('cal-day-')) {
+      lastCalDayOverRef.current = id.slice('cal-day-'.length)
+    }
+  }
+
+  const handleCalendarDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    const data = active.data.current as { stayId: string; activityId: string } | undefined
+    if (!data) {
+      lastCalDayOverRef.current = null
+      resetCalDragUi()
+      return
+    }
+
+    const px = pointerRef.current.x
+    const py = pointerRef.current.y
+    const pointerHit = resolveCalendarDropFromPointer(px, py, layoutDays)
+
+    let targetDayIso: string | null = null
+    let dropTop = 0
+    let dropHeight = 0
+
+    if (pointerHit) {
+      targetDayIso = pointerHit.dayIso
+      dropTop = pointerHit.top
+      dropHeight = pointerHit.height
+    }
+    if (!targetDayIso && over) {
+      const overId = String(over.id)
+      if (overId.startsWith('cal-day-')) {
+        targetDayIso = overId.slice('cal-day-'.length)
+        const r = over.rect
+        dropTop = r.top
+        dropHeight = r.height
+      }
+    }
+    if (!targetDayIso && lastCalDayOverRef.current) {
+      targetDayIso = lastCalDayOverRef.current
+      const el = document.querySelector(`[data-cal-drop-body="${targetDayIso}"]`) as HTMLElement | null
+      if (el) {
+        const br = el.getBoundingClientRect()
+        dropTop = br.top
+        dropHeight = br.height
+      }
+    }
+
+    lastCalDayOverRef.current = null
+    resetCalDragUi()
+
+    if (!targetDayIso || dropHeight <= 0) return
+
+    const cy = pointerRef.current.y
+    const rel = Math.min(1, Math.max(0, (cy - dropTop) / dropHeight))
+    const rangeMinCalc = (CAL_END_HOUR - CAL_START_HOUR) * 60
+    let newMin = Math.round(CAL_START_HOUR * 60 + rel * rangeMinCalc)
+    newMin = snapCalendarMinutes(newMin)
+    newMin = Math.max(0, Math.min(24 * 60 - CAL_SNAP_MINUTES, newMin))
+    const newTime = formatMinutesToTime(newMin)
+    onCalendarActivityDrop(data.stayId, data.activityId, targetDayIso, newTime)
+  }
+
+  const handleCalDragCancel = () => {
+    lastCalDayOverRef.current = null
+    resetCalDragUi()
+  }
+
+  const renderHeaderCells = (days: string[], paneId: string) =>
+    days.map((dayIso) => {
+      const dayIndex = timelineDays.indexOf(dayIso) + 1
+      const staysForDay = staysByDay.get(dayIso) ?? []
+      return (
+        <CalendarDayHeaderCell
+          key={`${paneId}-${dayIso}`}
+          dayIso={dayIso}
+          dayIndex={dayIndex}
+          isSelected={selectedTimelineDate === dayIso}
+          isToday={dayIso === todayIso}
+          onHeaderClick={() => onSelectDay(dayIso)}
+          formatDayLabel={formatDayLabel}
+          staysForDay={staysForDay}
+        />
+      )
+    })
+
+  const renderGridColumns = (days: string[], paneId: string) =>
+    days.map((dayIso) => {
+      const items = activitiesByDay.get(dayIso) ?? []
+      const layouts = layoutByDay.get(dayIso) ?? new Map()
+      return (
+        <CalendarDayGridColumn
+          key={`${paneId}-${dayIso}`}
+          dayIso={dayIso}
+          gridHeightPx={gridHeightPx}
+          isSelected={selectedTimelineDate === dayIso}
+          isToday={dayIso === todayIso}
+          nowMinutes={nowMinutes}
+        >
+          {items.map(({ stayId, activity, bookingRef }) => {
+            const key = `${stayId}-${activity.id}`
+            const layout = layouts.get(key) ?? { leftPct: 0, widthPct: 100 }
+            return (
+              <CalendarActivityBlock
+                key={key}
+                activity={activity}
+                stayId={stayId}
+                stay={stayById.get(stayId)}
+                dayIso={dayIso}
+                gridHeightPx={gridHeightPx}
+                rangeMin={rangeMin}
+                layout={layout}
+                onOpenDetail={() =>
+                  bookingRef
+                    ? onOpenBookingFromCalendar?.(bookingRef.tab, bookingRef.id)
+                    : onOpenActivityDetail(stayId, activity)
+                }
+                nowMinutes={nowMinutes}
+                isTodayColumn={dayIso === todayIso}
+                isBookingCalendarItem={Boolean(bookingRef)}
+              />
+            )
+          })}
+        </CalendarDayGridColumn>
+      )
+    })
+
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={pointerWithin}
+      onDragStart={handleCalDragStart}
+      onDragOver={handleDragOverCal}
+      onDragEnd={handleCalendarDragEnd}
+      onDragCancel={handleCalDragCancel}
+      onDragMove={handleDragMove}
+    >
+      <div className="itinerary-calendar-shell">
+        <div className="itinerary-calendar-toolbar">
+          <button
+            type="button"
+            className="itinerary-calendar-nav"
+            onClick={onPrevWeek}
+            disabled={!canPrev}
+            aria-label="Previous week"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <span className="itinerary-calendar-range-label">
+            Days {weekStartIndex + 1}–{rangeLabelEnd} of {timelineDays.length}
+          </span>
+          <button
+            type="button"
+            className="itinerary-calendar-nav"
+            onClick={onNextWeek}
+            disabled={!canNext}
+            aria-label="Next week"
+          >
+            <ChevronRight size={18} />
+          </button>
+        </div>
+        <p className="itinerary-calendar-hint text-xs text-neutral-500 mt-2">
+          Click an activity to edit, or drag to move time or day. Hold near the left or right edge while dragging to slide the visible week earlier or later (same step as the arrows). Scroll vertically for hours before 6am or after 9pm. Click a day header to select it for recommendations below.
+        </p>
+        <div className="itinerary-calendar-week-header">
+          <div className="itinerary-calendar-corner" aria-hidden />
+          <div className="itinerary-calendar-header-slide-clip">
+            <div
+              className={`itinerary-calendar-header-slide-inner${calSlideStrip ? ' itinerary-calendar-header-slide-inner--strip' : ''}`}
+              style={slideSurfaceStyle}
+            >
+              {calSlideStrip ? (
+                <>
+                  <div className="itinerary-calendar-week-pane">{renderHeaderCells(calSlideStrip.left, 'hL')}</div>
+                  <div className="itinerary-calendar-week-pane">{renderHeaderCells(calSlideStrip.right, 'hR')}</div>
+                </>
+              ) : (
+                renderHeaderCells(visibleDays, 'h')
+              )}
+            </div>
+          </div>
+        </div>
+        <div
+          ref={scrollRef}
+          className="itinerary-calendar-scroll itinerary-calendar-hour-viewport"
+          style={{ maxHeight: CAL_VIEWPORT_HEIGHT_PX }}
+        >
+          <div className="itinerary-calendar-time-gutter">
+            {hours.map((h) => (
+              <div key={h} className="itinerary-calendar-time-label" style={{ height: CAL_PX_PER_HOUR }}>
+                {formatCalendarHourLabel(h)}
+              </div>
+            ))}
+          </div>
+          <div className="itinerary-calendar-columns-slide-clip">
+            {calSlideStrip ? (
+              <div
+                ref={bodySlideRef}
+                className="itinerary-calendar-slide-strip"
+                style={slideSurfaceStyle}
+                onTransitionEnd={handleCalSlideEnd}
+              >
+                <div className="itinerary-calendar-week-pane">
+                  <div className="itinerary-calendar-columns">{renderGridColumns(calSlideStrip.left, 'gL')}</div>
+                </div>
+                <div className="itinerary-calendar-week-pane">
+                  <div className="itinerary-calendar-columns">{renderGridColumns(calSlideStrip.right, 'gR')}</div>
+                </div>
+              </div>
+            ) : (
+              <div
+                ref={bodySlideRef}
+                className="itinerary-calendar-columns"
+                style={slideSurfaceStyle}
+                onTransitionEnd={handleCalSlideEnd}
+              >
+                {renderGridColumns(visibleDays, 'g')}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      {calDragOverlay && dragAnchorLayoutInfo ? (
+        <div className="itinerary-calendar-drag-anchor" aria-hidden>
+          <div className="itinerary-calendar-columns itinerary-calendar-drag-anchor-inner">
+            <CalendarDayGridColumn
+              dayIso={dragAnchorLayoutInfo.dayIso}
+              gridHeightPx={gridHeightPx}
+              isSelected={selectedTimelineDate === dragAnchorLayoutInfo.dayIso}
+              isToday={dragAnchorLayoutInfo.dayIso === todayIso}
+              nowMinutes={nowMinutes}
+            >
+              <CalendarActivityBlock
+                activity={calDragOverlay.activity}
+                stayId={calDragOverlay.stayId}
+                stay={stayById.get(calDragOverlay.stayId)}
+                dayIso={dragAnchorLayoutInfo.dayIso}
+                gridHeightPx={gridHeightPx}
+                rangeMin={rangeMin}
+                layout={dragAnchorLayoutInfo.layout}
+                onOpenDetail={() => onOpenActivityDetail(calDragOverlay.stayId, calDragOverlay.activity)}
+                nowMinutes={nowMinutes}
+                isTodayColumn={dragAnchorLayoutInfo.dayIso === todayIso}
+              />
+            </CalendarDayGridColumn>
+          </div>
+        </div>
+      ) : null}
+      <DragOverlay dropAnimation={null}>
+        {calDragOverlay ? (
+          <div
+            className={`itinerary-calendar-event itinerary-calendar-event--drag-overlay${
+              calDragOverlay.important ? ' itinerary-calendar-event--important' : ''
+            }${calDragOverlay.inProgress ? ' itinerary-calendar-event--in-progress' : ''}`}
+          >
+            <p className="itinerary-calendar-event-title truncate">{calDragOverlay.activity.name}</p>
+            <p className="itinerary-calendar-event-time">
+              {calDragOverlay.activity.calendarTimeLabel?.trim() ||
+                (calDragOverlay.parsed !== null ? calDragOverlay.activity.time : 'No time')}
+            </p>
+          </div>
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  )
+}
+
+/** Home page trip list ordering by calendar dates (ISO YYYY-MM-DD). */
+function sortKeyActiveAsc(t: Trip): string {
+  const k = (t.startDate || t.endDate || '').trim()
+  return k || '9999-12-31'
+}
+
+function sortKeyPastDesc(t: Trip): string {
+  return (t.endDate || t.startDate || '').trim() || '0000-01-01'
+}
+
+function sortKeyCancelledDesc(t: Trip): string {
+  return (t.startDate || t.endDate || '').trim() || '0000-01-01'
+}
+
 export default function App() {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     const saved = localStorage.getItem(THEME_KEY)
@@ -1278,12 +2106,40 @@ export default function App() {
     if (saved === 'light') return false
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
   })
+  const [displayCurrency, setDisplayCurrency] = useState(() => loadDisplayCurrency())
   const [view, setView] = useState<View>('home')
   const [activeTab, setActiveTab] = useState<Tab>('planner')
   const [expandedTripPanel, setExpandedTripPanel] = useState(true)
   const [selectedTimelineDate, setSelectedTimelineDate] = useState('')
+  const [itineraryViewMode, setItineraryViewMode] = useState<'timeline' | 'calendar'>('timeline')
+  const [calendarWeekStartIndex, setCalendarWeekStartIndex] = useState(0)
+  const [calendarDropError, setCalendarDropError] = useState<string | null>(null)
+  const [calendarActivityDetail, setCalendarActivityDetail] = useState<{ stayId: string; activity: StayActivity } | null>(null)
+  const [calendarDetailDraft, setCalendarDetailDraft] = useState<Partial<StayActivity> | null>(null)
+  const [itineraryClock, setItineraryClock] = useState(() => Date.now())
 
-  const [state, setState] = useState<TripsState>(() => loadTripsState())
+  const [authReady, setAuthReady] = useState(!isSupabaseConfigured())
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null)
+  const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
+    if (isSupabaseConfigured()) return null
+    return loadAuthSession()
+  })
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
+  const [authEmailInput, setAuthEmailInput] = useState('')
+  const [authPasswordInput, setAuthPasswordInput] = useState('')
+  const [authNameInput, setAuthNameInput] = useState('')
+  const [authFormError, setAuthFormError] = useState<string | null>(null)
+  const [authBusy, setAuthBusy] = useState(false)
+  const [localImportDismissed, setLocalImportDismissed] = useState(false)
+
+  const skipRemoteSaveRef = useRef(true)
+  const remoteFetchGenRef = useRef(0)
+
+  const [state, setState] = useState<TripsState>(() => {
+    if (isSupabaseConfigured()) return { trips: [], selectedTripId: null }
+    const s = loadAuthSession()
+    return loadTripsState(s ? tripsStorageKey(s.email) : null)
+  })
   const [placeSearchInput, setPlaceSearchInput] = useState('')
   const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false)
   const [placeSuggestionIndex, setPlaceSuggestionIndex] = useState(-1)
@@ -1304,24 +2160,39 @@ export default function App() {
   const [stayAddressInput, setStayAddressInput] = useState('')
   const [stayStartDate, setStayStartDate] = useState('')
   const [stayEndDate, setStayEndDate] = useState('')
+  const [stayCheckInTimeInput, setStayCheckInTimeInput] = useState('')
+  const [stayCheckOutTimeInput, setStayCheckOutTimeInput] = useState('')
   const [stayPriceInput, setStayPriceInput] = useState('')
   const [stayBookingUrlInput, setStayBookingUrlInput] = useState('')
   const [stayConfirmationRefInput, setStayConfirmationRefInput] = useState('')
   const [stayError, setStayError] = useState<string | null>(null)
   const [bookingsTab, setBookingsTab] = useState<BookingTab>('rentalCar')
-  const [editingBooking, setEditingBooking] = useState<{ tab: BookingTab; id: string } | null>(null)
-  const [editCarDraft, setEditCarDraft] = useState<CarBooking | null>(null)
-  const [editFlightDraft, setEditFlightDraft] = useState<FlightBooking | null>(null)
-  const [editRestaurantDraft, setEditRestaurantDraft] = useState<RestaurantBooking | null>(null)
+  const [bookingFilter, setBookingFilter] = useState<BookingFilter>('all')
+  const [bookingManagementExpanded, setBookingManagementExpanded] = useState(true)
+  const [editingBookingForm, setEditingBookingForm] = useState<{ tab: BookingTab; id: string } | null>(null)
+  const [editingStayId, setEditingStayId] = useState<string | null>(null)
+  const [pinnedOverlapSourceId, setPinnedOverlapSourceId] = useState<string | null>(null)
   const [carCompanyInput, setCarCompanyInput] = useState('')
   const [carPickupLocationInput, setCarPickupLocationInput] = useState('')
   const [carDropoffLocationInput, setCarDropoffLocationInput] = useState('')
   const [carPickupInput, setCarPickupInput] = useState('')
+  const [carPickupTimeInput, setCarPickupTimeInput] = useState('')
   const [carDropoffInput, setCarDropoffInput] = useState('')
+  const [carDropoffTimeInput, setCarDropoffTimeInput] = useState('')
   const [carConfirmationInput, setCarConfirmationInput] = useState('')
   const [carPriceInput, setCarPriceInput] = useState('')
-  const [flightRouteInput, setFlightRouteInput] = useState('')
+  const [flightFromIata, setFlightFromIata] = useState('')
+  const [flightFromLabel, setFlightFromLabel] = useState('')
+  const [flightToIata, setFlightToIata] = useState('')
+  const [flightToLabel, setFlightToLabel] = useState('')
+  const [flightAirlineInput, setFlightAirlineInput] = useState('')
   const [flightDepartInput, setFlightDepartInput] = useState('')
+  const [flightDepartTimeInput, setFlightDepartTimeInput] = useState('')
+  const [flightArriveDateInput, setFlightArriveDateInput] = useState('')
+  const [flightArriveTimeInput, setFlightArriveTimeInput] = useState('')
+  const [flightCheckedBags, setFlightCheckedBags] = useState(1)
+  const [flightCarryOnBags, setFlightCarryOnBags] = useState(1)
+  const [flightPersonalItem, setFlightPersonalItem] = useState(true)
   const [flightConfirmationInput, setFlightConfirmationInput] = useState('')
   const [flightPriceInput, setFlightPriceInput] = useState('')
   const [flightQuickInput, setFlightQuickInput] = useState('')
@@ -1331,30 +2202,156 @@ export default function App() {
   const [restaurantCostInput, setRestaurantCostInput] = useState('')
   const [restaurantNotesInput, setRestaurantNotesInput] = useState('')
   const [dismissedRecommendationKeys, setDismissedRecommendationKeys] = useState<string[]>([])
-  const [activityDrafts, setActivityDrafts] = useState<Record<string, { name: string; time: string; cost: string; notes: string }>>({})
+  const [activityDrafts, setActivityDrafts] = useState<
+    Record<string, { name: string; time: string; confirmationRef: string; cost: string; notes: string }>
+  >({})
   const [activityPlaceSearchInput, setActivityPlaceSearchInput] = useState('')
   const [draftPlaceMeta, setDraftPlaceMeta] = useState<Record<string, PlaceSuggestion>>({})
   const [activityMetaById, setActivityMetaById] = useState<Record<string, PlaceSuggestion>>({})
   const [selectedDayAnchorCoords, setSelectedDayAnchorCoords] = useState<Array<{ lat: number; lon: number }>>([])
   const [selectedDayRadiusPartial, setSelectedDayRadiusPartial] = useState(false)
   const [bookingError, setBookingError] = useState<string | null>(null)
+  const [isBookingFormOpen, setIsBookingFormOpen] = useState(false)
   const [confettiBursts, setConfettiBursts] = useState<Array<{ id: string; x: number; y: number }>>([])
   const audioCtxRef = useRef<AudioContext | null>(null)
   const [mapApiLoaded, setMapApiLoaded] = useState(false)
   const [mapApiError, setMapApiError] = useState<string | null>(null)
   const [resolvedPointCoords, setResolvedPointCoords] = useState<Record<string, { lat: number; lon: number }>>({})
+  const [mapCategoryVisible, setMapCategoryVisible] = useState<Record<MapCategory, boolean>>(defaultMapCategoryVisibility)
   const mapContainerRef = useRef<HTMLDivElement | null>(null)
   const mapInstanceRef = useRef<any>(null)
   const mapMarkersRef = useRef<any[]>([])
-  const mapPolylineRef = useRef<any>(null)
+  const mapPolylineOutboundRef = useRef<any>(null)
+  const mapPolylineReturnRef = useRef<any>(null)
+  /** When unchanged, map effect skips fitBounds/center (visibility-only toggles). Reset when leaving Map tab. */
+  const mapCameraFingerprintAppliedRef = useRef<string | null>(null)
   /** Session-only hero; refetched when opening the dashboard so places are not stuck on one saved photo. */
   const [dashboardHeroUrl, setDashboardHeroUrl] = useState<string | null>(null)
   const [peakSeasonInfo, setPeakSeasonInfo] = useState<PeakSeasonInfo | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string
+    description: ReactNode
+    confirmLabel: string
+    cancelLabel?: string
+    variant?: 'default' | 'danger'
+    onConfirm: () => void
+  } | null>(null)
 
-  useEffect(() => saveTripsState(state), [state])
+  const handleConfirmDialogAction = () => {
+    if (!confirmDialog) return
+    const { onConfirm } = confirmDialog
+    onConfirm()
+    setConfirmDialog(null)
+  }
+
+  useEffect(() => {
+    if (!isSupabaseConfigured()) return
+    const supabase = getSupabase()
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      const u = session?.user
+      setSupabaseUserId(u?.id ?? null)
+      setAuthSession(u ? authSessionFromSupabaseUser(u) : null)
+      setAuthReady(true)
+    })
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const u = session?.user
+      setSupabaseUserId(u?.id ?? null)
+      setAuthSession(u ? authSessionFromSupabaseUser(u) : null)
+    })
+    return () => subscription.unsubscribe()
+  }, [])
+
+  useEffect(() => {
+    if (!authSession) {
+      setLocalImportDismissed(false)
+      return
+    }
+    const k = `itinerary:import-dismissed:${normalizeEmail(authSession.email)}`
+    setLocalImportDismissed(sessionStorage.getItem(k) === '1')
+  }, [authSession?.email])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured() || !authReady) return
+    if (!authSession || !supabaseUserId) {
+      setState({ trips: [], selectedTripId: null })
+      skipRemoteSaveRef.current = true
+      return
+    }
+    const gen = ++remoteFetchGenRef.current
+    skipRemoteSaveRef.current = true
+    fetchUserTripsState().then((s) => {
+      if (gen !== remoteFetchGenRef.current) return
+      setState(s)
+      requestAnimationFrame(() => {
+        skipRemoteSaveRef.current = false
+      })
+    })
+  }, [authReady, supabaseUserId])
+
+  useEffect(() => {
+    if (!authSession?.email) return
+    if (!isSupabaseConfigured()) {
+      saveTripsState(state, authSession.email)
+      return
+    }
+    if (skipRemoteSaveRef.current) return
+    const t = window.setTimeout(() => {
+      void upsertUserTrips(state)
+    }, 700)
+    return () => window.clearTimeout(t)
+  }, [state, authSession?.email])
+
+  const localHasTripsForImport = useMemo(() => {
+    if (!authSession) return false
+    try {
+      const raw = localStorage.getItem(tripsStorageKey(authSession.email))
+      if (!raw) return false
+      const p = JSON.parse(raw) as { trips?: unknown[] }
+      return Array.isArray(p.trips) && p.trips.length > 0
+    } catch {
+      return false
+    }
+  }, [authSession?.email, state.trips.length])
+
+  const showLocalImportBanner =
+    isSupabaseConfigured() &&
+    authReady &&
+    Boolean(authSession) &&
+    !localImportDismissed &&
+    state.trips.length === 0 &&
+    localHasTripsForImport
+  useEffect(() => {
+    if (!authReady) return
+    if (!authSession && view === 'dashboard') {
+      setView('home')
+    }
+  }, [authReady, authSession, view])
+  useEffect(() => {
+    if (view === 'home') {
+      document.title = formatDocumentTitle('Home')
+    } else {
+      document.title = formatDocumentTitle(DASHBOARD_TAB_LABELS[activeTab])
+    }
+  }, [view, activeTab])
   useEffect(() => {
     localStorage.setItem(THEME_KEY, isDarkMode ? 'dark' : 'light')
   }, [isDarkMode])
+  useEffect(() => {
+    saveDisplayCurrency(displayCurrency)
+  }, [displayCurrency])
+  useEffect(() => {
+    const id = window.setInterval(() => setItineraryClock(Date.now()), 30000)
+    return () => window.clearInterval(id)
+  }, [])
+  useEffect(() => {
+    if (!calendarActivityDetail) {
+      setCalendarDetailDraft(null)
+      return
+    }
+    setCalendarDetailDraft({ ...calendarActivityDetail.activity })
+  }, [calendarActivityDetail])
 
   const selectedTrip = useMemo(() => {
     if (!state.selectedTripId) return null
@@ -1365,7 +2362,7 @@ export default function App() {
   const packList = selectedTrip?.packList ?? []
   const visitPlaces = selectedTrip?.visitPlaces ?? []
   const stays = useMemo(() => [...(selectedTrip?.stays ?? [])].sort((a, b) => a.startDate.localeCompare(b.startDate)), [selectedTrip?.stays])
-  const bookings = selectedTrip?.bookings ?? { rentalCars: [], flights: [], restaurants: [], accommodations: [] }
+  const bookings = selectedTrip?.bookings ?? EMPTY_TRIP_BOOKINGS
   const remaining = useMemo(() => mustDos.filter((m) => !m.done).length, [mustDos])
   const packedCount = useMemo(() => packList.filter((x) => x.done).length, [packList])
   const packListGroups = useMemo(() => {
@@ -1389,6 +2386,257 @@ export default function App() {
       .map(([category, items]) => [category, [...items].sort((a, b) => a.createdAt - b.createdAt)] as const)
   }, [packList])
   const allStayActivities = useMemo(() => stays.flatMap((s) => s.activities ?? []), [stays])
+  const plannerActivitiesForBookingsTab = useMemo(() => {
+    const rows: { stayId: string; stayLocation: string; activity: StayActivity }[] = []
+    for (const s of stays) {
+      for (const a of s.activities ?? []) {
+        rows.push({ stayId: s.id, stayLocation: s.location, activity: a })
+      }
+    }
+    return rows.sort(
+      (x, y) =>
+        x.activity.date.localeCompare(y.activity.date) || (x.activity.time || '').localeCompare(y.activity.time || ''),
+    )
+  }, [stays])
+  const bookingManagementRows = useMemo(() => {
+    const rows: BookingManagementRow[] = []
+    const tsFromIso = (iso?: string, fallback = 0) => parseIsoDate(iso)?.getTime() ?? fallback
+    const dayStartTs = (iso?: string, fallback = 0) => parseIsoDate(iso)?.getTime() ?? fallback
+    const dayEndTs = (iso?: string, fallback = 0) => {
+      const d = parseIsoDate(iso)
+      if (!d) return fallback
+      d.setHours(23, 59, 59, 999)
+      return d.getTime()
+    }
+    const pointTs = (iso?: string, time?: string, fallback = 0) => {
+      const d = parseIsoDate(iso)
+      if (!d) return fallback
+      const mins = parseTimeToMinutes(time ?? '')
+      if (mins !== null) d.setHours(Math.floor(mins / 60), mins % 60, 0, 0)
+      return d.getTime()
+    }
+    const endExclusiveTs = (iso?: string, fallback = 0) => {
+      const d = parseIsoDate(iso)
+      if (!d) return fallback
+      return d.getTime() - 1
+    }
+
+    for (const b of bookings.rentalCars) {
+      if (!b.confirmation.trim()) continue
+      const pickupT = (b.pickupTime ?? '').trim()
+      const dropoffT = (b.dropoffTime ?? '').trim()
+      const endDate = b.dropoffDate || b.pickupDate
+      const overlapStartTs = b.pickupDate ? pointTs(b.pickupDate, pickupT, b.createdAt) : b.createdAt
+      const overlapEndTs = endDate
+        ? dropoffT
+          ? pointTs(endDate, dropoffT, b.createdAt)
+          : dayEndTs(endDate, b.createdAt)
+        : overlapStartTs
+      const pickupLabel = b.pickupDate
+        ? `${formatSingleDateLabel(b.pickupDate)}${pickupT ? ` · ${pickupT}` : ''}`
+        : 'No pickup date'
+      const dropoffLabel = endDate ? `${formatSingleDateLabel(endDate)}${dropoffT ? ` · ${dropoffT}` : ''}` : ''
+      rows.push({
+        id: `rental-${b.id}`,
+        kind: 'rentalCar',
+        kindLabel: 'Rental car',
+        filterKind: 'rentalCar',
+        sortTs: b.pickupDate ? pointTs(b.pickupDate, pickupT, b.createdAt) : b.createdAt,
+        overlapStartTs,
+        overlapEndTs,
+        dateText: dropoffLabel ? `${pickupLabel} → ${dropoffLabel}` : pickupLabel,
+        title: b.company,
+        subtitle: `${b.pickupLocation || 'Pickup'} -> ${b.dropoffLocation || 'Dropoff'}`,
+        meta: b.confirmation.trim() || undefined,
+        priceAmount: (() => {
+          const n = parseAmount(b.price)
+          return n > 0 ? n : undefined
+        })(),
+        removable: true,
+        removeId: b.id,
+        removeTab: 'rentalCar',
+      })
+    }
+    for (const b of bookings.flights) {
+      if (!b.confirmation.trim()) continue
+      const depT = (b.departTime ?? '').trim()
+      const arrT = (b.arriveTime ?? '').trim()
+      const arrDate = (b.arriveDate || b.departDate || '').trim()
+      const overlapStartTs = b.departDate
+        ? depT && parseTimeToMinutes(depT) !== null
+          ? pointTs(b.departDate, depT, b.createdAt)
+          : dayStartTs(b.departDate, b.createdAt)
+        : b.createdAt
+      const overlapEndTs = arrDate
+        ? arrT && parseTimeToMinutes(arrT) !== null
+          ? pointTs(arrDate, arrT, b.createdAt)
+          : dayEndTs(arrDate, b.createdAt)
+        : b.departDate
+          ? dayEndTs(b.departDate, b.createdAt)
+          : overlapStartTs
+      const routeDisp = buildFlightRouteDisplay(b.fromIata, b.toIata, b.route)
+      const depLabel = b.departDate
+        ? `${formatSingleDateLabel(b.departDate)}${depT ? ` · ${depT}` : ''}`
+        : 'No departure date'
+      const arrLabel = arrDate ? `${formatSingleDateLabel(arrDate)}${arrT ? ` · ${arrT}` : ''}` : ''
+      const scheduleLine = [b.airline?.trim(), [depLabel, arrLabel].filter(Boolean).join(' → ')].filter(Boolean).join(' · ')
+      rows.push({
+        id: `flight-${b.id}`,
+        kind: 'flight',
+        kindLabel: 'Flight',
+        filterKind: 'flight',
+        sortTs: b.departDate && depT && parseTimeToMinutes(depT) !== null ? pointTs(b.departDate, depT, b.createdAt) : tsFromIso(b.departDate, b.createdAt),
+        overlapStartTs,
+        overlapEndTs,
+        dateText: arrLabel ? `${depLabel} → ${arrLabel}` : depLabel,
+        title: routeDisp,
+        subtitle: scheduleLine || (b.confirmation ? `Confirmation: ${b.confirmation}` : 'Flight booking'),
+        meta: b.confirmation.trim() || undefined,
+        priceAmount: (() => {
+          const n = parseAmount(b.price)
+          return n > 0 ? n : undefined
+        })(),
+        flightBaggage: {
+          checked: b.checkedBags ?? 0,
+          carryOn: b.carryOnBags ?? 0,
+          personal: b.personalItem ?? false,
+        },
+        removable: true,
+        removeId: b.id,
+        removeTab: 'flight',
+      })
+    }
+    for (const b of bookings.restaurants) {
+      if (!b.confirmation.trim()) continue
+      const overlapStartTs = dayStartTs(b.reservationDate, b.createdAt)
+      const overlapEndTs = dayEndTs(b.reservationDate, b.createdAt)
+      rows.push({
+        id: `restaurant-${b.id}`,
+        kind: 'restaurant',
+        kindLabel: 'Dining',
+        filterKind: 'restaurant',
+        sortTs: tsFromIso(b.reservationDate, b.createdAt),
+        overlapStartTs,
+        overlapEndTs,
+        dateText: b.reservationDate ? formatSingleDateLabel(b.reservationDate) : 'No date',
+        title: b.name,
+        subtitle: b.notes || 'Dining booking',
+        meta: b.confirmation.trim() || undefined,
+        priceAmount: (() => {
+          const n = parseAmount(b.cost)
+          return n > 0 ? n : undefined
+        })(),
+        removable: true,
+        removeId: b.id,
+        removeTab: 'restaurant',
+      })
+    }
+    for (const { stayId, stayLocation, activity: a } of plannerActivitiesForBookingsTab) {
+      if (!a.confirmationRef.trim()) continue
+      const overlapPointTs = pointTs(a.date, a.time, a.createdAt)
+      rows.push({
+        id: `activity-${stayId}-${a.id}`,
+        kind: 'activity',
+        kindLabel: 'Activity',
+        filterKind: 'restaurant',
+        sortTs: tsFromIso(a.date, a.createdAt),
+        overlapStartTs: overlapPointTs,
+        overlapEndTs: overlapPointTs,
+        dateText: a.date ? formatSingleDateLabel(a.date) : 'No date',
+        title: a.name,
+        subtitle: stayLocation || 'Itinerary activity',
+        meta:
+          [a.time, a.confirmationRef ? `Conf. ${a.confirmationRef}` : ''].filter(Boolean).join(' · ') || undefined,
+        priceAmount: (() => {
+          const n = parseAmount(a.cost)
+          return n > 0 ? n : undefined
+        })(),
+        removable: true,
+        stayId,
+        activityId: a.id,
+      })
+    }
+    for (const s of stays) {
+      if (!s.confirmationRef.trim()) continue
+      const cinT = (s.checkInTime ?? '').trim()
+      const coutT = (s.checkOutTime ?? '').trim()
+      const hasCin = cinT.length > 0 && parseTimeToMinutes(cinT) !== null
+      const hasCout = coutT.length > 0 && parseTimeToMinutes(coutT) !== null
+      const overlapStartTs = s.startDate
+        ? hasCin
+          ? pointTs(s.startDate, cinT, s.createdAt)
+          : dayStartTs(s.startDate, s.createdAt)
+        : s.createdAt
+      const overlapEndTs = s.endDate
+        ? hasCout
+          ? pointTs(s.endDate, coutT, s.createdAt)
+          : endExclusiveTs(s.endDate, s.createdAt)
+        : s.startDate
+          ? hasCout
+            ? pointTs(s.startDate, coutT, s.createdAt)
+            : dayEndTs(s.startDate, s.createdAt)
+          : overlapStartTs
+      const rangeLabel = formatDateRangeLabel(s.startDate, s.endDate)
+      const dateParts = [rangeLabel]
+      if (hasCin) dateParts.push(`In ${normalizeHhMmTime(cinT)}`)
+      if (hasCout) dateParts.push(`Out ${normalizeHhMmTime(coutT)}`)
+      rows.push({
+        id: `stay-${s.id}`,
+        kind: 'accommodation',
+        kindLabel: 'Accommodation',
+        filterKind: 'accommodation',
+        sortTs: s.startDate && hasCin ? pointTs(s.startDate, cinT, s.createdAt) : tsFromIso(s.startDate, s.createdAt),
+        overlapStartTs,
+        overlapEndTs,
+        dateText: dateParts.join(' · '),
+        title: s.location || 'Accommodation',
+        subtitle: s.address || 'No address',
+        meta: s.confirmationRef.trim() || undefined,
+        priceAmount: (() => {
+          const n = parseAmount(s.price)
+          return n > 0 ? n : undefined
+        })(),
+        removable: true,
+        stayId: s.id,
+      })
+    }
+
+    return rows.sort((a, b) => a.sortTs - b.sortTs || a.kind.localeCompare(b.kind) || a.title.localeCompare(b.title))
+  }, [bookings.flights, bookings.rentalCars, bookings.restaurants, plannerActivitiesForBookingsTab, stays])
+  const visibleBookingRows = useMemo(
+    () => bookingManagementRows.filter((r) => bookingFilter === 'all' || r.filterKind === bookingFilter),
+    [bookingManagementRows, bookingFilter],
+  )
+  const bookingOverlapLinks = useMemo(() => {
+    const links = new Map<string, string[]>()
+    for (const row of visibleBookingRows) links.set(row.id, [])
+    for (let i = 0; i < visibleBookingRows.length; i++) {
+      const a = visibleBookingRows[i]
+      for (let j = i + 1; j < visibleBookingRows.length; j++) {
+        const b = visibleBookingRows[j]
+        if (a.kind !== b.kind) continue
+        if (a.overlapStartTs <= b.overlapEndTs && b.overlapStartTs <= a.overlapEndTs) {
+          links.get(a.id)?.push(b.id)
+          links.get(b.id)?.push(a.id)
+        }
+      }
+    }
+    return links
+  }, [visibleBookingRows])
+  const activeOverlapSourceId = pinnedOverlapSourceId
+  const activeOverlapIds = useMemo(() => {
+    if (!activeOverlapSourceId) return new Set<string>()
+    const ids = new Set<string>([activeOverlapSourceId])
+    for (const id of bookingOverlapLinks.get(activeOverlapSourceId) ?? []) ids.add(id)
+    return ids
+  }, [activeOverlapSourceId, bookingOverlapLinks])
+  const bookingKindChipClass: Record<BookingRowKind, string> = {
+    rentalCar: 'bg-indigo-100 text-indigo-700',
+    flight: 'bg-sky-100 text-sky-700',
+    restaurant: 'bg-amber-100 text-amber-700',
+    activity: 'bg-violet-100 text-violet-700',
+    accommodation: 'bg-emerald-100 text-emerald-700',
+  }
   const budgetTotals = useMemo(() => {
     const vehicle = bookings.rentalCars.reduce((sum, b) => sum + parseAmount(b.price), 0)
     const flights = bookings.flights.reduce((sum, b) => sum + parseAmount(b.price), 0)
@@ -1401,26 +2649,186 @@ export default function App() {
     return { vehicle, flights, accommodation, activities, food, total }
   }, [allStayActivities, bookings.flights, bookings.rentalCars, bookings.restaurants, stays, visitPlaces])
 
-  const tripsSorted = useMemo(() => [...state.trips].sort((a, b) => b.createdAt - a.createdAt), [state.trips])
+  const tripBuckets = useMemo(() => {
+    const todayIso = toIsoDate(new Date(itineraryClock))
+    const active: Trip[] = []
+    const past: Trip[] = []
+    const cancelled: Trip[] = []
+    for (const t of state.trips) {
+      if (t.cancelled) {
+        cancelled.push(t)
+        continue
+      }
+      if (t.endDate && t.endDate < todayIso) past.push(t)
+      else active.push(t)
+    }
+    active.sort((a, b) => sortKeyActiveAsc(a).localeCompare(sortKeyActiveAsc(b)))
+    past.sort((a, b) => sortKeyPastDesc(b).localeCompare(sortKeyPastDesc(a)))
+    cancelled.sort((a, b) => sortKeyCancelledDesc(b).localeCompare(sortKeyCancelledDesc(a)))
+    return { active, past, cancelled }
+  }, [state.trips, itineraryClock])
   const timelineDays = useMemo(() => {
     if (!selectedTrip?.startDate || !selectedTrip?.endDate) return []
     return enumerateStayDays(selectedTrip.startDate, selectedTrip.endDate)
   }, [selectedTrip?.endDate, selectedTrip?.startDate])
+  const tripDayCount = timelineDays.length
+  const budgetPerDay = useMemo(() => {
+    if (tripDayCount <= 0) return null
+    return {
+      vehicle: budgetTotals.vehicle / tripDayCount,
+      flights: budgetTotals.flights / tripDayCount,
+      accommodation: budgetTotals.accommodation / tripDayCount,
+      activities: budgetTotals.activities / tripDayCount,
+      food: budgetTotals.food / tripDayCount,
+      total: budgetTotals.total / tripDayCount,
+    }
+  }, [budgetTotals, tripDayCount])
   const activitiesByDay = useMemo(() => {
-    const map = new Map<string, { stayId: string; stayLocation: string; activity: StayActivity }[]>()
+    const map = new Map<string, CalendarDayItem[]>()
+    const pushDay = (dayIso: string, item: CalendarDayItem) => {
+      if (!dayIso) return
+      const list = map.get(dayIso) ?? []
+      list.push(item)
+      map.set(dayIso, list)
+    }
     for (const s of stays) {
       for (const a of s.activities ?? []) {
-        const list = map.get(a.date) ?? []
-        list.push({ stayId: s.id, stayLocation: s.location, activity: a })
-        map.set(a.date, list)
+        pushDay(a.date, { stayId: s.id, stayLocation: s.location, activity: a })
+      }
+    }
+    for (const c of bookings.rentalCars) {
+      const pickupT = (c.pickupTime ?? '').trim()
+      if (c.pickupDate && parseTimeToMinutes(pickupT) !== null) {
+        const time = normalizeHhMmTime(pickupT)
+        pushDay(c.pickupDate, {
+          stayId: CAL_BOOKING_STAY_ID,
+          stayLocation: 'Rental car',
+          bookingRef: { tab: 'rentalCar', id: c.id },
+          activity: {
+            id: `cal-rental-pick-${c.id}`,
+            date: c.pickupDate,
+            name: `Car pickup · ${c.company}`,
+            time,
+            confirmationRef: c.confirmation,
+            cost: c.price,
+            notes: c.pickupLocation || 'Pickup',
+            createdAt: c.createdAt,
+          },
+        })
+      }
+      const dropT = (c.dropoffTime ?? '').trim()
+      if (c.dropoffDate && parseTimeToMinutes(dropT) !== null) {
+        const time = normalizeHhMmTime(dropT)
+        pushDay(c.dropoffDate, {
+          stayId: CAL_BOOKING_STAY_ID,
+          stayLocation: 'Rental car',
+          bookingRef: { tab: 'rentalCar', id: c.id },
+          activity: {
+            id: `cal-rental-drop-${c.id}`,
+            date: c.dropoffDate,
+            name: `Car dropoff · ${c.company}`,
+            time,
+            confirmationRef: c.confirmation,
+            cost: c.price,
+            notes: c.dropoffLocation || 'Dropoff',
+            createdAt: c.createdAt,
+          },
+        })
+      }
+    }
+    for (const f of bookings.flights) {
+      if (!f.confirmation.trim() || !f.departDate) continue
+      const routeDisp = buildFlightRouteDisplay(f.fromIata, f.toIata, f.route).trim()
+      const airline = (f.airline ?? '').trim()
+      const titleBase = routeDisp || 'Flight'
+      const title = airline ? `${titleBase} · ${airline}` : titleBase
+
+      const depRaw = (f.departTime ?? '').trim()
+      const arrRaw = (f.arriveTime ?? '').trim()
+      const depM = parseTimeToMinutes(normalizeHhMmTime(depRaw))
+      const arrM = parseTimeToMinutes(normalizeHhMmTime(arrRaw))
+      const depTimeNorm = depM !== null ? normalizeHhMmTime(depRaw) : ''
+      const arrTimeNorm = arrM !== null ? normalizeHhMmTime(arrRaw) : ''
+
+      const arrDate = (f.arriveDate || f.departDate).trim()
+      const sameDay = arrDate === f.departDate
+
+      const fromPl = [f.fromLabel?.trim(), f.fromIata?.trim().toUpperCase()].filter(Boolean).join(' · ')
+      const toPl = [f.toLabel?.trim(), f.toIata?.trim().toUpperCase()].filter(Boolean).join(' · ')
+
+      if (sameDay) {
+        let calLabel = ''
+        if (depTimeNorm && arrTimeNorm) calLabel = `${depTimeNorm} – ${arrTimeNorm}`
+        else if (depTimeNorm) calLabel = depTimeNorm
+        else if (arrTimeNorm) calLabel = arrTimeNorm
+        const positionTime = depTimeNorm || arrTimeNorm
+        pushDay(f.departDate, {
+          stayId: CAL_BOOKING_STAY_ID,
+          stayLocation: 'Flight',
+          bookingRef: { tab: 'flight', id: f.id },
+          activity: {
+            id: `cal-flight-${f.id}`,
+            date: f.departDate,
+            name: title,
+            time: positionTime,
+            calendarTimeLabel: calLabel || undefined,
+            confirmationRef: f.confirmation,
+            cost: f.price,
+            notes: '',
+            placeLabel: fromPl || undefined,
+            createdAt: f.createdAt,
+          },
+        })
+      } else {
+        pushDay(f.departDate, {
+          stayId: CAL_BOOKING_STAY_ID,
+          stayLocation: 'Flight',
+          bookingRef: { tab: 'flight', id: f.id },
+          activity: {
+            id: `cal-flight-dep-${f.id}`,
+            date: f.departDate,
+            name: title,
+            time: depTimeNorm,
+            calendarTimeLabel: depTimeNorm ? `Dep ${depTimeNorm}` : undefined,
+            confirmationRef: f.confirmation,
+            cost: f.price,
+            notes: '',
+            placeLabel: fromPl || undefined,
+            createdAt: f.createdAt,
+          },
+        })
+        pushDay(arrDate, {
+          stayId: CAL_BOOKING_STAY_ID,
+          stayLocation: 'Flight',
+          bookingRef: { tab: 'flight', id: f.id },
+          activity: {
+            id: `cal-flight-arr-${f.id}`,
+            date: arrDate,
+            name: `Arrive · ${titleBase}`,
+            time: arrTimeNorm,
+            calendarTimeLabel: arrTimeNorm ? `Arr ${arrTimeNorm}` : undefined,
+            confirmationRef: f.confirmation,
+            cost: f.price,
+            notes: '',
+            placeLabel: toPl || undefined,
+            createdAt: f.createdAt,
+          },
+        })
       }
     }
     for (const [k, list] of map) {
-      list.sort((x, y) => (x.activity.time || '99:99').localeCompare(y.activity.time || '99:99'))
+      list.sort((x, y) => {
+        const xm = parseTimeToMinutes(x.activity.time)
+        const ym = parseTimeToMinutes(y.activity.time)
+        if (xm !== null && ym !== null) return xm - ym
+        if (xm !== null) return -1
+        if (ym !== null) return 1
+        return (x.activity.time || '').localeCompare(y.activity.time || '')
+      })
       map.set(k, list)
     }
     return map
-  }, [stays])
+  }, [stays, bookings.rentalCars, bookings.flights])
   const staysByDay = useMemo(() => {
     const map = new Map<string, Stay[]>()
     for (const day of timelineDays) {
@@ -1428,6 +2836,15 @@ export default function App() {
     }
     return map
   }, [stays, timelineDays])
+
+
+  const visibleCalendarDays = useMemo(
+    () => timelineDays.slice(calendarWeekStartIndex, calendarWeekStartIndex + 7),
+    [timelineDays, calendarWeekStartIndex],
+  )
+  const calendarMaxStart = Math.max(0, timelineDays.length - 7)
+  const canPrevCalendar = calendarWeekStartIndex > 0
+  const canNextCalendar = calendarWeekStartIndex < calendarMaxStart
   const placeSearch = usePlaceSuggestions(placeSearchInput)
   const normalizeRecommendationLabel = (label: string) => label.split(',')[0]?.trim().toLowerCase() || label.trim().toLowerCase()
   const plannedActivityNames = useMemo(() => new Set(stays.flatMap((s) => (s.activities ?? []).map((a) => a.name.trim().toLowerCase())).filter(Boolean)), [stays])
@@ -1458,7 +2875,10 @@ export default function App() {
     const idx = timelineDays.indexOf(selectedTimelineDate)
     return idx >= 0 ? idx + 1 : null
   }, [selectedTimelineDate, timelineDays])
-  const selectedDayActivities = useMemo(() => activitiesByDay.get(selectedTimelineDate) ?? [], [activitiesByDay, selectedTimelineDate])
+  const selectedDayActivities = useMemo(
+    () => activitiesByDay.get(selectedTimelineDate) ?? EMPTY_CALENDAR_DAY_ITEMS,
+    [activitiesByDay, selectedTimelineDate],
+  )
   const selectedDayRecommendationSeeds = useMemo(() => {
     if (!selectedTrip || !selectedTimelineDate) return []
     const staySeeds: string[] = []
@@ -1513,30 +2933,53 @@ export default function App() {
   const visibleSelectedDayRecommendations = dayRecommendationRadius.selected
   const activityPlaceSearch = usePlaceSuggestions(activityPlaceSearchInput)
   const homeSearch = useDestinationSuggestions(newTripDestination)
-  const mapPoints = useMemo<MapPoint[]>(() => {
-    const out: MapPoint[] = []
-    for (const s of stays) {
-      out.push({
-        key: `stay:${s.id}`,
-        label: s.location,
-        kind: 'stay',
-        addressHint: s.address || s.location,
-        startDate: s.startDate,
-        endDate: s.endDate,
+  const mapPoints = useMemo(
+    () =>
+      buildMapPointsFromTrip(
+        stays,
+        visitPlaces,
+        bookings.flights,
+        bookings.rentalCars,
+        bookings.restaurants,
+        selectedTrip?.country ?? '',
+      ),
+    [stays, visitPlaces, bookings.flights, bookings.rentalCars, bookings.restaurants, selectedTrip?.country],
+  )
+  const mapCameraFingerprint = useMemo(() => {
+    const pts = mapPoints.map((p) => `${p.key}|${p.lat ?? ''}|${p.lon ?? ''}`).join(';')
+    const coords = Object.keys(resolvedPointCoords)
+      .sort()
+      .map((k) => {
+        const c = resolvedPointCoords[k]
+        return `${k}:${c.lat}:${c.lon}`
       })
-    }
-    for (const p of visitPlaces) {
-      out.push({
-        key: `place:${p.id}`,
-        label: p.label,
-        kind: 'place',
-        lat: p.lat,
-        lon: p.lon,
+      .join('|')
+    return `${selectedTrip?.id ?? ''}|${selectedTrip?.endDate ?? ''}|${pts}|${coords}`
+  }, [selectedTrip?.id, selectedTrip?.endDate, mapPoints, resolvedPointCoords])
+  const todayIso = useMemo(() => toIsoDate(new Date(itineraryClock)), [itineraryClock])
+  const nowMinutes = useMemo(() => {
+    const d = new Date(itineraryClock)
+    return d.getHours() * 60 + d.getMinutes()
+  }, [itineraryClock])
+  const activeSoonItem = useMemo((): CalendarDayItem | null => {
+    if (!selectedTimelineDate || selectedTimelineDate !== todayIso) return null
+    /** Next event must start within this many minutes (inclusive of its start minute). */
+    const soonEnd = nowMinutes + 30
+    const items = activitiesByDay.get(selectedTimelineDate) ?? []
+    const candidates = items
+      .filter(({ activity: a }) => {
+        const m = parseTimeToMinutes(a.time)
+        if (m === null) return false
+        return m >= nowMinutes && m <= soonEnd
       })
-    }
-    return out
-  }, [stays, visitPlaces])
-  const todayIso = useMemo(() => toIsoDate(startOfToday()), [])
+      .sort((x, y) => (parseTimeToMinutes(x.activity.time) ?? 0) - (parseTimeToMinutes(y.activity.time) ?? 0))
+    return candidates[0] ?? null
+  }, [selectedTimelineDate, todayIso, nowMinutes, activitiesByDay])
+  const activeSoonActivity = activeSoonItem?.activity ?? null
+  const activeSoonDirectionsDestination = useMemo(
+    () => directionsDestinationForScheduleItem(activeSoonItem ?? undefined),
+    [activeSoonItem],
+  )
   const currentStay = useMemo(
     () => stays.find((s) => s.startDate && s.endDate && s.startDate <= todayIso && todayIso < s.endDate) ?? null,
     [stays, todayIso],
@@ -1551,6 +2994,32 @@ export default function App() {
     const clamped = Math.min(totalDays, Math.max(0, elapsedDays))
     return Math.round((clamped / totalDays) * 100)
   }, [selectedTrip?.endDate, selectedTrip?.startDate])
+  const sideQuestCountdown = useMemo(() => {
+    const now = new Date(itineraryClock)
+    const start = parseIsoDate(selectedTrip?.startDate)
+    const end = parseIsoDate(selectedTrip?.endDate)
+    if (!start || !end) {
+      return { title: 'Countdown unavailable', subtitle: 'Set trip start and end dates to show countdown.' }
+    }
+    const endExclusive = new Date(end)
+    endExclusive.setDate(endExclusive.getDate() + 1)
+    if (now < start) {
+      return {
+        title: 'Trip starts in',
+        subtitle: formatCountdownDuration(now, start),
+      }
+    }
+    if (now < endExclusive) {
+      return {
+        title: 'Trip ends in',
+        subtitle: formatCountdownDuration(now, endExclusive),
+      }
+    }
+    return {
+      title: 'Trip ended',
+      subtitle: formatSingleDateLabel(selectedTrip?.endDate || ''),
+    }
+  }, [itineraryClock, selectedTrip?.startDate, selectedTrip?.endDate])
   const showSideGoalsRail = activeTab === 'planner'
 
   useEffect(() => {
@@ -1562,11 +3031,25 @@ export default function App() {
   }, [newTripDestination, showHomeSuggestions])
 
   useEffect(() => {
-    cancelBookingEdit()
+    setBookingError(null)
     if (bookingsTab !== 'accommodation') {
       setStayError(null)
     }
   }, [bookingsTab])
+
+  useEffect(() => {
+    setState((prev) => {
+      let changed = false
+      const trips = prev.trips.map((trip) => {
+        const filtered = trip.bookings.accommodations.filter((x) => x.confirmation.trim().length > 0)
+        const filteredStays = trip.stays.filter((s) => s.confirmationRef.trim().length > 0)
+        if (filtered.length === trip.bookings.accommodations.length && filteredStays.length === trip.stays.length) return trip
+        changed = true
+        return { ...trip, stays: filteredStays, bookings: { ...trip.bookings, accommodations: filtered } }
+      })
+      return changed ? { ...prev, trips } : prev
+    })
+  }, [])
 
   useEffect(() => {
     setTripStartDateInput(selectedTrip?.startDate ?? '')
@@ -1590,6 +3073,16 @@ export default function App() {
     }
     setSelectedTimelineDate((prev) => (prev && timelineDays.includes(prev) ? prev : first))
   }, [selectedTrip?.id, timelineDays])
+
+  useEffect(() => {
+    setCalendarWeekStartIndex(0)
+    setCalendarDropError(null)
+  }, [selectedTrip?.id])
+
+  useEffect(() => {
+    const maxStart = Math.max(0, timelineDays.length - 7)
+    setCalendarWeekStartIndex((i) => Math.min(i, maxStart))
+  }, [timelineDays.length])
 
   useEffect(() => {
     setActivityDrafts({})
@@ -1753,7 +3246,32 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [activeTab, mapPoints, resolvedPointCoords, selectedTrip, stays, visitPlaces])
+  }, [activeTab, mapPoints, resolvedPointCoords, selectedTrip])
+
+  /** Map tab unmounts the container when switching tabs; the old Map must be dropped or it stays bound to a detached DOM node and the map appears blank when returning. */
+  useEffect(() => {
+    if (activeTab === 'map') return
+    for (const m of mapMarkersRef.current) {
+      if (m && 'map' in m) (m as any).map = null
+      else if (m && typeof (m as any).setMap === 'function') (m as any).setMap(null)
+    }
+    mapMarkersRef.current = []
+    if (mapPolylineOutboundRef.current) {
+      mapPolylineOutboundRef.current.setMap(null)
+      mapPolylineOutboundRef.current = null
+    }
+    if (mapPolylineReturnRef.current) {
+      mapPolylineReturnRef.current.setMap(null)
+      mapPolylineReturnRef.current = null
+    }
+    mapInstanceRef.current = null
+  }, [activeTab])
+
+  useEffect(() => {
+    if (activeTab !== 'map') {
+      mapCameraFingerprintAppliedRef.current = null
+    }
+  }, [activeTab])
 
   useEffect(() => {
     if (activeTab !== 'map' || !mapApiLoaded || !mapContainerRef.current) return
@@ -1781,10 +3299,34 @@ export default function App() {
       })
       .filter((p): p is MapPoint & { lat: number; lon: number } => Boolean(p))
 
+    const visibleResolved = resolved.filter((p) => mapCategoryVisible[p.category])
+
+    const coordByKey = new Map(resolved.map((p) => [p.key, { lat: p.lat, lng: p.lon }] as const))
+    const routeEvents = buildRouteEvents(
+      stays,
+      visitPlaces,
+      bookings.flights,
+      bookings.rentalCars,
+      bookings.restaurants,
+      selectedTrip?.country ?? '',
+      { ...mapCategoryVisible, accommodation: true, flight: true },
+    )
+    const routePointsWithTs = buildRoutePointsWithTs(
+      routeEvents.map((e) => ({ ts: e.ts, key: e.key })),
+      coordByKey,
+    )
+    const returnThreshold = resolveReturnThresholdTs(bookings.flights, selectedTrip?.endDate)
+    const { outbound: outboundPath, ret: returnPath } = splitOutboundReturnPath(routePointsWithTs, returnThreshold)
+    const routePointsFlat = [...outboundPath, ...returnPath]
+    const centerPoint =
+      visibleResolved[0] != null
+        ? { lat: visibleResolved[0].lat, lng: visibleResolved[0].lon }
+        : routePointsFlat[0] ?? (resolved[0] ? { lat: resolved[0].lat, lng: resolved[0].lon } : null)
+
     if (!mapInstanceRef.current) {
       mapInstanceRef.current = new g.maps.Map(mapContainerRef.current, {
-        center: resolved[0] ? { lat: resolved[0].lat, lng: resolved[0].lon } : { lat: 0, lng: 0 },
-        zoom: resolved.length > 0 ? 6 : 2,
+        center: centerPoint ?? { lat: 0, lng: 0 },
+        zoom: routePointsFlat.length > 0 || resolved.length > 0 ? 6 : 2,
         mapId: GOOGLE_MAPS_MAP_ID,
         mapTypeControl: false,
         streetViewControl: false,
@@ -1798,14 +3340,9 @@ export default function App() {
     }
     mapMarkersRef.current = []
 
-    const bounds = new g.maps.LatLngBounds()
-    for (const p of resolved) {
-      const markerContent = document.createElement('div')
-      markerContent.className =
-        p.kind === 'stay'
-          ? 'h-7 w-7 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center shadow'
-          : 'h-7 w-7 rounded-full bg-emerald-600 text-white text-[11px] font-bold flex items-center justify-center shadow'
-      markerContent.textContent = p.kind === 'stay' ? 'S' : 'P'
+    const markerBounds = new g.maps.LatLngBounds()
+    for (const p of visibleResolved) {
+      const markerContent = createMapMarkerContent(p.markerKind)
       const marker = new AdvancedMarker({
         map,
         position: { lat: p.lat, lng: p.lon } as any,
@@ -1813,38 +3350,86 @@ export default function App() {
         content: markerContent,
       })
       mapMarkersRef.current.push(marker)
-      bounds.extend({ lat: p.lat, lng: p.lon })
+      markerBounds.extend({ lat: p.lat, lng: p.lon })
     }
 
-    if (mapPolylineRef.current) {
-      mapPolylineRef.current.setMap(null)
-      mapPolylineRef.current = null
+    if (mapPolylineOutboundRef.current) {
+      mapPolylineOutboundRef.current.setMap(null)
+      mapPolylineOutboundRef.current = null
     }
-    const stayPath = stays
-      .map((s) => {
-        const key = `stay:${s.id}`
-        const point = resolved.find((r) => r.key === key)
-        return point ? { lat: point.lat, lng: point.lon } : null
-      })
-      .filter((x): x is { lat: number; lng: number } => Boolean(x))
-    if (stayPath.length >= 2) {
-      mapPolylineRef.current = new g.maps.Polyline({
+    if (mapPolylineReturnRef.current) {
+      mapPolylineReturnRef.current.setMap(null)
+      mapPolylineReturnRef.current = null
+    }
+
+    if (outboundPath.length >= 2) {
+      mapPolylineOutboundRef.current = new g.maps.Polyline({
         map,
-        path: stayPath,
+        path: outboundPath,
         geodesic: true,
         strokeColor: '#2563eb',
         strokeOpacity: 0.85,
         strokeWeight: 4,
       })
     }
-
-    if (resolved.length > 1) {
-      map.fitBounds(bounds, 50)
-    } else if (resolved[0]) {
-      map.setCenter({ lat: resolved[0].lat, lng: resolved[0].lon })
-      map.setZoom(10)
+    if (returnPath.length >= 2) {
+      mapPolylineReturnRef.current = new g.maps.Polyline({
+        map,
+        path: returnPath,
+        geodesic: true,
+        strokeOpacity: 0,
+        icons: [
+          {
+            icon: {
+              path: 'M 0,-1 0,1',
+              strokeOpacity: 1,
+              scale: 3,
+              strokeColor: '#78716c',
+            },
+            offset: '0',
+            repeat: '14px',
+          },
+        ],
+      })
     }
-  }, [activeTab, mapApiLoaded, mapPoints, resolvedPointCoords, stays])
+
+    const routeBounds = new g.maps.LatLngBounds()
+    for (const pt of routePointsFlat) routeBounds.extend(pt)
+    const uniqueRoutePts = Array.from(
+      new Map(routePointsFlat.map((p) => [`${p.lat.toFixed(5)}:${p.lng.toFixed(5)}`, p])).values(),
+    )
+    if (mapCameraFingerprint !== mapCameraFingerprintAppliedRef.current) {
+      mapCameraFingerprintAppliedRef.current = mapCameraFingerprint
+      if (visibleResolved.length > 1) {
+        map.fitBounds(markerBounds, 50)
+      } else if (visibleResolved.length === 1) {
+        map.setCenter({ lat: visibleResolved[0].lat, lng: visibleResolved[0].lon })
+        map.setZoom(10)
+      } else if (uniqueRoutePts.length > 1) {
+        map.fitBounds(routeBounds, 50)
+      } else if (uniqueRoutePts.length === 1) {
+        map.setCenter(uniqueRoutePts[0])
+        map.setZoom(10)
+      } else if (resolved[0]) {
+        map.setCenter({ lat: resolved[0].lat, lng: resolved[0].lon })
+        map.setZoom(4)
+      }
+    }
+  }, [
+    activeTab,
+    mapApiLoaded,
+    mapCameraFingerprint,
+    mapPoints,
+    resolvedPointCoords,
+    stays,
+    visitPlaces,
+    bookings.flights,
+    bookings.rentalCars,
+    bookings.restaurants,
+    selectedTrip?.country,
+    selectedTrip?.endDate,
+    mapCategoryVisible,
+  ])
 
   const createTrip = (country: string, startDate = '', endDate = '') => {
     const c = country.trim()
@@ -1854,6 +3439,7 @@ export default function App() {
       country: c,
       startDate,
       endDate,
+      cancelled: false,
       createdAt: Date.now(),
       mustDos: [],
       packList: [],
@@ -1917,20 +3503,38 @@ export default function App() {
   const autofillFlightFromText = () => {
     const text = flightQuickInput.trim()
     if (!text) return
-    const routeMatch = text.match(/([A-Za-z]{3}\s*(?:->|to|-)\s*[A-Za-z]{3})/)
+    const m = text.match(/\b([A-Za-z]{3})\s*(?:->|to|-|—|–)\s*([A-Za-z]{3})\b/i)
+    const parsed = m ? { from: m[1].toUpperCase(), to: m[2].toUpperCase() } : parseLegacyFlightRoute(text)
     const confMatch = text.match(/(?:confirmation|booking|pnr)\s*[:#]?\s*([A-Z0-9-]{5,})/i)
     const priceMatch = text.match(/([$€£]\s?\d[\d,]*(?:\.\d{2})?|\d[\d,]*(?:\.\d{2})?\s?(?:usd|eur|gbp))/i)
-    if (routeMatch && !flightRouteInput) setFlightRouteInput(routeMatch[1].replace(/\s+/g, ' '))
+    if (parsed.from && !flightFromIata) {
+      setFlightFromIata(parsed.from)
+      const a = getAirportByIata(parsed.from)
+      setFlightFromLabel(a ? formatAirportOptionLabel(a) : parsed.from)
+    }
+    if (parsed.to && !flightToIata) {
+      setFlightToIata(parsed.to)
+      const a = getAirportByIata(parsed.to)
+      setFlightToLabel(a ? formatAirportOptionLabel(a) : parsed.to)
+    }
     if (confMatch && !flightConfirmationInput) setFlightConfirmationInput(confMatch[1])
     if (priceMatch && !flightPriceInput) setFlightPriceInput(priceMatch[1])
   }
 
   const addBooking = () => {
-    if (!state.selectedTripId) return
+    if (!state.selectedTripId) return false
     setBookingError(null)
     if (bookingsTab === 'rentalCar') {
       const company = carCompanyInput.trim()
-      if (!company) return setBookingError('Car company is required.')
+      const confirmation = carConfirmationInput.trim()
+      if (!company) {
+        setBookingError('Car company is required.')
+        return false
+      }
+      if (!confirmation) {
+        setBookingError('Booking confirmation number is required.')
+        return false
+      }
       setState((prev) => ({
         ...prev,
         trips: prev.trips.map((t) =>
@@ -1947,8 +3551,10 @@ export default function App() {
                       pickupLocation: carPickupLocationInput.trim(),
                       dropoffLocation: carDropoffLocationInput.trim(),
                       pickupDate: carPickupInput,
+                      pickupTime: carPickupTimeInput.trim(),
                       dropoffDate: carDropoffInput,
-                      confirmation: carConfirmationInput.trim(),
+                      dropoffTime: carDropoffTimeInput.trim(),
+                      confirmation,
                       price: carPriceInput.trim(),
                       createdAt: Date.now(),
                     },
@@ -1962,14 +3568,29 @@ export default function App() {
       setCarPickupLocationInput('')
       setCarDropoffLocationInput('')
       setCarPickupInput('')
+      setCarPickupTimeInput('')
       setCarDropoffInput('')
+      setCarDropoffTimeInput('')
       setCarConfirmationInput('')
       setCarPriceInput('')
-      return
+      return true
     }
     if (bookingsTab === 'flight') {
-      const route = flightRouteInput.trim()
-      if (!route) return setBookingError('Flight route is required.')
+      const from = flightFromIata.trim().toUpperCase()
+      const to = flightToIata.trim().toUpperCase()
+      const confirmation = flightConfirmationInput.trim()
+      if (!/^[A-Z]{3}$/.test(from) || !/^[A-Z]{3}$/.test(to)) {
+        setBookingError('Select departure and arrival airports (search and pick a row to set IATA codes).')
+        return false
+      }
+      if (!confirmation) {
+        setBookingError('Booking confirmation number is required.')
+        return false
+      }
+      const route = buildFlightRouteDisplay(from, to, '')
+      const departTime = normalizeHhMmTime(flightDepartTimeInput)
+      const arriveTime = normalizeHhMmTime(flightArriveTimeInput)
+      const arriveDate = flightArriveDateInput.trim() || flightDepartInput
       setState((prev) => ({
         ...prev,
         trips: prev.trips.map((t) =>
@@ -1983,9 +3604,20 @@ export default function App() {
                     {
                       id: uid(),
                       route,
+                      fromIata: from,
+                      toIata: to,
+                      fromLabel: flightFromLabel.trim(),
+                      toLabel: flightToLabel.trim(),
+                      airline: flightAirlineInput.trim(),
                       departDate: flightDepartInput,
+                      departTime,
+                      arriveDate,
+                      arriveTime,
                       returnDate: '',
-                      confirmation: flightConfirmationInput.trim(),
+                      checkedBags: Math.min(9, Math.max(0, flightCheckedBags)),
+                      carryOnBags: Math.min(9, Math.max(0, flightCarryOnBags)),
+                      personalItem: flightPersonalItem,
+                      confirmation,
                       price: flightPriceInput.trim(),
                       createdAt: Date.now(),
                     },
@@ -1995,16 +3627,34 @@ export default function App() {
             : t,
         ),
       }))
-      setFlightRouteInput('')
+      setFlightFromIata('')
+      setFlightFromLabel('')
+      setFlightToIata('')
+      setFlightToLabel('')
+      setFlightAirlineInput('')
       setFlightDepartInput('')
+      setFlightDepartTimeInput('')
+      setFlightArriveDateInput('')
+      setFlightArriveTimeInput('')
+      setFlightCheckedBags(1)
+      setFlightCarryOnBags(1)
+      setFlightPersonalItem(true)
       setFlightConfirmationInput('')
       setFlightPriceInput('')
       setFlightQuickInput('')
-      return
+      return true
     }
     if (bookingsTab === 'restaurant') {
       const name = restaurantNameInput.trim()
-      if (!name) return setBookingError('Restaurant name is required.')
+      const confirmation = restaurantConfirmationInput.trim()
+      if (!name) {
+        setBookingError('Restaurant name is required.')
+        return false
+      }
+      if (!confirmation) {
+        setBookingError('Booking confirmation number is required.')
+        return false
+      }
       setState((prev) => ({
         ...prev,
         trips: prev.trips.map((t) =>
@@ -2019,7 +3669,7 @@ export default function App() {
                       id: uid(),
                       name,
                       reservationDate: restaurantDateInput,
-                      confirmation: restaurantConfirmationInput.trim(),
+                      confirmation,
                       cost: restaurantCostInput.trim(),
                       notes: restaurantNotesInput.trim(),
                       createdAt: Date.now(),
@@ -2035,9 +3685,10 @@ export default function App() {
       setRestaurantConfirmationInput('')
       setRestaurantCostInput('')
       setRestaurantNotesInput('')
-      return
+      return true
     }
     setBookingError('Accommodation details are managed in the Trip stays card.')
+    return false
   }
 
   const removeBooking = (tab: BookingTab, id: string) => {
@@ -2060,17 +3711,274 @@ export default function App() {
       ...prev,
       trips: prev.trips.map((t) => {
         if (t.id !== prev.selectedTripId) return t
-        if (tab === 'rentalCar') {
-          return { ...t, bookings: { ...t.bookings, rentalCars: t.bookings.rentalCars.map((x) => (x.id === id ? updater(x) : x)) } }
-        }
-        if (tab === 'flight') {
-          return { ...t, bookings: { ...t.bookings, flights: t.bookings.flights.map((x) => (x.id === id ? updater(x) : x)) } }
-        }
-        if (tab === 'restaurant') {
-          return { ...t, bookings: { ...t.bookings, restaurants: t.bookings.restaurants.map((x) => (x.id === id ? updater(x) : x)) } }
-        }
-        return { ...t, bookings: { ...t.bookings, accommodations: t.bookings.accommodations.map((x) => (x.id === id ? updater(x) : x)) } }
+        if (tab === 'rentalCar') return { ...t, bookings: { ...t.bookings, rentalCars: t.bookings.rentalCars.map((x) => (x.id === id ? updater(x) : x)) } }
+        if (tab === 'flight') return { ...t, bookings: { ...t.bookings, flights: t.bookings.flights.map((x) => (x.id === id ? updater(x) : x)) } }
+        if (tab === 'restaurant') return { ...t, bookings: { ...t.bookings, restaurants: t.bookings.restaurants.map((x) => (x.id === id ? updater(x) : x)) } }
+        return t
       }),
+    }))
+  }
+
+  const openEditBookingForm = (tab: BookingTab, id: string) => {
+    if (tab === 'rentalCar') {
+      const b = bookings.rentalCars.find((x) => x.id === id)
+      if (!b) return
+      setCarCompanyInput(b.company)
+      setCarPickupLocationInput(b.pickupLocation)
+      setCarDropoffLocationInput(b.dropoffLocation)
+      setCarPickupInput(b.pickupDate)
+      setCarPickupTimeInput(b.pickupTime ?? '')
+      setCarDropoffInput(b.dropoffDate)
+      setCarDropoffTimeInput(b.dropoffTime ?? '')
+      setCarConfirmationInput(b.confirmation)
+      setCarPriceInput(b.price)
+    } else if (tab === 'flight') {
+      const b = bookings.flights.find((x) => x.id === id)
+      if (!b) return
+      let fi = b.fromIata
+      let fl = b.fromLabel
+      let ti = b.toIata
+      let tl = b.toLabel
+      if (!fi || !ti) {
+        const p = parseLegacyFlightRoute(b.route)
+        if (p.from && !fi) {
+          fi = p.from
+          const a = getAirportByIata(p.from)
+          fl = a ? formatAirportOptionLabel(a) : p.from
+        }
+        if (p.to && !ti) {
+          ti = p.to
+          const a = getAirportByIata(p.to)
+          tl = a ? formatAirportOptionLabel(a) : p.to
+        }
+      }
+      setFlightFromIata(fi)
+      setFlightFromLabel(fl)
+      setFlightToIata(ti)
+      setFlightToLabel(tl)
+      setFlightAirlineInput(b.airline ?? '')
+      setFlightDepartInput(b.departDate)
+      setFlightDepartTimeInput(b.departTime ?? '')
+      setFlightArriveDateInput(b.arriveDate ?? '')
+      setFlightArriveTimeInput(b.arriveTime ?? '')
+      setFlightCheckedBags(b.checkedBags ?? 0)
+      setFlightCarryOnBags(b.carryOnBags ?? 0)
+      setFlightPersonalItem(b.personalItem ?? false)
+      setFlightConfirmationInput(b.confirmation)
+      setFlightPriceInput(b.price)
+      setFlightQuickInput('')
+    } else if (tab === 'restaurant') {
+      const b = bookings.restaurants.find((x) => x.id === id)
+      if (!b) return
+      setRestaurantNameInput(b.name)
+      setRestaurantDateInput(b.reservationDate)
+      setRestaurantConfirmationInput(b.confirmation)
+      setRestaurantCostInput(b.cost)
+      setRestaurantNotesInput(b.notes)
+    }
+    setBookingError(null)
+    setEditingBookingForm({ tab, id })
+    setEditingStayId(null)
+    setIsBookingFormOpen(true)
+  }
+
+  const openEditStayForm = (stayId: string) => {
+    const s = stays.find((x) => x.id === stayId)
+    if (!s) return
+    setStayLocationInput(s.location)
+    setStayAddressInput(s.address)
+    setStayStartDate(s.startDate)
+    setStayEndDate(s.endDate)
+    setStayCheckInTimeInput(s.checkInTime ?? '')
+    setStayCheckOutTimeInput(s.checkOutTime ?? '')
+    setStayPriceInput(s.price)
+    setStayBookingUrlInput(s.bookingUrl)
+    setStayConfirmationRefInput(s.confirmationRef)
+    setStayError(null)
+    setBookingError(null)
+    setBookingsTab('accommodation')
+    setEditingBookingForm(null)
+    setEditingStayId(stayId)
+    setIsBookingFormOpen(true)
+  }
+
+  const resetBookingFormInputs = () => {
+    setCarCompanyInput('')
+    setCarPickupLocationInput('')
+    setCarDropoffLocationInput('')
+    setCarPickupInput('')
+    setCarPickupTimeInput('')
+    setCarDropoffInput('')
+    setCarDropoffTimeInput('')
+    setCarConfirmationInput('')
+    setCarPriceInput('')
+    setFlightFromIata('')
+    setFlightFromLabel('')
+    setFlightToIata('')
+    setFlightToLabel('')
+    setFlightAirlineInput('')
+    setFlightDepartInput('')
+    setFlightDepartTimeInput('')
+    setFlightArriveDateInput('')
+    setFlightArriveTimeInput('')
+    setFlightCheckedBags(1)
+    setFlightCarryOnBags(1)
+    setFlightPersonalItem(true)
+    setFlightConfirmationInput('')
+    setFlightPriceInput('')
+    setFlightQuickInput('')
+    setRestaurantNameInput('')
+    setRestaurantDateInput('')
+    setRestaurantConfirmationInput('')
+    setRestaurantCostInput('')
+    setRestaurantNotesInput('')
+    setStayLocationInput('')
+    setStayAddressInput('')
+    setStayStartDate('')
+    setStayEndDate('')
+    setStayCheckInTimeInput('')
+    setStayCheckOutTimeInput('')
+    setStayPriceInput('')
+    setStayBookingUrlInput('')
+    setStayConfirmationRefInput('')
+    setBookingError(null)
+    setStayError(null)
+  }
+
+  const saveBookingFormEdit = () => {
+    if (!editingBookingForm) return false
+    setBookingError(null)
+    if (editingBookingForm.tab === 'rentalCar') {
+      const company = carCompanyInput.trim()
+      if (!company) {
+        setBookingError('Car company is required.')
+        return false
+      }
+      updateBooking('rentalCar', editingBookingForm.id, (x: CarBooking) => ({
+        ...x,
+        company,
+        pickupLocation: carPickupLocationInput.trim(),
+        dropoffLocation: carDropoffLocationInput.trim(),
+        pickupDate: carPickupInput,
+        pickupTime: carPickupTimeInput.trim(),
+        dropoffDate: carDropoffInput,
+        dropoffTime: carDropoffTimeInput.trim(),
+        confirmation: carConfirmationInput.trim(),
+        price: carPriceInput.trim(),
+      }))
+      return true
+    }
+    if (editingBookingForm.tab === 'flight') {
+      const from = flightFromIata.trim().toUpperCase()
+      const to = flightToIata.trim().toUpperCase()
+      if (!/^[A-Z]{3}$/.test(from) || !/^[A-Z]{3}$/.test(to)) {
+        setBookingError('Select departure and arrival airports (search and pick a row to set IATA codes).')
+        return false
+      }
+      const route = buildFlightRouteDisplay(from, to, '')
+      const departTime = normalizeHhMmTime(flightDepartTimeInput)
+      const arriveTime = normalizeHhMmTime(flightArriveTimeInput)
+      const arriveDate = flightArriveDateInput.trim() || flightDepartInput
+      updateBooking('flight', editingBookingForm.id, (x: FlightBooking) => ({
+        ...x,
+        route,
+        fromIata: from,
+        toIata: to,
+        fromLabel: flightFromLabel.trim(),
+        toLabel: flightToLabel.trim(),
+        airline: flightAirlineInput.trim(),
+        departDate: flightDepartInput,
+        departTime,
+        arriveDate,
+        arriveTime,
+        returnDate: '',
+        checkedBags: Math.min(9, Math.max(0, flightCheckedBags)),
+        carryOnBags: Math.min(9, Math.max(0, flightCarryOnBags)),
+        personalItem: flightPersonalItem,
+        confirmation: flightConfirmationInput.trim(),
+        price: flightPriceInput.trim(),
+      }))
+      return true
+    }
+    if (editingBookingForm.tab === 'restaurant') {
+      const name = restaurantNameInput.trim()
+      if (!name) {
+        setBookingError('Restaurant name is required.')
+        return false
+      }
+      updateBooking('restaurant', editingBookingForm.id, (x: RestaurantBooking) => ({
+        ...x,
+        name,
+        reservationDate: restaurantDateInput,
+        confirmation: restaurantConfirmationInput.trim(),
+        cost: restaurantCostInput.trim(),
+        notes: restaurantNotesInput.trim(),
+      }))
+      return true
+    }
+    return false
+  }
+
+  const saveStayFormEdit = () => {
+    if (!editingStayId || !state.selectedTripId || !selectedTrip) return false
+    const location = stayLocationInput.trim()
+    const confirmationRef = stayConfirmationRefInput.trim()
+    if (!location || !stayStartDate || !stayEndDate) {
+      setStayError('Please enter location, check-in, and check-out dates.')
+      return false
+    }
+    if (!confirmationRef) {
+      setStayError('Booking confirmation number is required.')
+      return false
+    }
+    if (stayEndDate < stayStartDate) {
+      setStayError('Check-out date cannot be before check-in.')
+      return false
+    }
+    if (selectedTrip.startDate && stayStartDate < selectedTrip.startDate) {
+      setStayError(`Stay starts before trip starts (${selectedTrip.startDate}).`)
+      return false
+    }
+    if (selectedTrip.endDate && stayEndDate > selectedTrip.endDate) {
+      setStayError(`Stay ends after trip ends (${selectedTrip.endDate}).`)
+      return false
+    }
+    setState((prev) => ({
+      ...prev,
+      trips: prev.trips.map((trip) =>
+        trip.id !== prev.selectedTripId
+          ? trip
+          : {
+              ...trip,
+              stays: trip.stays.map((s) =>
+                s.id !== editingStayId
+                  ? s
+                  : {
+                      ...s,
+                      location,
+                      address: stayAddressInput.trim(),
+                      startDate: stayStartDate,
+                      endDate: stayEndDate,
+                      checkInTime: stayCheckInTimeInput.trim(),
+                      checkOutTime: stayCheckOutTimeInput.trim(),
+                      price: stayPriceInput.trim(),
+                      bookingUrl: stayBookingUrlInput.trim() ? normalizeBookingUrl(stayBookingUrlInput) : '',
+                      confirmationRef,
+                    },
+              ),
+            },
+      ),
+    }))
+    return true
+  }
+
+  const removeStay = (stayId: string) => {
+    if (!state.selectedTripId) return
+    setState((prev) => ({
+      ...prev,
+      trips: prev.trips.map((trip) =>
+        trip.id !== prev.selectedTripId ? trip : { ...trip, stays: trip.stays.filter((s) => s.id !== stayId) },
+      ),
     }))
   }
 
@@ -2163,6 +4071,7 @@ export default function App() {
                       date: targetDate,
                       name: rec.label,
                       time: '',
+                      confirmationRef: '',
                       cost: '',
                       notes: '',
                       photoUrl: rec.photoUrl,
@@ -2192,7 +4101,9 @@ export default function App() {
 
   const addRecommendationToSelectedDay = (rec: PlaceSuggestion) => {
     if (!state.selectedTripId || !selectedTimelineDate) return
-    const targetStay = selectedDayPrimaryStay
+    const storageStayId = resolveStayIdForActivityStorage(stays, selectedTimelineDate)
+    if (!storageStayId) return
+    const targetStay = stays.find((s) => s.id === storageStayId)
     if (!targetStay) return
     const recName = rec.label.split(',')[0]?.trim() || rec.label.trim()
     if (!recName) return
@@ -2222,6 +4133,7 @@ export default function App() {
                       date: selectedTimelineDate,
                       name: recName,
                       time: '',
+                      confirmationRef: '',
                       cost: '',
                       notes: addressHint || rec.label,
                       photoUrl: rec.photoUrl,
@@ -2324,23 +4236,28 @@ export default function App() {
   }
 
   const addStay = () => {
-    if (!state.selectedTripId || !selectedTrip) return
+    if (!state.selectedTripId || !selectedTrip) return false
     const location = stayLocationInput.trim()
+    const confirmationRef = stayConfirmationRefInput.trim()
     if (!location || !stayStartDate || !stayEndDate) {
       setStayError('Please enter location, check-in, and check-out dates.')
-      return
+      return false
+    }
+    if (!confirmationRef) {
+      setStayError('Booking confirmation number is required.')
+      return false
     }
     if (stayEndDate < stayStartDate) {
       setStayError('Check-out date cannot be before check-in.')
-      return
+      return false
     }
     if (selectedTrip.startDate && stayStartDate < selectedTrip.startDate) {
       setStayError(`Stay starts before trip starts (${selectedTrip.startDate}).`)
-      return
+      return false
     }
     if (selectedTrip.endDate && stayEndDate > selectedTrip.endDate) {
       setStayError(`Stay ends after trip ends (${selectedTrip.endDate}).`)
-      return
+      return false
     }
 
     setState((prev) => ({
@@ -2357,9 +4274,11 @@ export default function App() {
                   address: stayAddressInput.trim(),
                   startDate: stayStartDate,
                   endDate: stayEndDate,
+                  checkInTime: stayCheckInTimeInput.trim(),
+                  checkOutTime: stayCheckOutTimeInput.trim(),
                   price: stayPriceInput.trim(),
                   bookingUrl: stayBookingUrlInput.trim() ? normalizeBookingUrl(stayBookingUrlInput) : '',
-                  confirmationRef: stayConfirmationRefInput.trim(),
+                  confirmationRef,
                   activities: [],
                   createdAt: Date.now(),
                 },
@@ -2373,9 +4292,12 @@ export default function App() {
     setStayAddressInput('')
     setStayStartDate('')
     setStayEndDate('')
+    setStayCheckInTimeInput('')
+    setStayCheckOutTimeInput('')
     setStayPriceInput('')
     setStayBookingUrlInput('')
     setStayConfirmationRefInput('')
+    return true
   }
 
   const addStayActivity = (stayId: string, date: string) => {
@@ -2403,6 +4325,7 @@ export default function App() {
                       date,
                       name,
                       time: draft?.time ?? '',
+                      confirmationRef: (draft?.confirmationRef ?? '').trim() || (stays.find((x) => x.id === stayId)?.confirmationRef ?? '').trim(),
                       cost: draft?.cost ?? '',
                       notes: draft?.notes ?? '',
                       photoUrl: selectedMeta?.photoUrl,
@@ -2420,7 +4343,7 @@ export default function App() {
         }
       }),
     }))
-    setActivityDrafts((prev) => ({ ...prev, [draftKey]: { name: '', time: '', cost: '', notes: '' } }))
+    setActivityDrafts((prev) => ({ ...prev, [draftKey]: { name: '', time: '', confirmationRef: '', cost: '', notes: '' } }))
     setActivityPlaceSearchInput('')
     if (selectedMeta) {
       setActivityMetaById((prev) => ({
@@ -2455,6 +4378,52 @@ export default function App() {
     }))
   }
 
+  const moveStayActivityBetweenStays = (activityId: string, fromStayId: string, toStayId: string, patch: Partial<StayActivity>) => {
+    if (!state.selectedTripId || fromStayId === toStayId) return
+    setState((prev) => {
+      const trip = prev.trips.find((t) => t.id === prev.selectedTripId)
+      if (!trip) return prev
+      let moved: StayActivity | null = null
+      const without = trip.stays.map((s) => {
+        if (s.id !== fromStayId) return s
+        const act = (s.activities ?? []).find((a) => a.id === activityId)
+        if (!act) return s
+        moved = { ...act, ...patch }
+        return { ...s, activities: (s.activities ?? []).filter((a) => a.id !== activityId) }
+      })
+      if (!moved) return prev
+      return {
+        ...prev,
+        trips: prev.trips.map((t) => {
+          if (t.id !== prev.selectedTripId) return t
+          return {
+            ...t,
+            stays: without.map((s) => {
+              if (s.id !== toStayId) return s
+              const next = [...(s.activities ?? []), moved!]
+              next.sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'))
+              return { ...s, activities: next }
+            }),
+          }
+        }),
+      }
+    })
+  }
+
+  const applyCalendarDrop = (fromStayId: string, activityId: string, targetDayIso: string, newTime: string) => {
+    const targetStayId = resolveStayIdForActivityStorage(stays, targetDayIso)
+    if (!targetStayId) {
+      setCalendarDropError('Add at least one accommodation on the trip before scheduling activities.')
+      return
+    }
+    setCalendarDropError(null)
+    if (fromStayId === targetStayId) {
+      updateStayActivity(fromStayId, activityId, { date: targetDayIso, time: newTime })
+      return
+    }
+    moveStayActivityBetweenStays(activityId, fromStayId, targetStayId, { date: targetDayIso, time: newTime })
+  }
+
   const removeStayActivity = (stayId: string, activityId: string) => {
     if (!state.selectedTripId) return
     setState((prev) => ({
@@ -2467,39 +4436,6 @@ export default function App() {
         }
       }),
     }))
-  }
-
-  const cancelBookingEdit = () => {
-    setEditingBooking(null)
-    setEditCarDraft(null)
-    setEditFlightDraft(null)
-    setEditRestaurantDraft(null)
-    setBookingError(null)
-  }
-
-  const saveBookingEdit = () => {
-    if (!editingBooking) return
-    setBookingError(null)
-    if (editingBooking.tab === 'rentalCar' && editCarDraft) {
-      const company = editCarDraft.company.trim()
-      if (!company) return setBookingError('Car company is required.')
-      updateBooking('rentalCar', editingBooking.id, (x: CarBooking) => ({ ...x, ...editCarDraft, company }))
-      cancelBookingEdit()
-      return
-    }
-    if (editingBooking.tab === 'flight' && editFlightDraft) {
-      const route = editFlightDraft.route.trim()
-      if (!route) return setBookingError('Flight route is required.')
-      updateBooking('flight', editingBooking.id, (x: FlightBooking) => ({ ...x, ...editFlightDraft, route, returnDate: '' }))
-      cancelBookingEdit()
-      return
-    }
-    if (editingBooking.tab === 'restaurant' && editRestaurantDraft) {
-      const name = editRestaurantDraft.name.trim()
-      if (!name) return setBookingError('Restaurant name is required.')
-      updateBooking('restaurant', editingBooking.id, (x: RestaurantBooking) => ({ ...x, ...editRestaurantDraft, name }))
-      cancelBookingEdit()
-    }
   }
 
   useEffect(() => {
@@ -2533,64 +4469,488 @@ export default function App() {
     setMustDoInput('')
   }
 
+  const setTripCancelledFlag = (tripId: string, cancelled: boolean) => {
+    setState((prev) => ({
+      ...prev,
+      trips: prev.trips.map((trip) => (trip.id === tripId ? { ...trip, cancelled } : trip)),
+    }))
+  }
+
+  const permanentlyRemoveTrip = (tripId: string) => {
+    setState((prev) => {
+      const trips = prev.trips.filter((t) => t.id !== tripId)
+      const nextSelected =
+        prev.selectedTripId === tripId
+          ? (trips.find((t) => !t.cancelled)?.id ?? trips[0]?.id ?? null)
+          : prev.selectedTripId
+      return { trips, selectedTripId: nextSelected }
+    })
+  }
+
+  const moveTripToCancelled = () => {
+    if (!selectedTrip || selectedTrip.cancelled) return
+    const trip = selectedTrip
+    setConfirmDialog({
+      title: 'Cancel trip?',
+      description: `Move "${trip.country}" to Cancelled? You can restore it from the home screen or delete it permanently.`,
+      confirmLabel: 'Cancel Trip',
+      cancelLabel: 'Keep trip',
+      variant: 'danger',
+      onConfirm: () => {
+        const id = trip.id
+        setState((prev) => {
+          const trips = prev.trips.map((t) => (t.id === id ? { ...t, cancelled: true } : t))
+          return { trips, selectedTripId: null }
+        })
+        setView('home')
+      },
+    })
+  }
+
+  const handleLogout = async () => {
+    if (isSupabaseConfigured()) {
+      skipRemoteSaveRef.current = true
+      remoteFetchGenRef.current += 1
+      await getSupabase().auth.signOut()
+    } else {
+      clearAuthSession()
+    }
+    setAuthSession(null)
+    setSupabaseUserId(null)
+    setState({ trips: [], selectedTripId: null })
+    setView('home')
+    setAuthFormError(null)
+    setAuthPasswordInput('')
+  }
+
+  const handleImportLocalTrips = () => {
+    if (!authSession) return
+    const next = loadTripsState(tripsStorageKey(authSession.email))
+    setState(next)
+    skipRemoteSaveRef.current = true
+    void upsertUserTrips(next).then(() => {
+      requestAnimationFrame(() => {
+        skipRemoteSaveRef.current = false
+      })
+    })
+    sessionStorage.setItem(`itinerary:import-dismissed:${normalizeEmail(authSession.email)}`, '1')
+    setLocalImportDismissed(true)
+  }
+
+  const handleDismissLocalImport = () => {
+    if (!authSession) return
+    sessionStorage.setItem(`itinerary:import-dismissed:${normalizeEmail(authSession.email)}`, '1')
+    setLocalImportDismissed(true)
+  }
+
+  const handleAuthSubmit = async (e: FormEvent) => {
+    e.preventDefault()
+    setAuthFormError(null)
+    setAuthBusy(true)
+    const email = authEmailInput.trim()
+    const password = authPasswordInput
+    try {
+      if (isSupabaseConfigured()) {
+        const supabase = getSupabase()
+        const normalized = normalizeEmail(email)
+        if (authMode === 'register') {
+          const { data, error } = await supabase.auth.signUp({
+            email: normalized,
+            password,
+            options: {
+              data: { display_name: authNameInput.trim() },
+            },
+          })
+          if (error) {
+            setAuthFormError(error.message)
+            return
+          }
+          if (data.user && data.session) {
+            await upsertProfileDisplayName(authNameInput.trim())
+          }
+          if (!data.session) {
+            setAuthFormError('Check your email to confirm your account, then log in.')
+          }
+          setAuthPasswordInput('')
+          setAuthNameInput('')
+          return
+        }
+        const { error } = await supabase.auth.signInWithPassword({
+          email: normalized,
+          password,
+        })
+        if (error) {
+          setAuthFormError(error.message)
+          return
+        }
+        setAuthPasswordInput('')
+        return
+      }
+
+      if (authMode === 'register') {
+        const r = await registerUser(email, password, authNameInput)
+        if (!r.ok) {
+          setAuthFormError(r.error)
+          return
+        }
+        migrateLegacyTripsIfNeeded(normalizeEmail(email))
+        setAuthSession(loadAuthSession())
+        setState(loadTripsState(tripsStorageKey(normalizeEmail(email))))
+        setAuthPasswordInput('')
+        setAuthNameInput('')
+      } else {
+        const r = await loginUser(email, password)
+        if (!r.ok) {
+          setAuthFormError(r.error)
+          return
+        }
+        migrateLegacyTripsIfNeeded(normalizeEmail(email))
+        setAuthSession(loadAuthSession())
+        setState(loadTripsState(tripsStorageKey(normalizeEmail(email))))
+        setAuthPasswordInput('')
+      }
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
   if (view === 'home') {
-    return (
-      <div className={`min-h-screen bg-gradient-to-b from-sky-50 via-white to-neutral-100 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}>
-        <button
-          type="button"
-          onClick={() => setIsDarkMode((v) => !v)}
-          className="fixed top-4 right-4 z-50 inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-neutral-200 bg-white/90 backdrop-blur text-sm font-medium shadow-sm hover:bg-neutral-50"
-          aria-label="Toggle dark mode"
+    const openTrip = (tripId: string) => {
+      setState((prev) => ({ ...prev, selectedTripId: tripId }))
+      setView('dashboard')
+    }
+    const renderTripCard = (trip: Trip, section: 'active' | 'past' | 'cancelled') => {
+      const muted = section === 'past' || section === 'cancelled'
+      const startYearLabel = (() => {
+        const d = parseIsoDate(trip.startDate) ?? parseIsoDate(trip.endDate)
+        return d ? String(d.getFullYear()) : null
+      })()
+      const hasTopRightCluster =
+        Boolean(startYearLabel) || section === 'active' || section === 'cancelled'
+      const mainButtonPad = hasTopRightCluster
+        ? section === 'cancelled'
+          ? 'p-5 pr-[10.5rem] sm:pr-40'
+          : section === 'active'
+            ? 'p-5 pr-32'
+            : 'p-5 pr-14'
+        : 'p-5'
+      return (
+        <div
+          key={trip.id}
+          className={`relative group rounded-2xl border transition-all ${
+            muted
+              ? 'border-neutral-200/80 bg-neutral-50/90 dark:bg-neutral-900/50 dark:border-neutral-700'
+              : 'border-sky-200/80 bg-white dark:bg-neutral-900/90 dark:border-sky-900/50 shadow-sm hover:shadow-md hover:border-sky-300/80'
+          }`}
         >
-          {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
-          {isDarkMode ? 'Light' : 'Dark'}
-        </button>
-        <div className="max-w-5xl mx-auto px-4 py-14">
-          <header className="text-center">
-            <h1 className="text-4xl md:text-5xl font-serif font-bold">Trip Planner</h1>
-            <p className="mt-3 text-neutral-600">Start by creating a trip, then continue in the dashboard.</p>
+          <button
+            type="button"
+            onClick={() => openTrip(trip.id)}
+            className={`w-full text-left rounded-2xl ${mainButtonPad}`}
+          >
+            <div className={`font-semibold text-lg ${section === 'cancelled' ? 'line-through text-neutral-500' : 'text-neutral-900 dark:text-neutral-100'}`}>
+              {trip.country}
+            </div>
+            <div className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
+              {formatDateRangeWithYear(trip.startDate, trip.endDate) || 'Dates not set'}
+            </div>
+            <div className="text-xs text-neutral-500 mt-2">{trip.mustDos.length} side-quests</div>
+          </button>
+          {hasTopRightCluster ? (
+            <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+              {section === 'active' ? (
+                <button
+                  type="button"
+                  title="Mark trip as cancelled"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setTripCancelledFlag(trip.id, true)
+                  }}
+                  className="p-2 rounded-xl text-neutral-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                >
+                  <CircleSlash size={18} aria-hidden />
+                </button>
+              ) : null}
+              {section === 'cancelled' ? (
+                <>
+                  <button
+                    type="button"
+                    title="Restore trip"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setTripCancelledFlag(trip.id, false)
+                    }}
+                    className="text-xs px-2 py-1 rounded-lg bg-neutral-200/90 dark:bg-neutral-700 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-300 dark:hover:bg-neutral-600"
+                  >
+                    Restore
+                  </button>
+                  <button
+                    type="button"
+                    title="Delete permanently"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const tid = trip.id
+                      const name = trip.country
+                      setConfirmDialog({
+                        title: 'Delete trip permanently?',
+                        description: `Permanently delete "${name}"? This cannot be undone.`,
+                        confirmLabel: 'Delete permanently',
+                        cancelLabel: 'Cancel',
+                        variant: 'danger',
+                        onConfirm: () => permanentlyRemoveTrip(tid),
+                      })
+                    }}
+                    className="p-2 rounded-lg text-neutral-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                  >
+                    <Trash2 size={18} aria-hidden />
+                  </button>
+                </>
+              ) : null}
+              {startYearLabel ? (
+                <span className="text-xs font-semibold tabular-nums text-neutral-500 dark:text-neutral-400 select-none shrink-0">
+                  {startYearLabel}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      )
+    }
+
+    return (
+      <>
+        <ConfirmDialog
+          open={confirmDialog !== null}
+          onClose={() => setConfirmDialog(null)}
+          title={confirmDialog?.title ?? ''}
+          description={confirmDialog?.description ?? ''}
+          confirmLabel={confirmDialog?.confirmLabel ?? 'Confirm'}
+          cancelLabel={confirmDialog?.cancelLabel ?? 'Cancel'}
+          variant={confirmDialog?.variant ?? 'default'}
+          onConfirm={handleConfirmDialogAction}
+        />
+        <div
+          className={`min-h-screen bg-gradient-to-br from-sky-100/90 via-white to-indigo-50/80 dark:from-neutral-950 dark:via-neutral-900 dark:to-sky-950/40 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}
+        >
+        <div className="sticky top-0 z-40 border-b border-white/40 dark:border-neutral-800/80 bg-white/75 dark:bg-neutral-950/80 backdrop-blur-md">
+          <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+            <span className="text-lg font-serif font-semibold tracking-tight text-neutral-900 dark:text-white">{BRAND_NAME}</span>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              <CurrencySelect value={displayCurrency} onChange={setDisplayCurrency} />
+              {authSession ? (
+                <>
+                  <span className="hidden sm:inline-flex items-center gap-1.5 text-sm text-neutral-600 dark:text-neutral-300 max-w-[200px] truncate">
+                    <User size={16} className="shrink-0 opacity-70" aria-hidden />
+                    {authSession.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 text-sm font-medium hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                  >
+                    <LogOut size={16} aria-hidden />
+                    Log out
+                  </button>
+                </>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setIsDarkMode((v) => !v)}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 bg-white/90 dark:bg-neutral-900 text-sm font-medium shadow-sm hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                aria-label="Toggle dark mode"
+              >
+                {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
+                {isDarkMode ? 'Light' : 'Dark'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="max-w-5xl mx-auto px-4 py-12 md:py-16">
+          <header className="text-center max-w-2xl mx-auto">
+            <p className="text-sm font-medium uppercase tracking-widest text-sky-700/90 dark:text-sky-400/90">{BRAND_HOME_KICKER}</p>
+            <h1 className="mt-2 text-4xl md:text-5xl font-serif font-bold text-neutral-900 dark:text-white">{BRAND_HOME_HEADLINE}</h1>
+            <p className="mt-4 text-neutral-600 dark:text-neutral-400 leading-relaxed">{BRAND_HOME_SUBTEXT}</p>
           </header>
 
-          <div className="mt-8 flex justify-center">
-            <button
-              type="button"
-              onClick={() => {
-                setNewTripDestination('')
-                setNewTripStartDate('')
-                setNewTripEndDate('')
-                setNewTripRange(undefined)
-                setShowAddTripModal(true)
-              }}
-              className="px-6 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold hover:from-blue-500 hover:to-indigo-500 shadow-lg"
-            >
-              Add New Trip
-            </button>
-          </div>
-
-          <section className="mt-10">
-            <h2 className="text-xl font-semibold">Your Trips</h2>
-            {tripsSorted.length === 0 ? (
-              <p className="mt-3 text-neutral-500">No trips yet. Create your first one.</p>
-            ) : (
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                {tripsSorted.map((trip) => (
-                  <button
-                    key={trip.id}
-                    type="button"
-                    onClick={() => {
-                      setState((prev) => ({ ...prev, selectedTripId: trip.id }))
-                      setView('dashboard')
-                    }}
-                    className="text-left bg-white border border-neutral-100 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow"
-                  >
-                    <div className="font-semibold text-lg">{trip.country}</div>
-                    <div className="text-sm text-neutral-600 mt-1">{formatDateRangeLabel(trip.startDate, trip.endDate)}</div>
-                    <div className="text-xs text-neutral-500 mt-2">{trip.mustDos.length} side goals</div>
-                  </button>
-                ))}
+          {isSupabaseConfigured() && !authReady ? (
+            <p className="mt-12 text-center text-sm text-neutral-500 dark:text-neutral-400">Loading session…</p>
+          ) : !authSession ? (
+            <div className="mt-12 max-w-md mx-auto rounded-3xl border border-neutral-200/90 dark:border-neutral-700 bg-white/90 dark:bg-neutral-900/90 shadow-xl shadow-sky-900/5 dark:shadow-black/40 p-8">
+              <div className="flex rounded-2xl bg-neutral-100 dark:bg-neutral-800 p-1 mb-6">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('login')
+                    setAuthFormError(null)
+                  }}
+                  className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-colors ${
+                    authMode === 'login' ? 'bg-white dark:bg-neutral-700 shadow text-neutral-900 dark:text-white' : 'text-neutral-500'
+                  }`}
+                >
+                  Log in
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('register')
+                    setAuthFormError(null)
+                  }}
+                  className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-colors ${
+                    authMode === 'register' ? 'bg-white dark:bg-neutral-700 shadow text-neutral-900 dark:text-white' : 'text-neutral-500'
+                  }`}
+                >
+                  Create account
+                </button>
               </div>
-            )}
-          </section>
+              <form onSubmit={handleAuthSubmit} className="space-y-4">
+                {authMode === 'register' ? (
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Name</label>
+                    <input
+                      value={authNameInput}
+                      onChange={(e) => setAuthNameInput(e.target.value)}
+                      autoComplete="name"
+                      className="w-full px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                      placeholder="Your name"
+                    />
+                  </div>
+                ) : null}
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={authEmailInput}
+                    onChange={(e) => setAuthEmailInput(e.target.value)}
+                    autoComplete="email"
+                    className="w-full px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                    placeholder="you@example.com"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Password</label>
+                  <input
+                    type="password"
+                    value={authPasswordInput}
+                    onChange={(e) => setAuthPasswordInput(e.target.value)}
+                    autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                    className="w-full px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                    placeholder="••••••••"
+                    minLength={6}
+                    required
+                  />
+                </div>
+                {authFormError ? <p className="text-sm text-rose-600 dark:text-rose-400">{authFormError}</p> : null}
+                <button
+                  type="submit"
+                  disabled={authBusy}
+                  className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl bg-gradient-to-r from-sky-600 to-indigo-600 text-white font-semibold shadow-lg hover:from-sky-500 hover:to-indigo-500 disabled:opacity-60"
+                >
+                  <LogIn size={18} aria-hidden />
+                  {authBusy ? 'Please wait…' : authMode === 'register' ? 'Create account' : 'Log in'}
+                </button>
+              </form>
+              <p className="mt-6 text-xs text-center text-neutral-500 dark:text-neutral-500">
+                {isSupabaseConfigured()
+                  ? 'Your trips are saved to your account and sync when you are online.'
+                  : 'Accounts are stored only in this browser. Clearing site data will remove them.'}
+              </p>
+            </div>
+          ) : (
+            <>
+              {showLocalImportBanner ? (
+                <div
+                  role="status"
+                  className="mt-10 max-w-2xl mx-auto rounded-2xl border border-amber-200/90 bg-amber-50/95 dark:bg-amber-950/35 dark:border-amber-800/80 px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                >
+                  <p className="text-sm text-amber-950 dark:text-amber-100/95">
+                    This browser has saved trips for your account that are not in the cloud yet. Upload them to sync across devices.
+                  </p>
+                  <div className="flex flex-wrap gap-2 shrink-0 justify-end">
+                    <button
+                      type="button"
+                      onClick={handleImportLocalTrips}
+                      className="px-4 py-2 rounded-xl bg-amber-700 text-white text-sm font-semibold hover:bg-amber-600"
+                    >
+                      Upload from this browser
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDismissLocalImport}
+                      className="px-4 py-2 rounded-xl border border-amber-300/80 dark:border-amber-700 text-sm font-medium text-amber-950 dark:text-amber-100 hover:bg-amber-100/80 dark:hover:bg-amber-900/50"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              <div className="mt-10 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewTripDestination('')
+                    setNewTripStartDate('')
+                    setNewTripEndDate('')
+                    setNewTripRange(undefined)
+                    setShowAddTripModal(true)
+                  }}
+                  className="px-8 py-3.5 rounded-2xl bg-gradient-to-r from-sky-600 to-indigo-600 text-white font-semibold shadow-lg shadow-sky-900/20 hover:from-sky-500 hover:to-indigo-500 transition-transform hover:scale-[1.02]"
+                >
+                  Add new trip
+                </button>
+              </div>
+
+              <div className="mt-14 space-y-12">
+                <section>
+                  <div className="flex items-center gap-2 mb-4">
+                    <Calendar className="text-sky-600 dark:text-sky-400" size={22} aria-hidden />
+                    <h2 className="text-xl font-semibold text-neutral-900 dark:text-white">Current &amp; upcoming</h2>
+                  </div>
+                  {tripBuckets.active.length === 0 ? (
+                    <p className="text-sm text-neutral-500 dark:text-neutral-400 rounded-2xl border border-dashed border-neutral-300 dark:border-neutral-600 px-4 py-8 text-center">
+                      No active trips. Start planning your next getaway.
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {tripBuckets.active.map((trip) => renderTripCard(trip, 'active'))}
+                    </div>
+                  )}
+                </section>
+
+                <section>
+                  <div className="flex items-center gap-2 mb-4">
+                    <History className="text-neutral-500 dark:text-neutral-400" size={22} aria-hidden />
+                    <h2 className="text-xl font-semibold text-neutral-900 dark:text-white">Past trips</h2>
+                  </div>
+                  {tripBuckets.past.length === 0 ? (
+                    <p className="text-sm text-neutral-500 dark:text-neutral-400">No past trips yet.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {tripBuckets.past.map((trip) => renderTripCard(trip, 'past'))}
+                    </div>
+                  )}
+                </section>
+
+                <section>
+                  <div className="flex items-center gap-2 mb-1">
+                    <CircleSlash className="text-rose-500/90" size={22} aria-hidden />
+                    <h2 className="text-xl font-semibold text-neutral-900 dark:text-white">Cancelled</h2>
+                  </div>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400 mb-4 max-w-xl">
+                    Trips removed from the planner appear here. Restore them to your lists or delete permanently.
+                  </p>
+                  {tripBuckets.cancelled.length === 0 ? (
+                    <p className="text-sm text-neutral-500 dark:text-neutral-400">No cancelled trips.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {tripBuckets.cancelled.map((trip) => renderTripCard(trip, 'cancelled'))}
+                    </div>
+                  )}
+                </section>
+              </div>
+            </>
+          )}
         </div>
 
         {showAddTripModal ? (
@@ -2758,32 +5118,168 @@ export default function App() {
           </div>
         ) : null}
       </div>
+      </>
     )
   }
 
   return (
+    <>
+      <ConfirmDialog
+        open={confirmDialog !== null}
+        onClose={() => setConfirmDialog(null)}
+        title={confirmDialog?.title ?? ''}
+        description={confirmDialog?.description ?? ''}
+        confirmLabel={confirmDialog?.confirmLabel ?? 'Confirm'}
+        cancelLabel={confirmDialog?.cancelLabel ?? 'Cancel'}
+        variant={confirmDialog?.variant ?? 'default'}
+        onConfirm={handleConfirmDialogAction}
+      />
     <div className={`min-h-screen bg-gradient-to-b from-sky-50 via-white to-neutral-100 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}>
-      <button
-        type="button"
-        onClick={() => setIsDarkMode((v) => !v)}
-        className="fixed top-4 right-4 z-50 inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-neutral-200 bg-white/90 backdrop-blur text-sm font-medium shadow-sm hover:bg-neutral-50"
-        aria-label="Toggle dark mode"
-      >
-        {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
-        {isDarkMode ? 'Light' : 'Dark'}
-      </button>
+
+      {calendarActivityDetail && calendarDetailDraft ? (
+        <div
+          className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4"
+          role="presentation"
+          onClick={() => setCalendarActivityDetail(null)}
+        >
+          <div
+            className="w-[min(100%,26rem)] bg-white dark:bg-neutral-900 rounded-2xl shadow-2xl p-6 border border-neutral-200 dark:border-neutral-700"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cal-activity-modal-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="cal-activity-modal-title" className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
+              Activity
+            </h3>
+            <div className="mt-4 space-y-3">
+              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Name</label>
+              <input
+                value={calendarDetailDraft.name ?? ''}
+                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, name: e.target.value } : d))}
+                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm"
+              />
+              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Time</label>
+              <input
+                type="time"
+                value={calendarDetailDraft.time ?? ''}
+                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, time: e.target.value } : d))}
+                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm"
+              />
+              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Confirmation #</label>
+              <input
+                value={calendarDetailDraft.confirmationRef ?? ''}
+                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, confirmationRef: e.target.value } : d))}
+                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm"
+              />
+              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Cost</label>
+              <input
+                value={calendarDetailDraft.cost ?? ''}
+                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, cost: e.target.value } : d))}
+                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm"
+              />
+              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Notes</label>
+              <textarea
+                value={calendarDetailDraft.notes ?? ''}
+                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, notes: e.target.value } : d))}
+                rows={3}
+                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm resize-y"
+              />
+            </div>
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  removeStayActivity(calendarActivityDetail.stayId, calendarActivityDetail.activity.id)
+                  setCalendarActivityDetail(null)
+                }}
+                className="px-4 py-2 rounded-xl text-sm font-medium text-rose-700 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/50"
+              >
+                Delete
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCalendarActivityDetail(null)}
+                  className="px-4 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 text-sm hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateStayActivity(calendarActivityDetail.stayId, calendarActivityDetail.activity.id, {
+                      name: (calendarDetailDraft.name ?? '').trim(),
+                      time: calendarDetailDraft.time ?? '',
+                      confirmationRef: (calendarDetailDraft.confirmationRef ?? '').trim(),
+                      cost: calendarDetailDraft.cost ?? '',
+                      notes: calendarDetailDraft.notes ?? '',
+                    })
+                    setCalendarActivityDetail(null)
+                  }}
+                  className="px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {/* Hero */}
-      <div className="relative h-[46vh] w-full overflow-hidden">
+      <div className="relative h-[35vh] w-full overflow-hidden">
+        <div
+          className={`absolute top-4 z-20 flex flex-wrap items-center gap-2 ${showSideGoalsRail ? 'left-4 lg:left-[336px]' : 'left-4'} max-w-[min(100%,calc(100%-2rem))]`}
+        >
+          <button
+            type="button"
+            onClick={() => setView('home')}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+          >
+            Back to Home
+          </button>
+          {authSession ? (
+            <>
+              <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/25 bg-black/25 backdrop-blur-md text-white text-xs max-w-[160px] truncate">
+                <User size={14} className="shrink-0 opacity-90" aria-hidden />
+                {authSession.name}
+              </span>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+              >
+                <LogOut size={16} aria-hidden />
+                Log out
+              </button>
+            </>
+          ) : null}
+        </div>
+        <div
+          className={`absolute top-4 z-20 flex flex-wrap items-center gap-2 justify-end ${showSideGoalsRail ? 'right-4 lg:right-[336px]' : 'right-4'}`}
+        >
+          <CurrencySelect variant="onDark" value={displayCurrency} onChange={setDisplayCurrency} />
+          <button
+            type="button"
+            onClick={() => setIsDarkMode((v) => !v)}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+            aria-label="Toggle dark mode"
+          >
+            {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
+            {isDarkMode ? 'Light' : 'Dark'}
+          </button>
+        </div>
         <img
           src={dashboardHeroUrl || DEFAULT_HERO_IMAGE}
           className="w-full h-full object-cover"
           alt="Hero"
         />
-        <div className={`absolute inset-y-0 right-0 ${showSideGoalsRail ? 'left-[320px]' : 'left-0'} bg-gradient-to-b from-black/50 via-black/35 to-black/60 flex flex-col items-center justify-center text-white px-4 text-center`}>
+        <div className={`absolute inset-y-0 ${showSideGoalsRail ? 'left-0 right-0 lg:left-[320px] lg:right-[320px]' : 'left-0 right-0'} bg-gradient-to-b from-black/50 via-black/35 to-black/60 flex flex-col items-center justify-start pt-20 text-white px-4 text-center`}>
           <h1 className="text-4xl md:text-6xl font-serif font-bold mb-4 drop-shadow-md">
-            {selectedTrip ? `Trip to: ${selectedTrip.country}` : 'Trip Planner'}
+            {selectedTrip ? `Trip to: ${selectedTrip.country}` : BRAND_NAME}
           </h1>
-          <p className="text-lg md:text-xl max-w-2xl opacity-95">Country to trip workflow with beautiful, focused planning</p>
+          <p className="text-lg md:text-xl max-w-2xl opacity-95">{BRAND_DASHBOARD_SUBTITLE}</p>
           <div className="mt-6 flex gap-3 flex-wrap justify-center text-sm font-medium">
             <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
               {selectedTrip ? `Current: ${selectedTrip.country}` : 'No trip selected'}
@@ -2791,13 +5287,19 @@ export default function App() {
             <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
               {selectedTrip?.startDate || selectedTrip?.endDate
                 ? formatDateRangeWithYear(selectedTrip?.startDate, selectedTrip?.endDate)
-                : `Side goals remaining: ${remaining}`}
+                : `Side-Quests remaining: ${remaining}`}
             </span>
+          </div>
+          <div className="flex-1 w-full min-h-0 flex items-center justify-center">
+            <div className="-translate-y-[25px] rounded-2xl border border-white/30 bg-black/25 backdrop-blur-md px-5 py-3 text-center shadow-lg">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-100">{sideQuestCountdown.title}</p>
+              <p className="mt-1 text-xl md:text-2xl font-bold leading-tight text-white">{sideQuestCountdown.subtitle}</p>
+            </div>
           </div>
         </div>
       </div>
 
-      <div className={showSideGoalsRail ? 'pl-[320px]' : ''}>
+      <div className={showSideGoalsRail ? 'lg:pl-[320px] lg:pr-[320px]' : ''}>
         {/* Tabs */}
         <div className="max-w-5xl mx-auto px-4 -mt-10 relative z-10">
           <div className="bg-white/95 backdrop-blur rounded-2xl shadow-2xl p-2.5 flex border border-white/70">
@@ -2850,407 +5352,778 @@ export default function App() {
       </div>
 
         {showSideGoalsRail ? (
-        <aside className="fixed left-0 top-0 h-full w-[320px] z-40 bg-white border-r border-neutral-200 shadow-2xl p-5 overflow-auto">
+        <aside className="hidden lg:block fixed left-0 top-0 h-full w-[320px] z-40 bg-white border-r border-neutral-200 shadow-2xl p-5 overflow-auto">
           <div>
-            <h3 className="text-xl font-serif font-bold">Side Goals</h3>
-            <p className="text-xs text-neutral-500">Fun extras you would love to achieve.</p>
+            <h3 className="text-xl font-serif font-bold">Overview</h3>
+            <p className="text-xs text-neutral-500">Reserved space for trip overview details.</p>
           </div>
-        <form
-          className="mt-4 flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault()
-            addMustDo(mustDoInput)
-          }}
-        >
-          <input
-            value={mustDoInput}
-            onChange={(e) => setMustDoInput(e.target.value)}
-            disabled={!selectedTrip}
-            placeholder={selectedTrip ? `Cool goal for ${selectedTrip.country}...` : 'Select a trip first...'}
-            className="flex-1 px-3 py-2 rounded-xl border border-neutral-200 text-sm"
-          />
-          <button type="submit" disabled={!selectedTrip} className="px-3 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold disabled:opacity-50">
-            Add
-          </button>
-        </form>
-        <div className="mt-3 flex items-center justify-between">
-          <p className="text-xs text-neutral-500">{remaining} remaining</p>
-          <button
-            type="button"
-            disabled={!selectedTrip || mustDos.length === 0}
-            onClick={() => {
-              if (!selectedTrip) return
-              if (!confirm(`Clear side goals for "${selectedTrip.country}"?`)) return
-              setState((prev) => ({
-                ...prev,
-                trips: prev.trips.map((t) => (t.id === prev.selectedTripId ? { ...t, mustDos: [] } : t)),
-              }))
-            }}
-            className="text-xs px-2 py-1 rounded-lg border border-neutral-200 disabled:opacity-50"
-          >
-            Clear
-          </button>
-        </div>
-        <div className="mt-3 space-y-2">
-          {mustDos.length === 0 ? (
-            <p className="text-sm text-neutral-500">{selectedTrip ? 'No side goals yet.' : 'Select a trip first.'}</p>
-          ) : (
-            mustDos.map((m) => (
-              <MustDoRow
-                key={m.id}
-                item={m}
-                onToggle={(event) => {
-                  const completing = !m.done
-                  if (!state.selectedTripId) return
-                  setState((prev) => ({
-                    ...prev,
-                    trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.map((x) => (x.id === m.id ? { ...x, done: !x.done } : x)) })),
-                  }))
-                  if (completing) {
-                    playSideGoalChime()
-                    launchConfetti(event)
-                  }
-                }}
-                onDelete={() => {
-                  if (!state.selectedTripId) return
-                  setState((prev) => ({
-                    ...prev,
-                    trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.filter((x) => x.id !== m.id) })),
-                  }))
-                }}
-                onEdit={(nextText) => {
-                  if (!state.selectedTripId) return
-                  setState((prev) => ({
-                    ...prev,
-                    trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.map((x) => (x.id === m.id ? { ...x, text: nextText } : x)) })),
-                  }))
-                }}
+          <div className="mt-4 rounded-2xl border border-dashed border-neutral-300 bg-neutral-50 px-3 py-4 text-sm text-neutral-500">
+            This sidebar is intentionally left as a placeholder for now.
+          </div>
+        </aside>
+        ) : null}
+
+        {showSideGoalsRail ? (
+        <aside className="hidden lg:block fixed right-0 top-0 h-full w-[320px] z-40 bg-white border-l border-neutral-200 shadow-2xl p-5 overflow-auto">
+            <div>
+              <h3 className="text-xl font-serif font-bold">Side-Quests</h3>
+              <p className="text-xs text-neutral-500">Fun extras you would love to achieve.</p>
+            </div>
+            <form
+              className="mt-4 flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault()
+                addMustDo(mustDoInput)
+              }}
+            >
+              <input
+                value={mustDoInput}
+                onChange={(e) => setMustDoInput(e.target.value)}
+                disabled={!selectedTrip}
+                placeholder={selectedTrip ? `Cool goal for ${selectedTrip.country}...` : 'Select a trip first...'}
+                className="flex-1 px-3 py-2 rounded-xl border border-neutral-200 text-sm"
               />
-            ))
-          )}
-        </div>
+              <button type="submit" disabled={!selectedTrip} className="px-3 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold disabled:opacity-50">
+                Add
+              </button>
+            </form>
+            <div className="mt-3 flex items-center justify-between">
+              <p className="text-xs text-neutral-500">{remaining} remaining</p>
+              <button
+                type="button"
+                disabled={!selectedTrip || mustDos.length === 0}
+                onClick={() => {
+                  if (!selectedTrip) return
+                  const sid = selectedTrip.id
+                  const label = selectedTrip.country
+                  setConfirmDialog({
+                    title: 'Clear side-quests?',
+                    description: `Clear all side-quests for "${label}"?`,
+                    confirmLabel: 'Clear',
+                    cancelLabel: 'Cancel',
+                    variant: 'danger',
+                    onConfirm: () => {
+                      setState((prev) => ({
+                        ...prev,
+                        trips: prev.trips.map((t) => (t.id === sid ? { ...t, mustDos: [] } : t)),
+                      }))
+                    },
+                  })
+                }}
+                className="text-xs px-2 py-1 rounded-lg border border-neutral-200 disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+            <div className="mt-3 space-y-2">
+              {mustDos.length === 0 ? (
+                <p className="text-sm text-neutral-500">{selectedTrip ? 'No side-quests yet.' : 'Select a trip first.'}</p>
+              ) : (
+                mustDos.map((m) => (
+                  <MustDoRow
+                    key={m.id}
+                    item={m}
+                    onToggle={(event) => {
+                      const completing = !m.done
+                      if (!state.selectedTripId) return
+                      setState((prev) => ({
+                        ...prev,
+                        trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.map((x) => (x.id === m.id ? { ...x, done: !x.done } : x)) })),
+                      }))
+                      if (completing) {
+                        playSideGoalChime()
+                        launchConfetti(event)
+                      }
+                    }}
+                    onDelete={() => {
+                      if (!state.selectedTripId) return
+                      setState((prev) => ({
+                        ...prev,
+                        trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.filter((x) => x.id !== m.id) })),
+                      }))
+                    }}
+                    onEdit={(nextText) => {
+                      if (!state.selectedTripId) return
+                      setState((prev) => ({
+                        ...prev,
+                        trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.map((x) => (x.id === m.id ? { ...x, text: nextText } : x)) })),
+                      }))
+                    }}
+                  />
+                ))
+              )}
+            </div>
         </aside>
         ) : null}
 
         <main className="max-w-5xl mx-auto px-4 py-12">
-        <div className="mb-5 flex justify-end">
-          <button
-            type="button"
-            onClick={() => setView('home')}
-            className="px-4 py-2 rounded-xl border border-neutral-200 bg-white hover:bg-neutral-50 shadow-sm"
-          >
-            Back to Home
-          </button>
-        </div>
         {activeTab === 'planner' && (
           <div className="space-y-8 animate-in fade-in duration-500">
             {/* Bookings */}
-            <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 p-7">
-              <div className="flex items-center justify-between gap-4 flex-wrap">
-                <div>
-                  <h2 className="text-2xl font-serif font-bold">Bookings</h2>
-                  <p className="text-neutral-500 text-sm">Track your trip reservations in one place.</p>
+            <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setBookingManagementExpanded((v) => !v)}
+                className="w-full flex items-center justify-between gap-4 px-7 py-5 hover:bg-neutral-50 transition-colors text-left"
+                aria-expanded={bookingManagementExpanded}
+                aria-controls="booking-management-panel"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <Calendar className="text-blue-600 shrink-0" size={20} aria-hidden />
+                  <div>
+                    <h2 className="text-2xl font-serif font-bold">Booking management</h2>
+                    <p className="text-neutral-500 text-sm">
+                      {bookingManagementExpanded
+                        ? 'One timeline for all bookings, filterable by type.'
+                        : `${bookingManagementRows.length} booking${bookingManagementRows.length !== 1 ? 's' : ''} · ${
+                            bookingFilter === 'all'
+                              ? 'All types'
+                              : bookingFilter === 'rentalCar'
+                                ? 'Rental car'
+                                : bookingFilter === 'flight'
+                                  ? 'Flight'
+                                  : bookingFilter === 'restaurant'
+                                    ? 'Dining & activities'
+                                    : 'Accommodation'
+                          }`}
+                    </p>
+                  </div>
                 </div>
-              </div>
+                {bookingManagementExpanded ? <ChevronUp size={20} className="shrink-0 text-neutral-500" /> : <ChevronDown size={20} className="shrink-0 text-neutral-500" />}
+              </button>
 
-              <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {bookingManagementExpanded ? (
+              <div id="booking-management-panel" className="px-7 pb-7">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                 <button
                   type="button"
-                  onClick={() => setBookingsTab('rentalCar')}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingsTab === 'rentalCar' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  onClick={() => setBookingFilter('all')}
+                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBookingsTab('rentalCar')
+                    setBookingFilter('rentalCar')
+                  }}
+                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'rentalCar' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
                   Rental Car
                 </button>
                 <button
                   type="button"
-                  onClick={() => setBookingsTab('flight')}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingsTab === 'flight' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  onClick={() => {
+                    setBookingsTab('flight')
+                    setBookingFilter('flight')
+                  }}
+                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'flight' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
                   Flight
                 </button>
                 <button
                   type="button"
-                  onClick={() => setBookingsTab('restaurant')}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingsTab === 'restaurant' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  onClick={() => {
+                    setBookingsTab('restaurant')
+                    setBookingFilter('restaurant')
+                  }}
+                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'restaurant' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
-                  Restaurant
+                  Dining & activities
                 </button>
                 <button
                   type="button"
-                  onClick={() => setBookingsTab('accommodation')}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingsTab === 'accommodation' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  onClick={() => {
+                    setBookingsTab('accommodation')
+                    setBookingFilter('accommodation')
+                  }}
+                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'accommodation' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
                   Accommodation
                 </button>
               </div>
 
-              <div className="mt-4">
-                {bookingsTab === 'rentalCar' && (
-                  <>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <input value={carCompanyInput} onChange={(e) => setCarCompanyInput(e.target.value)} disabled={!selectedTrip} placeholder="Company" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <input value={carPickupLocationInput} onChange={(e) => setCarPickupLocationInput(e.target.value)} disabled={!selectedTrip} placeholder="Pickup location" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <input value={carDropoffLocationInput} onChange={(e) => setCarDropoffLocationInput(e.target.value)} disabled={!selectedTrip} placeholder="Dropoff location" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <DateRangeDropdown
-                        startDate={carPickupInput}
-                        endDate={carDropoffInput}
-                        onChange={(start, end) => {
-                          setCarPickupInput(start)
-                          setCarDropoffInput(end)
-                        }}
-                        disabled={!selectedTrip}
-                        placeholder="Pickup and dropoff dates"
-                        initialMonthIso={selectedTrip?.startDate}
-                        className="sm:col-span-2"
-                      />
-                      <input value={carPriceInput} onChange={(e) => setCarPriceInput(e.target.value)} disabled={!selectedTrip} placeholder="Price" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <input value={carConfirmationInput} onChange={(e) => setCarConfirmationInput(e.target.value)} disabled={!selectedTrip} placeholder="Confirmation #" className="px-3 py-2 rounded-xl border border-neutral-200 sm:col-span-3" />
-                    </div>
-                    <ul className="mt-3 space-y-2">
-                      {bookings.rentalCars.map((b) => (
-                        <li key={b.id} className="px-3 py-2 rounded-xl border border-neutral-200">
-                          {editingBooking?.tab === 'rentalCar' && editingBooking.id === b.id && editCarDraft ? (
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                              <input value={editCarDraft.company} onChange={(e) => setEditCarDraft((prev) => (prev ? { ...prev, company: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <input value={editCarDraft.pickupLocation} onChange={(e) => setEditCarDraft((prev) => (prev ? { ...prev, pickupLocation: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <input value={editCarDraft.dropoffLocation} onChange={(e) => setEditCarDraft((prev) => (prev ? { ...prev, dropoffLocation: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <DateRangeDropdown
-                                startDate={editCarDraft.pickupDate}
-                                endDate={editCarDraft.dropoffDate}
-                                onChange={(start, end) => setEditCarDraft((prev) => (prev ? { ...prev, pickupDate: start, dropoffDate: end } : prev))}
-                                placeholder="Pickup and dropoff dates"
-                                initialMonthIso={selectedTrip?.startDate}
-                                className="sm:col-span-2"
-                              />
-                              <input value={editCarDraft.price} onChange={(e) => setEditCarDraft((prev) => (prev ? { ...prev, price: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <input value={editCarDraft.confirmation} onChange={(e) => setEditCarDraft((prev) => (prev ? { ...prev, confirmation: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200 sm:col-span-3" />
-                              <div className="sm:col-span-3 flex gap-2">
-                                <button type="button" onClick={saveBookingEdit} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold">Save</button>
-                                <button type="button" onClick={cancelBookingEdit} className="px-3 py-1.5 rounded-lg border border-neutral-200 text-xs">Cancel</button>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-sm">
-                                {b.company}
-                                {(b.pickupLocation || b.dropoffLocation) ? ` | ${b.pickupLocation || 'Pickup'} -> ${b.dropoffLocation || 'Dropoff'}` : ''}
-                                {b.pickupDate || b.dropoffDate ? ` (${formatDateRangeLabel(b.pickupDate, b.dropoffDate)})` : ''}
-                                {b.price ? ` | ${b.price}` : ''}
-                                {b.confirmation ? ` | ${b.confirmation}` : ''}
+              <ul className="mt-4 space-y-2">
+                {visibleBookingRows.length === 0 ? (
+                  <li className="text-sm text-neutral-700 dark:text-neutral-300">No matching bookings yet.</li>
+                ) : (
+                  visibleBookingRows.map((row) => {
+                    const overlapTargets = bookingOverlapLinks.get(row.id) ?? []
+                    const isOverlap = overlapTargets.length > 0
+                    const isOverlapHighlighted = activeOverlapIds.has(row.id)
+                    const canEditBookingRow =
+                      (row.kind !== 'activity' && row.kind !== 'accommodation' && !!row.removeId && !!row.removeTab) ||
+                      (row.kind === 'accommodation' && !!row.stayId)
+                    return (
+                      <li
+                        key={row.id}
+                        id={`booking-row-${row.id}`}
+                        className={`px-3 py-2.5 rounded-xl border !opacity-100 !text-neutral-950 dark:!text-neutral-100 ${isOverlap ? '!border-red-400 !bg-red-50 dark:!border-red-500/70 dark:!bg-red-950/30' : '!border-neutral-200 !bg-white dark:!border-neutral-700 dark:!bg-neutral-900/70'} ${isOverlapHighlighted ? '!ring-2 !ring-red-500 !border-red-500 dark:!ring-red-400 dark:!border-red-400' : ''}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-semibold !text-neutral-950 dark:!text-neutral-200">{row.dateText}</p>
+                          <div className="flex items-center gap-2">
+                            {isOverlap ? (
+                              <button
+                                type="button"
+                                onClick={() => setPinnedOverlapSourceId((prev) => (prev === row.id ? null : row.id))}
+                                className={`inline-flex items-center gap-1 text-[11px] font-semibold uppercase px-2 py-0.5 rounded-full border ${activeOverlapSourceId === row.id ? '!bg-red-600 !text-white !border-red-600 dark:!bg-red-500 dark:!border-red-400 dark:!text-white' : '!bg-red-100 !text-red-900 !border-red-500 dark:!bg-red-900/50 dark:!text-red-200 dark:!border-red-500/70'}`}
+                                title="Click to highlight overlaps"
+                              >
+                                <TriangleAlert className="h-3 w-3" aria-hidden />
+                                Overlap
+                              </button>
+                            ) : null}
+                            <span className={`text-[11px] font-semibold uppercase px-2 py-0.5 rounded-full ${bookingKindChipClass[row.kind]}`}>
+                              {row.kind === 'rentalCar'
+                                ? 'Rental car'
+                                : row.kind === 'flight'
+                                  ? 'Flight'
+                                  : row.kind === 'restaurant'
+                                    ? 'Dining'
+                                    : row.kind === 'accommodation'
+                                      ? 'Accommodation'
+                                      : 'Activity'}
+                            </span>
+                          </div>
+                        </div>
+                        <p className="mt-1 text-sm font-semibold !text-neutral-950 dark:!text-neutral-100">{row.title}</p>
+                        <p className="text-xs !text-neutral-900 dark:!text-neutral-300">{row.subtitle}</p>
+                        {row.meta || (row.priceAmount != null && row.priceAmount > 0) ? (
+                          <div className="mt-0.5 flex items-start justify-between gap-3">
+                            {row.meta ? (
+                              <p className="text-xs !text-neutral-900 dark:!text-neutral-300 flex-1 min-w-0">{row.meta}</p>
+                            ) : (
+                              <span className="flex-1" />
+                            )}
+                            {row.priceAmount != null && row.priceAmount > 0 ? (
+                              <span className="text-sm font-semibold tabular-nums text-neutral-900 dark:text-neutral-100 shrink-0">
+                                {formatMoneyAmount(row.priceAmount, displayCurrency)}
                               </span>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingBooking({ tab: 'rentalCar', id: b.id })
-                                    setEditCarDraft({ ...b })
-                                    setBookingError(null)
-                                  }}
-                                  className="text-xs text-blue-700 hover:text-blue-900"
-                                >
-                                  Edit
-                                </button>
-                                <button type="button" onClick={() => removeBooking('rentalCar', b.id)} className="text-xs text-neutral-600 hover:text-neutral-900">Remove</button>
-                              </div>
-                            </div>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {row.kind === 'flight' && row.flightBaggage ? (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-neutral-600 dark:text-neutral-400">
+                            {row.flightBaggage.checked > 0 ? (
+                              <span className="inline-flex items-center gap-1" title="Checked bags">
+                                <Luggage size={15} strokeWidth={1.75} aria-hidden />
+                                <span>×{row.flightBaggage.checked}</span>
+                              </span>
+                            ) : null}
+                            {row.flightBaggage.carryOn > 0 ? (
+                              <span className="inline-flex items-center gap-1" title="Carry-on bags">
+                                <Briefcase size={15} strokeWidth={1.75} aria-hidden />
+                                <span>×{row.flightBaggage.carryOn}</span>
+                              </span>
+                            ) : null}
+                            {row.flightBaggage.personal ? (
+                              <span className="inline-flex items-center gap-1" title="Personal item">
+                                <ShoppingBag size={15} strokeWidth={1.75} aria-hidden />
+                                <span>Personal</span>
+                              </span>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        <div className="mt-2 flex items-center justify-between">
+                          <p className="text-[11px] !text-neutral-900 dark:!text-neutral-300">
+                            {row.kind === 'activity' ? 'Removable from booking management.' : 'Editable/removable from booking management.'}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (row.kind !== 'activity' && row.kind !== 'accommodation' && row.removeId && row.removeTab) {
+                                  openEditBookingForm(row.removeTab, row.removeId)
+                                } else if (row.kind === 'accommodation' && row.stayId) {
+                                  openEditStayForm(row.stayId)
+                                }
+                              }}
+                              disabled={!canEditBookingRow}
+                              title={canEditBookingRow ? 'Edit booking' : 'This item is not editable from this card'}
+                              className="inline-flex items-center justify-center h-6 w-6 rounded-md border border-neutral-300 text-neutral-800 hover:text-neutral-950 hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed dark:border-neutral-600 dark:text-neutral-200 dark:hover:text-white dark:hover:bg-neutral-800"
+                              aria-label={canEditBookingRow ? 'Edit booking' : 'Read-only item'}
+                            >
+                              <Ellipsis size={14} />
+                            </button>
+                            {row.kind === 'activity' && row.stayId && row.activityId ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const stayId = row.stayId!
+                                  const activityId = row.activityId!
+                                  setConfirmDialog({
+                                    title: 'Delete booking?',
+                                    description: 'Are you sure you want to permanently delete this booking?',
+                                    confirmLabel: 'Delete',
+                                    cancelLabel: 'Cancel',
+                                    variant: 'danger',
+                                    onConfirm: () => removeStayActivity(stayId, activityId),
+                                  })
+                                }}
+                                className="text-xs text-rose-700 border border-rose-300 rounded-md px-2 py-1 hover:bg-rose-50"
+                              >
+                                Remove
+                              </button>
+                            ) : null}
+                            {row.kind === 'accommodation' && row.stayId ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const stayId = row.stayId!
+                                  setConfirmDialog({
+                                    title: 'Delete booking?',
+                                    description: 'Are you sure you want to permanently delete this booking?',
+                                    confirmLabel: 'Delete',
+                                    cancelLabel: 'Cancel',
+                                    variant: 'danger',
+                                    onConfirm: () => removeStay(stayId),
+                                  })
+                                }}
+                                className="text-xs text-rose-700 border border-rose-300 rounded-md px-2 py-1 hover:bg-rose-50"
+                              >
+                                Remove
+                              </button>
+                            ) : null}
+                            {row.kind !== 'activity' && row.kind !== 'accommodation' && row.removeId && row.removeTab ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const tab = row.removeTab!
+                                  const id = row.removeId!
+                                  setConfirmDialog({
+                                    title: 'Delete booking?',
+                                    description: 'Are you sure you want to permanently delete this booking?',
+                                    confirmLabel: 'Delete',
+                                    cancelLabel: 'Cancel',
+                                    variant: 'danger',
+                                    onConfirm: () => removeBooking(tab, id),
+                                  })
+                                }}
+                                className="text-xs text-rose-700 border border-rose-300 rounded-md px-2 py-1 hover:bg-rose-50"
+                              >
+                                Remove
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      </li>
+                    )
+                  })
                 )}
+              </ul>
 
-                {bookingsTab === 'flight' && (
-                  <>
-                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                      <input value={flightRouteInput} onChange={(e) => setFlightRouteInput(e.target.value)} disabled={!selectedTrip} placeholder="Route (e.g. NYC -> LAX)" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <DateSingleDropdown
-                        date={flightDepartInput}
-                        onChange={setFlightDepartInput}
-                        disabled={!selectedTrip}
-                        placeholder="Departure date"
-                        initialMonthIso={selectedTrip?.startDate}
-                      />
-                      <input value={flightConfirmationInput} onChange={(e) => setFlightConfirmationInput(e.target.value)} disabled={!selectedTrip} placeholder="Confirmation #" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <input value={flightPriceInput} onChange={(e) => setFlightPriceInput(e.target.value)} disabled={!selectedTrip} placeholder="Price" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <input value={flightQuickInput} onChange={(e) => setFlightQuickInput(e.target.value)} disabled={!selectedTrip} placeholder="Paste flight details to autofill price/confirmation/route" className="px-3 py-2 rounded-xl border border-neutral-200 sm:col-span-4" />
-                    </div>
-                    <div className="mt-2">
-                      <button
-                        type="button"
-                        onClick={autofillFlightFromText}
-                        disabled={!selectedTrip || !flightQuickInput.trim()}
-                        className="px-3 py-1.5 rounded-lg border border-neutral-200 text-xs hover:bg-neutral-50 disabled:opacity-50"
-                      >
-                        Autofill from pasted text
-                      </button>
-                    </div>
-                    <ul className="mt-3 space-y-2">
-                      {bookings.flights.map((b) => (
-                        <li key={b.id} className="px-3 py-2 rounded-xl border border-neutral-200">
-                          {editingBooking?.tab === 'flight' && editingBooking.id === b.id && editFlightDraft ? (
-                            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                              <input value={editFlightDraft.route} onChange={(e) => setEditFlightDraft((prev) => (prev ? { ...prev, route: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <DateSingleDropdown
-                                date={editFlightDraft.departDate}
-                                onChange={(next) => setEditFlightDraft((prev) => (prev ? { ...prev, departDate: next, returnDate: '' } : prev))}
-                                placeholder="Departure date"
-                                initialMonthIso={selectedTrip?.startDate}
-                              />
-                              <input value={editFlightDraft.confirmation} onChange={(e) => setEditFlightDraft((prev) => (prev ? { ...prev, confirmation: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <input value={editFlightDraft.price} onChange={(e) => setEditFlightDraft((prev) => (prev ? { ...prev, price: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <div className="sm:col-span-4 flex gap-2">
-                                <button type="button" onClick={saveBookingEdit} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold">Save</button>
-                                <button type="button" onClick={cancelBookingEdit} className="px-3 py-1.5 rounded-lg border border-neutral-200 text-xs">Cancel</button>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-sm">{b.route} {b.departDate ? `(${formatSingleDateLabel(b.departDate)})` : ''} {b.price ? `| ${b.price}` : ''} {b.confirmation ? `| ${b.confirmation}` : ''}</span>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingBooking({ tab: 'flight', id: b.id })
-                                    setEditFlightDraft({ ...b })
-                                    setBookingError(null)
-                                  }}
-                                  className="text-xs text-blue-700 hover:text-blue-900"
-                                >
-                                  Edit
-                                </button>
-                                <button type="button" onClick={() => removeBooking('flight', b.id)} className="text-xs text-neutral-600 hover:text-neutral-900">Remove</button>
-                              </div>
-                            </div>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-
-                {bookingsTab === 'restaurant' && (
-                  <>
-                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                      <input value={restaurantNameInput} onChange={(e) => setRestaurantNameInput(e.target.value)} disabled={!selectedTrip} placeholder="Restaurant" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <DateSingleDropdown date={restaurantDateInput} onChange={setRestaurantDateInput} disabled={!selectedTrip} placeholder="Booking date" initialMonthIso={selectedTrip?.startDate} />
-                      <input value={restaurantConfirmationInput} onChange={(e) => setRestaurantConfirmationInput(e.target.value)} disabled={!selectedTrip} placeholder="Booking #" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <input value={restaurantCostInput} onChange={(e) => setRestaurantCostInput(e.target.value)} disabled={!selectedTrip} placeholder="Cost" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      <input value={restaurantNotesInput} onChange={(e) => setRestaurantNotesInput(e.target.value)} disabled={!selectedTrip} placeholder="Notes" className="px-3 py-2 rounded-xl border border-neutral-200 sm:col-span-4" />
-                    </div>
-                    <ul className="mt-3 space-y-2">
-                      {bookings.restaurants.map((b) => (
-                        <li key={b.id} className="px-3 py-2 rounded-xl border border-neutral-200">
-                          {editingBooking?.tab === 'restaurant' && editingBooking.id === b.id && editRestaurantDraft ? (
-                            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                              <input value={editRestaurantDraft.name} onChange={(e) => setEditRestaurantDraft((prev) => (prev ? { ...prev, name: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <DateSingleDropdown
-                                date={editRestaurantDraft.reservationDate}
-                                onChange={(next) => setEditRestaurantDraft((prev) => (prev ? { ...prev, reservationDate: next } : prev))}
-                                placeholder="Booking date"
-                                initialMonthIso={selectedTrip?.startDate}
-                              />
-                              <input value={editRestaurantDraft.confirmation} onChange={(e) => setEditRestaurantDraft((prev) => (prev ? { ...prev, confirmation: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <input value={editRestaurantDraft.cost} onChange={(e) => setEditRestaurantDraft((prev) => (prev ? { ...prev, cost: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200" />
-                              <input value={editRestaurantDraft.notes} onChange={(e) => setEditRestaurantDraft((prev) => (prev ? { ...prev, notes: e.target.value } : prev))} className="px-3 py-2 rounded-xl border border-neutral-200 sm:col-span-4" />
-                              <div className="sm:col-span-4 flex gap-2">
-                                <button type="button" onClick={saveBookingEdit} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold">Save</button>
-                                <button type="button" onClick={cancelBookingEdit} className="px-3 py-1.5 rounded-lg border border-neutral-200 text-xs">Cancel</button>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-sm">{b.name} {b.reservationDate ? `(${formatSingleDateLabel(b.reservationDate)})` : ''} {b.cost ? `| ${b.cost}` : ''} {b.confirmation ? `| ${b.confirmation}` : ''} {b.notes ? `| ${b.notes}` : ''}</span>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingBooking({ tab: 'restaurant', id: b.id })
-                                    setEditRestaurantDraft({ ...b })
-                                    setBookingError(null)
-                                  }}
-                                  className="text-xs text-blue-700 hover:text-blue-900"
-                                >
-                                  Edit
-                                </button>
-                                <button type="button" onClick={() => removeBooking('restaurant', b.id)} className="text-xs text-neutral-600 hover:text-neutral-900">Remove</button>
-                              </div>
-                            </div>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-
-                {bookingsTab === 'accommodation' && (
-                  <>
-                    <p className="text-sm text-neutral-600">Add/edit accommodation details here. Entries are reflected in the Trip stays section.</p>
-                    <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-2 items-start">
-                      <input
-                        value={stayLocationInput}
-                        onChange={(e) => setStayLocationInput(e.target.value)}
-                        disabled={!selectedTrip}
-                        placeholder={selectedTrip ? 'Stay location (hotel/city)' : 'Select a trip first'}
-                        className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200"
-                      />
-                      <input
-                        value={stayAddressInput}
-                        onChange={(e) => setStayAddressInput(e.target.value)}
-                        disabled={!selectedTrip}
-                        placeholder="Accommodation address"
-                        className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200"
-                      />
-                      <DateRangeDropdown
-                        startDate={stayStartDate}
-                        endDate={stayEndDate}
-                        onChange={(start, end) => {
-                          setStayStartDate(start)
-                          setStayEndDate(end)
-                        }}
-                        disabled={!selectedTrip}
-                        placeholder="Select check-in and check-out dates."
-                        initialMonthIso={selectedTrip?.startDate}
-                        className="md:col-span-2"
-                      />
-                      <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2 self-start">
-                        <input value={stayPriceInput} onChange={(e) => setStayPriceInput(e.target.value)} disabled={!selectedTrip} placeholder="Price" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                        <input value={stayConfirmationRefInput} onChange={(e) => setStayConfirmationRefInput(e.target.value)} disabled={!selectedTrip} placeholder="Confirmation #" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                      </div>
-                      <input value={stayBookingUrlInput} onChange={(e) => setStayBookingUrlInput(e.target.value)} disabled={!selectedTrip} placeholder="Booking link" className="md:col-span-4 px-3 py-2 rounded-xl border border-neutral-200" />
-                    </div>
-                    <div className="mt-2 flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={addStay}
-                        disabled={!selectedTrip}
-                        className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold disabled:opacity-50"
-                      >
-                        Add stay
-                      </button>
-                      {selectedTrip?.startDate || selectedTrip?.endDate ? (
-                        <p className="text-xs text-neutral-500">Trip window: {formatDateRangeWithYear(selectedTrip?.startDate, selectedTrip?.endDate)}</p>
-                      ) : null}
-                    </div>
-                    {stayError ? <p className="mt-2 text-xs text-rose-700">{stayError}</p> : null}
-                  </>
-                )}
+              <div className="mt-4 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetBookingFormInputs()
+                    setEditingBookingForm(null)
+                    setEditingStayId(null)
+                    setIsBookingFormOpen(true)
+                  }}
+                  disabled={!selectedTrip}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold disabled:opacity-50"
+                >
+                  Add booking
+                </button>
+                <p className="text-xs text-neutral-700 dark:text-neutral-300">Only items with confirmation numbers are shown in this list.</p>
               </div>
-
-              {bookingsTab !== 'accommodation' ? (
-                <div className="mt-3 flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={addBooking}
-                    disabled={!selectedTrip}
-                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold disabled:opacity-50"
-                  >
-                    Add booking
-                  </button>
-                  {bookingError ? <p className="text-xs text-rose-700">{bookingError}</p> : null}
-                </div>
+              </div>
               ) : null}
             </div>
+            {isBookingFormOpen ? (
+              <div className="fixed inset-0 z-[70] bg-black/40 flex items-center justify-center p-4">
+                <div className="w-[min(100%,42rem)] max-h-[85vh] overflow-auto bg-white rounded-2xl shadow-2xl p-6 border border-neutral-200">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-semibold">
+                      {editingBookingForm || editingStayId ? 'Edit' : 'Add'} {bookingsTab === 'rentalCar' ? 'rental car' : bookingsTab === 'flight' ? 'flight' : bookingsTab === 'restaurant' ? 'dining/activity' : 'accommodation'}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsBookingFormOpen(false)
+                        setEditingBookingForm(null)
+                        setEditingStayId(null)
+                      }}
+                      className="text-sm px-3 py-1.5 rounded-lg border border-neutral-200"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <div className="mt-4">
+                    {bookingsTab === 'rentalCar' ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Rental company</label>
+                            <input value={carCompanyInput} onChange={(e) => setCarCompanyInput(e.target.value)} disabled={!selectedTrip} placeholder="e.g. Hertz" className="w-full px-3 py-2 rounded-xl border border-neutral-200" />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Confirmation #</label>
+                            <input value={carConfirmationInput} onChange={(e) => setCarConfirmationInput(e.target.value)} disabled={!selectedTrip} placeholder="Required" className="w-full px-3 py-2 rounded-xl border border-neutral-200" />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Pickup location</label>
+                            <input
+                              value={carPickupLocationInput}
+                              onChange={(e) => setCarPickupLocationInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              placeholder="Airport, address, or branch"
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Dropoff location</label>
+                            <input
+                              value={carDropoffLocationInput}
+                              onChange={(e) => setCarDropoffLocationInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              placeholder="Airport, city, or branch"
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Pickup date</label>
+                            <DateSingleDropdown
+                              date={carPickupInput}
+                              onChange={setCarPickupInput}
+                              disabled={!selectedTrip}
+                              placeholder="Pickup date"
+                              initialMonthIso={selectedTrip?.startDate}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Pickup time</label>
+                            <input
+                              type="time"
+                              value={carPickupTimeInput}
+                              onChange={(e) => setCarPickupTimeInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Dropoff date</label>
+                            <DateSingleDropdown
+                              date={carDropoffInput}
+                              onChange={setCarDropoffInput}
+                              disabled={!selectedTrip}
+                              placeholder="Dropoff date"
+                              initialMonthIso={selectedTrip?.startDate || carPickupInput}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Dropoff time</label>
+                            <input
+                              type="time"
+                              value={carDropoffTimeInput}
+                              onChange={(e) => setCarDropoffTimeInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Price</label>
+                          <input value={carPriceInput} onChange={(e) => setCarPriceInput(e.target.value)} disabled={!selectedTrip} placeholder="e.g. $320" className="w-full px-3 py-2 rounded-xl border border-neutral-200 sm:max-w-xs" />
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {bookingsTab === 'flight' ? (
+                      <>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">From</label>
+                            <AirportCombobox
+                              iata={flightFromIata}
+                              labelText={flightFromLabel}
+                              disabled={!selectedTrip}
+                              onSelect={(a: AirportRecord) => {
+                                setFlightFromIata(a.iata)
+                                setFlightFromLabel(formatAirportOptionLabel(a))
+                              }}
+                              onClear={() => {
+                                setFlightFromIata('')
+                                setFlightFromLabel('')
+                              }}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">To</label>
+                            <AirportCombobox
+                              iata={flightToIata}
+                              labelText={flightToLabel}
+                              disabled={!selectedTrip}
+                              onSelect={(a: AirportRecord) => {
+                                setFlightToIata(a.iata)
+                                setFlightToLabel(formatAirportOptionLabel(a))
+                              }}
+                              onClear={() => {
+                                setFlightToIata('')
+                                setFlightToLabel('')
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-3">
+                          <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Airline</label>
+                          <input
+                            value={flightAirlineInput}
+                            onChange={(e) => setFlightAirlineInput(e.target.value)}
+                            disabled={!selectedTrip}
+                            placeholder="e.g. United, Delta"
+                            className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                          />
+                        </div>
+                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Departure date</label>
+                            <DateSingleDropdown
+                              date={flightDepartInput}
+                              onChange={setFlightDepartInput}
+                              disabled={!selectedTrip}
+                              placeholder="Departure date"
+                              initialMonthIso={selectedTrip?.startDate}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Departure time</label>
+                            <input
+                              type="time"
+                              value={flightDepartTimeInput}
+                              onChange={(e) => setFlightDepartTimeInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Arrival date</label>
+                            <DateSingleDropdown
+                              date={flightArriveDateInput}
+                              onChange={setFlightArriveDateInput}
+                              disabled={!selectedTrip}
+                              placeholder="Arrival date (defaults to departure if empty)"
+                              initialMonthIso={selectedTrip?.startDate || flightDepartInput}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Arrival time</label>
+                            <input
+                              type="time"
+                              value={flightArriveTimeInput}
+                              onChange={(e) => setFlightArriveTimeInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-3">
+                          <p className="text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-2">Baggage</p>
+                          <div className="flex flex-wrap items-end gap-4">
+                            <label className="flex flex-col gap-1 text-xs text-neutral-600 dark:text-neutral-400">
+                              <span className="inline-flex items-center gap-1">
+                                <Luggage size={14} className="shrink-0 opacity-80" aria-hidden />
+                                Checked
+                              </span>
+                              <select
+                                value={flightCheckedBags}
+                                onChange={(e) => setFlightCheckedBags(Number(e.target.value))}
+                                disabled={!selectedTrip}
+                                className="px-2 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900 text-sm min-w-[4.5rem]"
+                              >
+                                {[0, 1, 2, 3, 4, 5].map((n) => (
+                                  <option key={n} value={n}>
+                                    {n}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="flex flex-col gap-1 text-xs text-neutral-600 dark:text-neutral-400">
+                              <span className="inline-flex items-center gap-1">
+                                <Briefcase size={14} className="shrink-0 opacity-80" aria-hidden />
+                                Carry-on
+                              </span>
+                              <select
+                                value={flightCarryOnBags}
+                                onChange={(e) => setFlightCarryOnBags(Number(e.target.value))}
+                                disabled={!selectedTrip}
+                                className="px-2 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900 text-sm min-w-[4.5rem]"
+                              >
+                                {[0, 1, 2, 3].map((n) => (
+                                  <option key={n} value={n}>
+                                    {n}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="inline-flex items-center gap-2 cursor-pointer text-sm text-neutral-700 dark:text-neutral-300 pb-2">
+                              <input
+                                type="checkbox"
+                                checked={flightPersonalItem}
+                                onChange={(e) => setFlightPersonalItem(e.target.checked)}
+                                disabled={!selectedTrip}
+                                className="rounded border-neutral-300"
+                              />
+                              <ShoppingBag size={16} className="shrink-0 opacity-80" aria-hidden />
+                              Personal item
+                            </label>
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <input
+                            value={flightConfirmationInput}
+                            onChange={(e) => setFlightConfirmationInput(e.target.value)}
+                            disabled={!selectedTrip}
+                            placeholder="Confirmation #"
+                            className="px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                          />
+                          <input
+                            value={flightPriceInput}
+                            onChange={(e) => setFlightPriceInput(e.target.value)}
+                            disabled={!selectedTrip}
+                            placeholder="Price"
+                            className="px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                          />
+                        </div>
+                        <input
+                          value={flightQuickInput}
+                          onChange={(e) => setFlightQuickInput(e.target.value)}
+                          disabled={!selectedTrip}
+                          placeholder="Paste flight details (e.g. SFO-LAX) to autofill airports, confirmation, price"
+                          className="mt-2 w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900 text-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={autofillFlightFromText}
+                          disabled={!selectedTrip || !flightQuickInput.trim()}
+                          className="mt-2 px-3 py-1.5 rounded-lg border border-neutral-200 text-xs hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-600 dark:hover:bg-neutral-800"
+                        >
+                          Autofill from pasted text
+                        </button>
+                      </>
+                    ) : null}
+
+                    {bookingsTab === 'restaurant' ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                        <input value={restaurantNameInput} onChange={(e) => setRestaurantNameInput(e.target.value)} disabled={!selectedTrip} placeholder="Restaurant" className="px-3 py-2 rounded-xl border border-neutral-200" />
+                        <DateSingleDropdown date={restaurantDateInput} onChange={setRestaurantDateInput} disabled={!selectedTrip} placeholder="Booking date" initialMonthIso={selectedTrip?.startDate} />
+                        <input value={restaurantConfirmationInput} onChange={(e) => setRestaurantConfirmationInput(e.target.value)} disabled={!selectedTrip} placeholder="Booking #" className="px-3 py-2 rounded-xl border border-neutral-200" />
+                        <input value={restaurantCostInput} onChange={(e) => setRestaurantCostInput(e.target.value)} disabled={!selectedTrip} placeholder="Cost" className="px-3 py-2 rounded-xl border border-neutral-200" />
+                        <input value={restaurantNotesInput} onChange={(e) => setRestaurantNotesInput(e.target.value)} disabled={!selectedTrip} placeholder="Notes" className="px-3 py-2 rounded-xl border border-neutral-200 sm:col-span-4" />
+                      </div>
+                    ) : null}
+
+                    {bookingsTab === 'accommodation' ? (
+                      <>
+                        <p className="text-sm text-neutral-600 mb-3">Accommodation entries are managed in stays. Address is optional and can be added later.</p>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-start">
+                          <input value={stayLocationInput} onChange={(e) => setStayLocationInput(e.target.value)} disabled={!selectedTrip} placeholder={selectedTrip ? 'Stay location (hotel/city)' : 'Select a trip first'} className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200" />
+                          <input value={stayAddressInput} onChange={(e) => setStayAddressInput(e.target.value)} disabled={!selectedTrip} placeholder="Accommodation address (optional)" className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200" />
+                          <DateRangeDropdown
+                            startDate={stayStartDate}
+                            endDate={stayEndDate}
+                            onChange={(start, end) => {
+                              setStayStartDate(start)
+                              setStayEndDate(end)
+                            }}
+                            disabled={!selectedTrip}
+                            placeholder="Select check-in and check-out dates."
+                            initialMonthIso={selectedTrip?.startDate}
+                            className="md:col-span-2"
+                          />
+                          <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Check-in time</label>
+                              <input
+                                type="time"
+                                value={stayCheckInTimeInput}
+                                onChange={(e) => setStayCheckInTimeInput(e.target.value)}
+                                disabled={!selectedTrip}
+                                className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Check-out time</label>
+                              <input
+                                type="time"
+                                value={stayCheckOutTimeInput}
+                                onChange={(e) => setStayCheckOutTimeInput(e.target.value)}
+                                disabled={!selectedTrip}
+                                className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                              />
+                            </div>
+                          </div>
+                          <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2 self-start">
+                            <input value={stayPriceInput} onChange={(e) => setStayPriceInput(e.target.value)} disabled={!selectedTrip} placeholder="Price" className="px-3 py-2 rounded-xl border border-neutral-200" />
+                            <input value={stayConfirmationRefInput} onChange={(e) => setStayConfirmationRefInput(e.target.value)} disabled={!selectedTrip} placeholder="Confirmation #" className="px-3 py-2 rounded-xl border border-neutral-200" />
+                          </div>
+                          <input value={stayBookingUrlInput} onChange={(e) => setStayBookingUrlInput(e.target.value)} disabled={!selectedTrip} placeholder="Booking link" className="md:col-span-4 px-3 py-2 rounded-xl border border-neutral-200" />
+                        </div>
+                        {stayError ? <p className="mt-2 text-xs text-rose-700">{stayError}</p> : null}
+                      </>
+                    ) : null}
+                  </div>
+
+                  {bookingError ? <p className="mt-3 text-xs text-rose-700">{bookingError}</p> : null}
+
+                  <div className="mt-4 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsBookingFormOpen(false)
+                        setEditingBookingForm(null)
+                        setEditingStayId(null)
+                      }}
+                      className="px-3 py-2 rounded-lg border border-neutral-200 text-sm"
+                    >
+                      Cancel
+                    </button>
+                    {bookingsTab === 'accommodation' ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const ok = editingStayId ? saveStayFormEdit() : addStay()
+                          if (ok) {
+                            setIsBookingFormOpen(false)
+                            setEditingBookingForm(null)
+                            setEditingStayId(null)
+                          }
+                        }}
+                        disabled={!selectedTrip}
+                        className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold disabled:opacity-50"
+                      >
+                        {editingStayId ? 'Save changes' : 'Add stay'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const ok = editingBookingForm ? saveBookingFormEdit() : addBooking()
+                          if (ok) {
+                            setIsBookingFormOpen(false)
+                            setEditingBookingForm(null)
+                          }
+                        }}
+                        disabled={!selectedTrip}
+                        className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold disabled:opacity-50"
+                      >
+                        {editingBookingForm ? 'Save changes' : 'Add booking'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : null}
 
             {/* Places to visit */}
             <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 overflow-hidden">
@@ -3275,21 +6148,43 @@ export default function App() {
                     <div className="flex-1 min-w-0 px-4 py-3 rounded-xl border border-neutral-200 bg-neutral-50 text-sm text-neutral-700 shadow-sm">
                       {selectedTrip ? `Current trip: ${selectedTrip.country}` : 'No trip selected'}
                     </div>
-                    <button
-                      type="button"
-                      disabled={!selectedTrip}
-                      onClick={() => {
-                        if (!selectedTrip) return
-                        if (!confirm(`Delete trip "${selectedTrip.country}"?`)) return
-                        setState((prev) => {
-                          const trips = prev.trips.filter((t) => t.id !== selectedTrip.id)
-                          return { trips, selectedTripId: trips[0]?.id ?? null }
-                        })
-                      }}
-                      className="px-4 py-3 rounded-xl border border-neutral-200 text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 disabled:hover:bg-transparent shrink-0"
-                    >
-                      Delete trip
-                    </button>
+                    {selectedTrip?.cancelled ? (
+                      <div className="flex flex-wrap gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setTripCancelledFlag(selectedTrip.id, false)}
+                          className="px-4 py-3 rounded-xl border border-neutral-200 text-neutral-700 hover:bg-neutral-50"
+                        >
+                          Restore trip
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const t = selectedTrip
+                            setConfirmDialog({
+                              title: 'Delete trip permanently?',
+                              description: `Permanently delete "${t.country}"? This cannot be undone.`,
+                              confirmLabel: 'Delete permanently',
+                              cancelLabel: 'Cancel',
+                              variant: 'danger',
+                              onConfirm: () => permanentlyRemoveTrip(t.id),
+                            })
+                          }}
+                          className="px-4 py-3 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900/50 dark:text-rose-400 dark:hover:bg-rose-950/40"
+                        >
+                          Delete permanently
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={!selectedTrip}
+                        onClick={moveTripToCancelled}
+                        className="px-4 py-3 rounded-xl border border-neutral-200 text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 disabled:hover:bg-transparent shrink-0"
+                      >
+                        Cancel Trip
+                      </button>
+                    )}
                   </div>
 
                   <div className="mb-6">
@@ -3534,7 +6429,7 @@ export default function App() {
                   <div className="mt-4 p-4 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-100 rounded-2xl flex gap-3">
                     <Info className="text-emerald-600 shrink-0" size={18} />
                     <p className="text-sm text-emerald-800">
-                      Trips, places, and side goals are saved locally in your browser. Refresh-safe.
+                      Trips, places, and side-quests are saved locally in your browser. Refresh-safe.
                     </p>
                   </div>
                 </div>
@@ -3628,10 +6523,19 @@ export default function App() {
                   <h2 className="text-2xl font-serif font-bold">Itinerary</h2>
                   <p className="text-neutral-500 text-sm">Day-by-day planner with a visual timeline and quick context cards.</p>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setItineraryViewMode((m) => (m === 'timeline' ? 'calendar' : 'timeline'))}
+                  className="shrink-0 inline-flex items-center gap-2 rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm font-semibold text-neutral-800 hover:bg-neutral-100 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
+                >
+                  <Calendar size={16} aria-hidden />
+                  {itineraryViewMode === 'timeline' ? 'Calendar View' : 'Timeline View'}
+                </button>
               </div>
 
               {selectedTrip && timelineDays.length > 0 ? (
                 <div className="mt-5 space-y-5">
+                  {itineraryViewMode === 'timeline' ? (
                   <div className="itinerary-rail">
                     {timelineDays.map((day, index) => {
                       const label = formatSingleDateLabel(day)
@@ -3652,12 +6556,39 @@ export default function App() {
                       )
                     })}
                   </div>
+                  ) : null}
 
                   {(() => {
                     const activeStays = staysByDay.get(selectedTimelineDate) ?? []
                     const anchorStay = activeStays[0]
                     const selectedActivities = activitiesByDay.get(selectedTimelineDate) ?? []
                     const highlightedActivity = selectedActivities[0]?.activity
+                    const isTodayCard = selectedTimelineDate === todayIso
+                    const titleName = isTodayCard
+                      ? activeSoonActivity?.name ?? 'Nothing in the next 30 minutes'
+                      : highlightedActivity?.name ?? 'No activity yet'
+                    const titleNotes = isTodayCard
+                      ? activeSoonActivity?.notes ||
+                        (activeSoonActivity ? '' : 'No timed activity starting in the next 30 minutes (needs a parseable time).')
+                      : highlightedActivity?.notes || formatSingleDateLabel(selectedTimelineDate)
+                    const titleTime = isTodayCard
+                      ? activeSoonActivity?.time || (activeSoonActivity ? '' : '—')
+                      : highlightedActivity?.time || 'No time set'
+                    const firstSched = selectedActivities[0]
+                    let highlightDirectionsDest = (activeSoonDirectionsDestination || '').trim()
+                    if (!highlightDirectionsDest && !isTodayCard && firstSched) {
+                      highlightDirectionsDest = directionsDestinationForScheduleItem(firstSched)
+                    }
+                    if (!highlightDirectionsDest) {
+                      highlightDirectionsDest = (anchorStay?.address || anchorStay?.location || '').trim()
+                    }
+                    if (!highlightDirectionsDest && selectedTrip?.country) {
+                      highlightDirectionsDest = selectedTrip.country.trim()
+                    }
+                    const highlightDirectionsHref =
+                      highlightDirectionsDest.length > 0
+                        ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(highlightDirectionsDest)}`
+                        : 'https://www.google.com/maps/'
 
                     return (
                       <div className="grid gap-4 md:grid-cols-2">
@@ -3683,12 +6614,23 @@ export default function App() {
                         </div>
 
                         <div className="itinerary-highlight-card">
-                          <span className="itinerary-highlight-pill">Active now</span>
-                          <h3 className="mt-3 text-2xl font-semibold">{highlightedActivity?.name || 'No activity yet'}</h3>
-                          <p className="mt-1 text-sm text-neutral-500">{highlightedActivity?.notes || formatSingleDateLabel(selectedTimelineDate)}</p>
-                          <div className="mt-4 flex items-center justify-between text-xs text-neutral-500">
-                            <span>{highlightedActivity?.time || 'No time set'}</span>
-                            <span>{selectedActivities.length} activities</span>
+                          <span className="itinerary-highlight-pill">Active soon</span>
+                          <h3 className="mt-3 text-2xl font-semibold">{titleName}</h3>
+                          <p className="mt-1 text-sm text-neutral-500">{titleNotes}</p>
+                          <div className="mt-4 flex items-center justify-between gap-2 flex-wrap text-xs text-neutral-500">
+                            <span>{titleTime}</span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <a
+                                href={highlightDirectionsHref}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="itinerary-summary-link"
+                              >
+                                <ExternalLink size={12} aria-hidden />
+                                Directions
+                              </a>
+                              <span>{selectedActivities.length} activities</span>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -3696,47 +6638,131 @@ export default function App() {
                   })()}
 
                   <div className="itinerary-timeline-shell">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-lg font-semibold">
-                        {selectedDayNumber ? `Day ${selectedDayNumber}: ${formatSingleDateLabel(selectedTimelineDate)}` : `Day: ${formatSingleDateLabel(selectedTimelineDate)}`}
-                      </h3>
-                      <span className="text-xs text-neutral-500">{(activitiesByDay.get(selectedTimelineDate) ?? []).length} activities</span>
-                    </div>
-                    <div className="mt-4 space-y-2">
-                      {(activitiesByDay.get(selectedTimelineDate) ?? []).map(({ stayId, activity: a }) => (
-                        <div key={a.id} className="itinerary-activity-row-wrap">
-                          <div className="itinerary-activity-lane-dot" />
-                          <div className="itinerary-activity-row">
-                            {(a.photoUrl || activityMetaById[a.id]?.photoUrl) ? (
-                              <img src={a.photoUrl || activityMetaById[a.id]?.photoUrl} alt={a.name} className="itinerary-activity-photo-square" />
-                            ) : (
-                              <div className="itinerary-activity-photo-square itinerary-activity-photo-square--placeholder" />
-                            )}
-                            <div className="itinerary-activity-main">
-                              <div className="flex items-start gap-2">
-                                <input type="time" value={a.time} onChange={(e) => updateStayActivity(stayId, a.id, { time: e.target.value })} className="px-2 py-1 rounded border border-neutral-200 text-xs w-[92px]" />
-                                <input value={a.name} onChange={(e) => updateStayActivity(stayId, a.id, { name: e.target.value })} className="flex-1 px-2 py-1 rounded border border-neutral-200 text-xs" />
-                                <input value={a.cost} onChange={(e) => updateStayActivity(stayId, a.id, { cost: e.target.value })} placeholder="Cost" className="px-2 py-1 rounded border border-neutral-200 text-xs w-[88px]" />
-                                <button type="button" onClick={() => removeStayActivity(stayId, a.id)} className="p-1 rounded text-neutral-500 hover:bg-neutral-100"><X size={14} /></button>
-                              </div>
-                              <input value={a.notes} onChange={(e) => updateStayActivity(stayId, a.id, { notes: e.target.value })} placeholder="Notes" className="mt-1 w-full px-2 py-1 rounded border border-neutral-200 text-xs" />
-                              {(a.category || activityMetaById[a.id]?.category) ? (
-                                <span className="itinerary-rec-category mt-1 w-fit">{a.category || activityMetaById[a.id]?.category}</span>
-                              ) : null}
-                              {(a.googleMapsUri || activityMetaById[a.id]?.googleMapsUri) ? (
-                                <a href={a.googleMapsUri || activityMetaById[a.id]?.googleMapsUri} target="_blank" rel="noopener noreferrer" className="itinerary-google-link">
-                                  <ExternalLink size={12} />
-                                  Google
-                                </a>
-                              ) : null}
-                            </div>
-                          </div>
+                    {itineraryViewMode === 'timeline' ? (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-lg font-semibold">
+                            {selectedDayNumber ? `Day ${selectedDayNumber}: ${formatSingleDateLabel(selectedTimelineDate)}` : `Day: ${formatSingleDateLabel(selectedTimelineDate)}`}
+                          </h3>
+                          <span className="text-xs text-neutral-500">{(activitiesByDay.get(selectedTimelineDate) ?? []).length} activities</span>
                         </div>
-                      ))}
-                      {(activitiesByDay.get(selectedTimelineDate) ?? []).length === 0 ? <p className="text-xs text-neutral-500">No activities for this day yet.</p> : null}
-                    </div>
+                        <div className="mt-4 space-y-2">
+                          {(activitiesByDay.get(selectedTimelineDate) ?? []).map((item) => {
+                            const { stayId, activity: a, bookingRef } = item
+                            const rowKey = `${stayId}-${a.id}`
+                            if (bookingRef) {
+                              return (
+                                <div key={rowKey} className="itinerary-activity-row-wrap">
+                                  <div className="itinerary-activity-lane-dot" />
+                                  <div className="itinerary-activity-row">
+                                    <div
+                                      className="itinerary-activity-photo-square itinerary-activity-photo-square--placeholder flex items-center justify-center text-neutral-400 dark:text-neutral-500"
+                                      aria-hidden
+                                    >
+                                      <Car size={20} strokeWidth={1.75} />
+                                    </div>
+                                    <div className="itinerary-activity-main">
+                                      <div className="flex items-start gap-2 flex-wrap">
+                                        <span className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-600 text-xs font-medium tabular-nums w-[92px] shrink-0 bg-neutral-50 dark:bg-neutral-800/80">
+                                          {a.time}
+                                        </span>
+                                        <span className="flex-1 min-w-[120px] px-2 py-1 text-xs font-medium text-neutral-800 dark:text-neutral-100">{a.name}</span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveTab('planner')
+                                            setBookingsTab(bookingRef.tab)
+                                            setBookingFilter(bookingRef.tab)
+                                            openEditBookingForm(bookingRef.tab, bookingRef.id)
+                                          }}
+                                          className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline shrink-0"
+                                        >
+                                          Edit booking
+                                        </button>
+                                      </div>
+                                      {a.notes ? <p className="mt-1 text-xs text-neutral-500">{a.notes}</p> : null}
+                                    </div>
+                                  </div>
+                                </div>
+                              )
+                            }
+                            return (
+                              <div key={rowKey} className="itinerary-activity-row-wrap">
+                                <div className="itinerary-activity-lane-dot" />
+                                <div className="itinerary-activity-row">
+                                  {(a.photoUrl || activityMetaById[a.id]?.photoUrl) ? (
+                                    <img src={a.photoUrl || activityMetaById[a.id]?.photoUrl} alt={a.name} className="itinerary-activity-photo-square" />
+                                  ) : (
+                                    <div className="itinerary-activity-photo-square itinerary-activity-photo-square--placeholder" />
+                                  )}
+                                  <div className="itinerary-activity-main">
+                                    <div className="flex items-start gap-2 flex-wrap">
+                                      <input type="time" value={a.time} onChange={(e) => updateStayActivity(stayId, a.id, { time: e.target.value })} className="px-2 py-1 rounded border border-neutral-200 text-xs w-[92px]" />
+                                      <input value={a.name} onChange={(e) => updateStayActivity(stayId, a.id, { name: e.target.value })} className="flex-1 min-w-[120px] px-2 py-1 rounded border border-neutral-200 text-xs" />
+                                      <input
+                                        value={a.confirmationRef}
+                                        onChange={(e) => updateStayActivity(stayId, a.id, { confirmationRef: e.target.value })}
+                                        placeholder="Conf. #"
+                                        className="px-2 py-1 rounded border border-neutral-200 text-xs w-[100px]"
+                                      />
+                                      <input value={a.cost} onChange={(e) => updateStayActivity(stayId, a.id, { cost: e.target.value })} placeholder="Cost" className="px-2 py-1 rounded border border-neutral-200 text-xs w-[88px]" />
+                                      <button type="button" onClick={() => removeStayActivity(stayId, a.id)} className="p-1 rounded text-neutral-500 hover:bg-neutral-100"><X size={14} /></button>
+                                    </div>
+                                    <input value={a.notes} onChange={(e) => updateStayActivity(stayId, a.id, { notes: e.target.value })} placeholder="Notes" className="mt-1 w-full px-2 py-1 rounded border border-neutral-200 text-xs" />
+                                    {(a.category || activityMetaById[a.id]?.category) ? (
+                                      <span className="itinerary-rec-category mt-1 w-fit">{a.category || activityMetaById[a.id]?.category}</span>
+                                    ) : null}
+                                    {(a.googleMapsUri || activityMetaById[a.id]?.googleMapsUri) ? (
+                                      <a href={a.googleMapsUri || activityMetaById[a.id]?.googleMapsUri} target="_blank" rel="noopener noreferrer" className="itinerary-google-link">
+                                        <ExternalLink size={12} />
+                                        Google
+                                      </a>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          })}
+                          {(activitiesByDay.get(selectedTimelineDate) ?? []).length === 0 ? <p className="text-xs text-neutral-500">No activities for this day yet.</p> : null}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="itinerary-calendar-mode">
+                        {calendarDropError ? <p className="text-sm text-rose-600 mb-3">{calendarDropError}</p> : null}
+                        <ItineraryCalendarGrid
+                          visibleDays={visibleCalendarDays}
+                          timelineDays={timelineDays}
+                          activitiesByDay={activitiesByDay}
+                          stays={stays}
+                          staysByDay={staysByDay}
+                          todayIso={todayIso}
+                          nowMinutes={nowMinutes}
+                          selectedTimelineDate={selectedTimelineDate}
+                          onSelectDay={setSelectedTimelineDate}
+                          onCalendarActivityDrop={applyCalendarDrop}
+                          onOpenActivityDetail={(stayId, activity) => setCalendarActivityDetail({ stayId, activity })}
+                          onOpenBookingFromCalendar={(tab, id) => {
+                            setActiveTab('planner')
+                            setBookingsTab(tab)
+                            setBookingFilter(tab)
+                            openEditBookingForm(tab, id)
+                          }}
+                          weekStartIndex={calendarWeekStartIndex}
+                          onPrevWeek={() => setCalendarWeekStartIndex((i) => Math.max(0, i - 7))}
+                          onNextWeek={() => setCalendarWeekStartIndex((i) => Math.min(calendarMaxStart, i + 7))}
+                          canPrev={canPrevCalendar}
+                          canNext={canNextCalendar}
+                          onShiftCalendarDays={(delta) =>
+                            setCalendarWeekStartIndex((i) => Math.max(0, Math.min(calendarMaxStart, i + delta)))
+                          }
+                          canShiftCalendarPrev={calendarWeekStartIndex > 0}
+                          canShiftCalendarNext={calendarWeekStartIndex < calendarMaxStart}
+                          formatDayLabel={formatCalendarDayHeaderLabel}
+                        />
+                      </div>
+                    )}
 
-                    <div className="itinerary-day-recommendations">
+                    <div className={`itinerary-day-recommendations ${itineraryViewMode === 'calendar' ? 'mt-8 pt-4 border-t border-neutral-200 dark:border-neutral-700' : ''}`}>
                       <div className="flex items-center justify-between gap-2 flex-wrap">
                         <p className="text-sm font-semibold">Recommended for this day</p>
                         <p className="text-xs text-neutral-500">
@@ -3795,10 +6821,20 @@ export default function App() {
 
                     {(() => {
                       const activeStays = staysByDay.get(selectedTimelineDate) ?? []
-                      const targetStay = activeStays[0]
-                      const draftKey = `${targetStay?.id ?? 'none'}|${selectedTimelineDate}`
-                      const draft = activityDrafts[draftKey] ?? { name: '', time: '', cost: '', notes: '' }
-                      if (!targetStay) return <p className="mt-4 text-xs text-neutral-500">No accommodation for this day.</p>
+                      const stayOnThisDay = activeStays[0]
+                      const storageStayId = resolveStayIdForActivityStorage(stays, selectedTimelineDate)
+                      const draftKey = `${storageStayId ?? 'none'}|${selectedTimelineDate}`
+                      const draft = activityDrafts[draftKey] ?? { name: '', time: '', confirmationRef: '', cost: '', notes: '' }
+                      if (!storageStayId) {
+                        return (
+                          <p className="mt-4 text-xs text-neutral-500">
+                            Add at least one accommodation on this trip to save activities (they can be scheduled on any trip day).
+                          </p>
+                        )
+                      }
+                      const activityNamePlaceholder = stayOnThisDay
+                        ? `Add activity for ${stayOnThisDay.location}`
+                        : 'Add activity for this day'
                       return (
                         <div className="mt-4">
                           <div className="space-y-2">
@@ -3825,6 +6861,7 @@ export default function App() {
                                           ...draft,
                                           name: placeName || draft.name,
                                           notes: placeAddress || draft.notes,
+                                          confirmationRef: draft.confirmationRef,
                                         },
                                       }))
                                       setDraftPlaceMeta((prev) => ({
@@ -3846,14 +6883,20 @@ export default function App() {
                               </div>
                             ) : null}
                           </div>
-                        <div className="mt-2 grid grid-cols-1 md:grid-cols-[1fr_90px_90px_auto] gap-2">
-                          <input value={draft.name} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, name: e.target.value } }))} placeholder={`Add activity for ${targetStay.location}`} className="px-2 py-1.5 rounded border border-neutral-200 text-xs" />
+                        <div className="mt-2 grid grid-cols-1 md:grid-cols-[1fr_90px_100px_90px_auto] gap-2">
+                          <input value={draft.name} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, name: e.target.value } }))} placeholder={activityNamePlaceholder} className="px-2 py-1.5 rounded border border-neutral-200 text-xs" />
                           <input type="time" value={draft.time} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, time: e.target.value } }))} className="px-2 py-1.5 rounded border border-neutral-200 text-xs" />
+                          <input
+                            value={draft.confirmationRef}
+                            onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, confirmationRef: e.target.value } }))}
+                            placeholder="Conf. #"
+                            className="px-2 py-1.5 rounded border border-neutral-200 text-xs"
+                          />
                           <input value={draft.cost} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, cost: e.target.value } }))} placeholder="Cost" className="px-2 py-1.5 rounded border border-neutral-200 text-xs" />
-                          <button type="button" onClick={() => addStayActivity(targetStay.id, selectedTimelineDate)} className="px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-semibold">Add</button>
-                          <input value={draft.notes} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, notes: e.target.value } }))} placeholder="Notes" className="md:col-span-4 px-2 py-1.5 rounded border border-neutral-200 text-xs" />
+                          <button type="button" onClick={() => addStayActivity(storageStayId, selectedTimelineDate)} className="px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-semibold">Add</button>
+                          <input value={draft.notes} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, notes: e.target.value } }))} placeholder="Notes" className="md:col-span-5 px-2 py-1.5 rounded border border-neutral-200 text-xs" />
                           {draftPlaceMeta[draftKey] ? (
-                            <div className="md:col-span-4 flex items-center gap-2 text-xs text-neutral-500">
+                            <div className="md:col-span-5 flex items-center gap-2 text-xs text-neutral-500">
                               {draftPlaceMeta[draftKey].photoUrl ? <img src={draftPlaceMeta[draftKey].photoUrl} alt={draftPlaceMeta[draftKey].label} className="itinerary-inline-thumb" /> : null}
                               <span className="truncate">Selected place: {draftPlaceMeta[draftKey].label}</span>
                               <a href={placeGoogleUrl(draftPlaceMeta[draftKey])} target="_blank" rel="noopener noreferrer" className="itinerary-google-link"><ExternalLink size={12} />Google</a>
@@ -3890,7 +6933,10 @@ export default function App() {
                 </div>
                 <div className="rounded-2xl border border-indigo-200 bg-indigo-50 pl-4 pr-3 py-3 sm:min-w-[250px] w-fit">
                   <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Estimated Budget</p>
-                  <p className="text-4xl font-bold text-indigo-900 mt-1 leading-none">{formatMoney(budgetTotals.total)}</p>
+                  <p className="text-4xl font-bold text-indigo-900 mt-1 leading-none">{formatMoneyAmount(budgetTotals.total, displayCurrency)}</p>
+                  <p className="mt-1 text-xs text-indigo-700/80">
+                    {budgetPerDay ? `${formatMoneyAmount(budgetPerDay.total, displayCurrency)}/day` : 'Set trip dates for per-day average'}
+                  </p>
                 </div>
               </div>
 
@@ -3902,7 +6948,10 @@ export default function App() {
                     </span>
                     <p className="font-bold text-neutral-900">Vehicle</p>
                   </div>
-                  <p className="text-xl font-bold text-neutral-900">{formatMoney(budgetTotals.vehicle)}</p>
+                  <div className="text-right">
+                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.vehicle, displayCurrency)}</p>
+                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.vehicle, displayCurrency)}/day` : '—'}</p>
+                  </div>
                 </div>
 
                 <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
@@ -3912,7 +6961,10 @@ export default function App() {
                     </span>
                     <p className="font-bold text-neutral-900">Flights</p>
                   </div>
-                  <p className="text-xl font-bold text-neutral-900">{formatMoney(budgetTotals.flights)}</p>
+                  <div className="text-right">
+                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.flights, displayCurrency)}</p>
+                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.flights, displayCurrency)}/day` : '—'}</p>
+                  </div>
                 </div>
 
                 <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
@@ -3922,7 +6974,10 @@ export default function App() {
                     </span>
                     <p className="font-bold text-neutral-900">Accommodation</p>
                   </div>
-                  <p className="text-xl font-bold text-neutral-900">{formatMoney(budgetTotals.accommodation)}</p>
+                  <div className="text-right">
+                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.accommodation, displayCurrency)}</p>
+                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.accommodation, displayCurrency)}/day` : '—'}</p>
+                  </div>
                 </div>
 
                 <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
@@ -3932,7 +6987,10 @@ export default function App() {
                     </span>
                     <p className="font-bold text-neutral-900">Activities</p>
                   </div>
-                  <p className="text-xl font-bold text-neutral-900">{formatMoney(budgetTotals.activities)}</p>
+                  <div className="text-right">
+                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.activities, displayCurrency)}</p>
+                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.activities, displayCurrency)}/day` : '—'}</p>
+                  </div>
                 </div>
 
                 <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
@@ -3942,7 +7000,10 @@ export default function App() {
                     </span>
                     <p className="font-bold text-neutral-900">Food</p>
                   </div>
-                  <p className="text-xl font-bold text-neutral-900">{formatMoney(budgetTotals.food)}</p>
+                  <div className="text-right">
+                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.food, displayCurrency)}</p>
+                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.food, displayCurrency)}/day` : '—'}</p>
+                  </div>
                 </div>
               </div>
 
@@ -3960,7 +7021,7 @@ export default function App() {
                 <div>
                   <h2 className="text-2xl font-serif font-bold">Map</h2>
                   <p className="text-neutral-500 text-sm">
-                    {selectedTrip ? `Explore key locations and travel flow for ${selectedTrip.country}.` : 'Select a trip to see map details.'}
+                    {selectedTrip ? 'Your trip on the map.' : 'Select a trip to see the map.'}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
@@ -3972,6 +7033,56 @@ export default function App() {
                   </span>
                 </div>
               </div>
+
+              {selectedTrip ? (
+                <ul className="mt-4 list-none space-y-2.5 text-sm">
+                  {MAP_CATEGORIES.map((c) => {
+                    const vis = mapCategoryVisible[c]
+                    const label = MAP_LEGEND_LABELS[c]
+                    const ariaLabel = `${vis ? 'Hide' : 'Show'} ${MAP_CATEGORY_LABELS[c]} on map`
+                    const Icon = MAP_LEGEND_ICON[c]
+                    const circleBg =
+                      c === 'accommodation'
+                        ? 'bg-blue-600'
+                        : c === 'place'
+                          ? 'bg-emerald-600'
+                          : c === 'flight'
+                            ? 'bg-violet-600'
+                            : c === 'rental'
+                              ? 'bg-indigo-600'
+                              : c === 'dining'
+                                ? 'bg-amber-600'
+                                : 'bg-rose-600'
+                    return (
+                      <li key={c} className="flex items-center gap-3 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => setMapCategoryVisible((prev) => ({ ...prev, [c]: !prev[c] }))}
+                          aria-pressed={vis}
+                          aria-label={ariaLabel}
+                          className={`inline-flex h-7 w-7 shrink-0 rounded-full items-center justify-center shadow transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 ${circleBg} ${
+                            vis ? '' : 'opacity-45 grayscale'
+                          }`}
+                        >
+                          <Icon className="h-3.5 w-3.5 text-white" strokeWidth={2} aria-hidden />
+                        </button>
+                        <span className={`text-neutral-800 ${vis ? '' : 'text-neutral-400'}`}>{label}</span>
+                      </li>
+                    )
+                  })}
+                  <li className="flex items-center gap-3 min-w-0 pt-1 border-t border-neutral-200 mt-1">
+                    <span className="inline-block h-1 w-8 shrink-0 rounded-full bg-blue-600 opacity-90" aria-hidden />
+                    <span className="text-neutral-700">Outbound: stays and flights (straight line)</span>
+                  </li>
+                  <li className="flex items-center gap-3 min-w-0">
+                    <span
+                      className="inline-block h-1 w-8 shrink-0 border-t-2 border-dotted border-neutral-500 opacity-90"
+                      aria-hidden
+                    />
+                    <span className="text-neutral-700">Return leg</span>
+                  </li>
+                </ul>
+              ) : null}
 
               {mapApiError ? <p className="mt-3 text-xs text-rose-700">{mapApiError}</p> : null}
 
@@ -3988,20 +7099,33 @@ export default function App() {
                   <p className="text-sm font-semibold">Stay route order</p>
                   <ol className="mt-2 space-y-1 text-sm text-neutral-700 list-decimal list-inside">
                     {stays.length === 0 ? <li className="text-neutral-500">No stays added yet.</li> : null}
-                    {stays.map((s) => (
-                      <li key={s.id}>
-                        {s.location} {s.startDate || s.endDate ? `(${formatDateRangeLabel(s.startDate, s.endDate)})` : ''}
-                      </li>
-                    ))}
+                    {stays.map((s) => {
+                      const cinT = (s.checkInTime ?? '').trim()
+                      const coutT = (s.checkOutTime ?? '').trim()
+                      const cinOk = cinT && parseTimeToMinutes(cinT) !== null
+                      const coutOk = coutT && parseTimeToMinutes(coutT) !== null
+                      const timeSuffix =
+                        cinOk || coutOk
+                          ? ` · ${[cinOk ? `in ${normalizeHhMmTime(cinT)}` : '', coutOk ? `out ${normalizeHhMmTime(coutT)}` : '']
+                              .filter(Boolean)
+                              .join(', ')}`
+                          : ''
+                      return (
+                        <li key={s.id}>
+                          {s.location}{' '}
+                          {s.startDate || s.endDate ? `(${formatDateRangeLabel(s.startDate, s.endDate)}${timeSuffix})` : ''}
+                        </li>
+                      )
+                    })}
                   </ol>
                 </div>
                 <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
                   <p className="text-sm font-semibold">Key locations</p>
                   <ul className="mt-2 space-y-1 text-sm text-neutral-700">
                     {mapPoints.length === 0 ? <li className="text-neutral-500">No map locations available.</li> : null}
-                    {mapPoints.slice(0, 12).map((p) => (
+                    {mapPoints.slice(0, 16).map((p) => (
                       <li key={p.key}>
-                        <span className="font-medium">{p.kind === 'stay' ? 'Stay' : 'Place'}:</span> {p.label}
+                        <span className="font-medium">{MAP_CATEGORY_LABELS[p.category]}:</span> {p.label}
                       </li>
                     ))}
                   </ul>
@@ -4044,10 +7168,11 @@ export default function App() {
       </div>
 
       <footer className="bg-neutral-900 text-white/50 py-10 px-4 text-center text-sm mt-10">
-        <p className="mb-2">Trip planner baseline UI</p>
+        <p className="mb-2">{BRAND_FOOTER_TAGLINE}</p>
         <p>Local-first • Saved in your browser</p>
       </footer>
     </div>
+    </>
   )
 }
 
