@@ -1,0 +1,18 @@
+# Waypoint static site. Run from repo root: docker compose -f deploy/docker-compose.yml --env-file deploy/.env.production up -d --build
+# Supabase runs separately (official docker stack); see deploy/SUPABASE.md
+
+services:
+  waypoint:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+        VITE_GOOGLE_MAPS_API_KEY: ${VITE_GOOGLE_MAPS_API_KEY}
+        VITE_GOOGLE_MAPS_MAP_ID: ${VITE_GOOGLE_MAPS_MAP_ID}
+    ports:
+      # Publish on all interfaces so Nginx Proxy Manager (Docker) can reach the host via 172.17.0.1:8081.
+      # Block 8081 from the WAN in your firewall if this host is public.
+      - "8081:80"
+    restart: unless-stopped

@@ -51,6 +51,7 @@ import {
   X,
   LogIn,
   LogOut,
+  Mail,
   User,
   History,
   CircleSlash,
@@ -61,6 +62,8 @@ import 'react-day-picker/style.css'
 import { AirportCombobox } from './AirportCombobox'
 import type { AirportRecord } from './data/airports'
 import { formatAirportOptionLabel, getAirportByIata } from './data/airportLookup'
+import { getAuthEmailRedirectTo } from './authRedirects'
+import { mapSupabaseAuthError } from './authErrors'
 import {
   clearAuthSession,
   loadAuthSession,
@@ -71,6 +74,7 @@ import {
   tripsStorageKey,
   type AuthSession,
 } from './auth'
+import { PASSWORD_RULES_SUMMARY, validateRegistrationPassword } from './passwordPolicy'
 import { getSupabase, isSupabaseConfigured } from './supabaseClient'
 import { authSessionFromSupabaseUser, fetchUserTripsState, upsertProfileDisplayName, upsertUserTrips } from './tripsRemote'
 import { buildFlightRouteDisplay, loadTripsState, saveTripsState } from './tripStorage'
@@ -2127,9 +2131,13 @@ export default function App() {
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [authEmailInput, setAuthEmailInput] = useState('')
   const [authPasswordInput, setAuthPasswordInput] = useState('')
+  const [authPasswordConfirmInput, setAuthPasswordConfirmInput] = useState('')
   const [authNameInput, setAuthNameInput] = useState('')
   const [authFormError, setAuthFormError] = useState<string | null>(null)
   const [authBusy, setAuthBusy] = useState(false)
+  /** Set after Supabase signUp when email confirmation is required (no session yet). */
+  const [authPendingVerificationEmail, setAuthPendingVerificationEmail] = useState<string | null>(null)
+  const [verificationResendMessage, setVerificationResendMessage] = useState<string | null>(null)
   const [localImportDismissed, setLocalImportDismissed] = useState(false)
 
   const skipRemoteSaveRef = useRef(true)
@@ -4521,6 +4529,37 @@ export default function App() {
     setView('home')
     setAuthFormError(null)
     setAuthPasswordInput('')
+    setAuthPasswordConfirmInput('')
+    setAuthPendingVerificationEmail(null)
+    setVerificationResendMessage(null)
+  }
+
+  const handleResendVerificationEmail = async () => {
+    if (!authPendingVerificationEmail || !isSupabaseConfigured()) return
+    setAuthBusy(true)
+    setVerificationResendMessage(null)
+    setAuthFormError(null)
+    try {
+      const { error } = await getSupabase().auth.resend({
+        type: 'signup',
+        email: authPendingVerificationEmail,
+        options: { emailRedirectTo: getAuthEmailRedirectTo() },
+      })
+      if (error) {
+        setAuthFormError(mapSupabaseAuthError(error.message))
+      } else {
+        setVerificationResendMessage('Another confirmation email has been sent.')
+      }
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const handleDismissEmailVerification = () => {
+    setAuthPendingVerificationEmail(null)
+    setVerificationResendMessage(null)
+    setAuthFormError(null)
+    setAuthMode('login')
   }
 
   const handleImportLocalTrips = () => {
@@ -4554,24 +4593,37 @@ export default function App() {
         const supabase = getSupabase()
         const normalized = normalizeEmail(email)
         if (authMode === 'register') {
+          const pwCheck = validateRegistrationPassword(password)
+          if (!pwCheck.ok) {
+            setAuthFormError(pwCheck.message)
+            return
+          }
+          if (password !== authPasswordConfirmInput) {
+            setAuthFormError('Passwords do not match.')
+            return
+          }
           const { data, error } = await supabase.auth.signUp({
             email: normalized,
             password,
             options: {
               data: { display_name: authNameInput.trim() },
+              emailRedirectTo: getAuthEmailRedirectTo(),
             },
           })
           if (error) {
-            setAuthFormError(error.message)
+            setAuthFormError(mapSupabaseAuthError(error.message))
             return
           }
           if (data.user && data.session) {
             await upsertProfileDisplayName(authNameInput.trim())
-          }
-          if (!data.session) {
-            setAuthFormError('Check your email to confirm your account, then log in.')
+            setAuthPendingVerificationEmail(null)
+            setVerificationResendMessage(null)
+          } else if (data.user && !data.session) {
+            setAuthPendingVerificationEmail(normalized)
+            setVerificationResendMessage(null)
           }
           setAuthPasswordInput('')
+          setAuthPasswordConfirmInput('')
           setAuthNameInput('')
           return
         }
@@ -4580,14 +4632,19 @@ export default function App() {
           password,
         })
         if (error) {
-          setAuthFormError(error.message)
+          setAuthFormError(mapSupabaseAuthError(error.message))
           return
         }
         setAuthPasswordInput('')
+        setAuthPasswordConfirmInput('')
         return
       }
 
       if (authMode === 'register') {
+        if (password !== authPasswordConfirmInput) {
+          setAuthFormError('Passwords do not match.')
+          return
+        }
         const r = await registerUser(email, password, authNameInput)
         if (!r.ok) {
           setAuthFormError(r.error)
@@ -4597,6 +4654,7 @@ export default function App() {
         setAuthSession(loadAuthSession())
         setState(loadTripsState(tripsStorageKey(normalizeEmail(email))))
         setAuthPasswordInput('')
+        setAuthPasswordConfirmInput('')
         setAuthNameInput('')
       } else {
         const r = await loginUser(email, password)
@@ -4608,6 +4666,7 @@ export default function App() {
         setAuthSession(loadAuthSession())
         setState(loadTripsState(tripsStorageKey(normalizeEmail(email))))
         setAuthPasswordInput('')
+        setAuthPasswordConfirmInput('')
       }
     } finally {
       setAuthBusy(false)
@@ -4776,6 +4835,48 @@ export default function App() {
           {isSupabaseConfigured() && !authReady ? (
             <p className="mt-12 text-center text-sm text-neutral-500 dark:text-neutral-400">Loading session…</p>
           ) : !authSession ? (
+            isSupabaseConfigured() && authPendingVerificationEmail ? (
+              <div className="mt-12 max-w-md mx-auto rounded-3xl border border-neutral-200/90 dark:border-neutral-700 bg-white/90 dark:bg-neutral-900/90 shadow-xl shadow-sky-900/5 dark:shadow-black/40 p-8">
+                <div className="text-center mb-2">
+                  <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-sky-100 dark:bg-sky-950/50 text-sky-700 dark:text-sky-400 mb-3">
+                    <Mail className="w-6 h-6" aria-hidden />
+                  </div>
+                  <h2 className="text-lg font-semibold text-neutral-900 dark:text-white">Confirm your email</h2>
+                  <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
+                    We sent a confirmation link to{' '}
+                    <span className="font-medium text-neutral-800 dark:text-neutral-200 break-all">
+                      {authPendingVerificationEmail}
+                    </span>
+                    . Click the link in that email to finish signing up, then return here and log in.
+                  </p>
+                </div>
+                {verificationResendMessage ? (
+                  <p className="text-sm text-emerald-700 dark:text-emerald-400 mb-2">{verificationResendMessage}</p>
+                ) : null}
+                {authFormError ? <p className="text-sm text-rose-600 dark:text-rose-400 mb-2">{authFormError}</p> : null}
+                <div className="flex flex-col gap-2 mt-4">
+                  <button
+                    type="button"
+                    disabled={authBusy}
+                    onClick={() => void handleResendVerificationEmail()}
+                    className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-neutral-200 dark:border-neutral-600 font-medium text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800 disabled:opacity-60"
+                  >
+                    <Mail size={18} aria-hidden />
+                    {authBusy ? 'Sending…' : 'Resend confirmation email'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDismissEmailVerification}
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-sky-600 to-indigo-600 text-white font-semibold shadow-lg hover:from-sky-500 hover:to-indigo-500"
+                  >
+                    Back to log in
+                  </button>
+                </div>
+                <p className="mt-6 text-xs text-center text-neutral-500 dark:text-neutral-500">
+                  Did not get the email? Check your spam folder. You can resend after a short wait.
+                </p>
+              </div>
+            ) : (
             <div className="mt-12 max-w-md mx-auto rounded-3xl border border-neutral-200/90 dark:border-neutral-700 bg-white/90 dark:bg-neutral-900/90 shadow-xl shadow-sky-900/5 dark:shadow-black/40 p-8">
               <div className="flex rounded-2xl bg-neutral-100 dark:bg-neutral-800 p-1 mb-6">
                 <button
@@ -4783,6 +4884,9 @@ export default function App() {
                   onClick={() => {
                     setAuthMode('login')
                     setAuthFormError(null)
+                    setAuthPasswordConfirmInput('')
+                    setAuthPendingVerificationEmail(null)
+                    setVerificationResendMessage(null)
                   }}
                   className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-colors ${
                     authMode === 'login' ? 'bg-white dark:bg-neutral-700 shadow text-neutral-900 dark:text-white' : 'text-neutral-500'
@@ -4795,6 +4899,9 @@ export default function App() {
                   onClick={() => {
                     setAuthMode('register')
                     setAuthFormError(null)
+                    setAuthPasswordConfirmInput('')
+                    setAuthPendingVerificationEmail(null)
+                    setVerificationResendMessage(null)
                   }}
                   className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-colors ${
                     authMode === 'register' ? 'bg-white dark:bg-neutral-700 shadow text-neutral-900 dark:text-white' : 'text-neutral-500'
@@ -4820,9 +4927,12 @@ export default function App() {
                   <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Email</label>
                   <input
                     type="email"
+                    name="email"
                     value={authEmailInput}
                     onChange={(e) => setAuthEmailInput(e.target.value)}
                     autoComplete="email"
+                    spellCheck={false}
+                    maxLength={254}
                     className="w-full px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
                     placeholder="you@example.com"
                     required
@@ -4832,15 +4942,41 @@ export default function App() {
                   <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Password</label>
                   <input
                     type="password"
+                    name="password"
                     value={authPasswordInput}
                     onChange={(e) => setAuthPasswordInput(e.target.value)}
                     autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                    spellCheck={false}
+                    maxLength={128}
+                    minLength={authMode === 'register' ? 12 : 1}
                     className="w-full px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
                     placeholder="••••••••"
-                    minLength={6}
                     required
                   />
+                  {authMode === 'register' ? (
+                    <p className="mt-1.5 text-xs text-neutral-500 dark:text-neutral-500">{PASSWORD_RULES_SUMMARY}</p>
+                  ) : null}
                 </div>
+                {authMode === 'register' ? (
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">
+                      Confirm password
+                    </label>
+                    <input
+                      type="password"
+                      name="password-confirm"
+                      value={authPasswordConfirmInput}
+                      onChange={(e) => setAuthPasswordConfirmInput(e.target.value)}
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      maxLength={128}
+                      minLength={12}
+                      className="w-full px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                      placeholder="Repeat password"
+                      required
+                    />
+                  </div>
+                ) : null}
                 {authFormError ? <p className="text-sm text-rose-600 dark:text-rose-400">{authFormError}</p> : null}
                 <button
                   type="submit"
@@ -4853,10 +4989,11 @@ export default function App() {
               </form>
               <p className="mt-6 text-xs text-center text-neutral-500 dark:text-neutral-500">
                 {isSupabaseConfigured()
-                  ? 'Your trips are saved to your account and sync when you are online.'
-                  : 'Accounts are stored only in this browser. Clearing site data will remove them.'}
+                  ? 'Sign-in uses a secure connection. Passwords are never stored in plain text. Your trips sync to your account when you are online.'
+                  : 'Accounts are stored only in this browser. Passwords are hashed before storage. Clearing site data will remove them.'}
               </p>
             </div>
+            )
           ) : (
             <>
               {showLocalImportBanner ? (

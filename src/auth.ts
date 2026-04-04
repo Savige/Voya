@@ -1,5 +1,7 @@
 /** Local-only auth (no server). Passwords are SHA-256 hashed before storage. */
 
+import { validateRegistrationPassword } from './passwordPolicy'
+
 export const AUTH_SESSION_KEY = 'itinerary:auth:v1'
 export const USERS_DB_KEY = 'itinerary:users:v1'
 export const LEGACY_TRIPS_KEY = 'trips:v1'
@@ -76,7 +78,8 @@ export async function registerUser(emailRaw: string, password: string, name: str
   const email = normalizeEmail(emailRaw)
   const displayName = name.trim()
   if (!email.includes('@')) return { ok: false, error: 'Enter a valid email address.' }
-  if (password.length < 6) return { ok: false, error: 'Password must be at least 6 characters.' }
+  const pw = validateRegistrationPassword(password)
+  if (!pw.ok) return { ok: false, error: pw.message }
   if (!displayName) return { ok: false, error: 'Enter your name.' }
 
   const db = loadUsersDb()
@@ -89,13 +92,16 @@ export async function registerUser(emailRaw: string, password: string, name: str
   return { ok: true }
 }
 
+/** Same generic message for unknown user and wrong password to reduce account enumeration. */
+export const LOGIN_FAILED_MESSAGE = 'Invalid email or password.'
+
 export async function loginUser(emailRaw: string, password: string): Promise<{ ok: true } | { ok: false; error: string }> {
   const email = normalizeEmail(emailRaw)
   const db = loadUsersDb()
   const rec = db[email]
-  if (!rec) return { ok: false, error: 'No account found for this email.' }
+  if (!rec) return { ok: false, error: LOGIN_FAILED_MESSAGE }
   const h = await hashPassword(password)
-  if (h !== rec.passwordHash) return { ok: false, error: 'Incorrect password.' }
+  if (h !== rec.passwordHash) return { ok: false, error: LOGIN_FAILED_MESSAGE }
   saveAuthSession({ email, name: rec.name })
   return { ok: true }
 }
