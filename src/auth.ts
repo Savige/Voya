@@ -33,7 +33,7 @@ async function sha256Hex(text: string): Promise<string> {
     .join('')
 }
 
-export async function hashPassword(password: string): Promise<string> {
+async function hashPassword(password: string): Promise<string> {
   return sha256Hex(password + '|itinerary-local-salt')
 }
 

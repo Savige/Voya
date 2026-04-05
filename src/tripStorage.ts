@@ -9,6 +9,7 @@ import type {
   Stay,
   StayActivity,
   Trip,
+  TripSharing,
   TripsState,
   VisitPlace,
 } from './tripTypes'
@@ -91,6 +92,10 @@ export function parseTripsFromUnknown(parsed: unknown): TripsState {
                             date: String(a.date ?? ''),
                             name: String(a.name ?? '').trim(),
                             time: String(a.time ?? ''),
+                            endTime:
+                              typeof a.endTime === 'string' && String(a.endTime).trim()
+                                ? String(a.endTime).trim()
+                                : undefined,
                             calendarTimeLabel:
                               typeof a.calendarTimeLabel === 'string' && a.calendarTimeLabel.trim()
                                 ? String(a.calendarTimeLabel).trim()
@@ -190,6 +195,17 @@ export function parseTripsFromUnknown(parsed: unknown): TripsState {
                     .filter((x: AccommodationBooking) => x.id && x.name.length > 0 && x.confirmation.length > 0)
                 : [],
             },
+            sharing: (() => {
+              const sh = t?.sharing
+              if (!sh || typeof sh !== 'object') return undefined
+              const o = sh as Record<string, unknown>
+              const sid = String(o.sharedItineraryId ?? '').trim()
+              const src = String(o.sourceTripId ?? '').trim()
+              const role = o.role
+              if (!sid || !src) return undefined
+              if (role !== 'owner' && role !== 'editor' && role !== 'viewer') return undefined
+              return { sharedItineraryId: sid, sourceTripId: src, role } as TripSharing
+            })(),
           }))
           .filter((trip: Trip) => trip.id && trip.country.length > 0)
       : []
@@ -220,4 +236,19 @@ export function loadTripsState(storageKey: string | null): TripsState {
 export function saveTripsState(state: TripsState, userEmail: string | null) {
   if (!userEmail) return
   localStorage.setItem(tripsStorageKey(userEmail), JSON.stringify(state))
+}
+
+/** Personal `user_trips` payload: omit trips that only exist on `shared_itineraries`. */
+export function tripsStateForPersonalSave(state: TripsState): TripsState {
+  return {
+    trips: state.trips.filter((t) => !t.sharing),
+    selectedTripId: state.selectedTripId,
+  }
+}
+
+export function parseSingleTripFromUnknown(tripJson: unknown): Trip | null {
+  const wrapped = { trips: [tripJson], selectedTripId: null as string | null }
+  const { trips } = parseTripsFromUnknown(wrapped as unknown)
+  const t = trips[0]
+  return t && t.id && t.country.length > 0 ? t : null
 }

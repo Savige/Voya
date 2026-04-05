@@ -1,9 +1,13 @@
 import {
+  createContext,
+  useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ChangeEvent,
   type CSSProperties,
   type FormEvent,
@@ -24,6 +28,7 @@ import {
   useSensor,
   useSensors,
 } from '@dnd-kit/core'
+import { getEventCoordinates } from '@dnd-kit/utilities'
 import {
   BedDouble,
   Briefcase,
@@ -49,6 +54,7 @@ import {
   Sun,
   UtensilsCrossed,
   X,
+  Lock,
   LogIn,
   LogOut,
   Mail,
@@ -56,6 +62,10 @@ import {
   History,
   CircleSlash,
   Trash2,
+  Users,
+  Copy,
+  Link2,
+  Pencil,
 } from 'lucide-react'
 import { DayPicker, type DateRange } from 'react-day-picker'
 import 'react-day-picker/style.css'
@@ -75,9 +85,31 @@ import {
   type AuthSession,
 } from './auth'
 import { PASSWORD_RULES_SUMMARY, validateRegistrationPassword } from './passwordPolicy'
+import { DEV_BYPASS_SESSION, isDevAuthBypass } from './devAuth'
 import { getSupabase, isSupabaseConfigured } from './supabaseClient'
-import { authSessionFromSupabaseUser, fetchUserTripsState, upsertProfileDisplayName, upsertUserTrips } from './tripsRemote'
-import { buildFlightRouteDisplay, loadTripsState, saveTripsState } from './tripStorage'
+import {
+  acceptSharedItinerary,
+  authSessionFromSupabaseUser,
+  createSharedItinerary,
+  fetchMergedTripsState,
+  fetchSharedItineraryMembers,
+  fetchSharedItineraryMeta,
+  revokeSharedItineraryEntire,
+  revokeSharedItineraryMember,
+  type SharedMemberListItem,
+  updateSharedItineraryDefaultPermission,
+  updateSharedMemberRole,
+  upsertProfileDisplayName,
+  upsertSharedItineraryTrip,
+  upsertUserTrips,
+} from './tripsRemote'
+import {
+  buildFlightRouteDisplay,
+  loadTripsState,
+  parseSingleTripFromUnknown,
+  saveTripsState,
+  tripsStateForPersonalSave,
+} from './tripStorage'
 import {
   EMPTY_TRIP_BOOKINGS,
   type CarBooking,
@@ -88,8 +120,11 @@ import {
   type Stay,
   type StayActivity,
   type Trip,
+  type TripBookings,
   type TripsState,
   type VisitPlace,
+  isTripReadOnly,
+  stripSharingFromTrip,
 } from './tripTypes'
 import {
   BRAND_DASHBOARD_SUBTITLE,
@@ -115,6 +150,7 @@ import {
   resolveReturnThresholdTs,
   splitOutboundReturnPath,
   type MapCategory,
+  type MapMarkerKind,
   type MapPoint,
 } from './mapItinerary'
 
@@ -135,6 +171,9 @@ const DEFAULT_HERO_IMAGE = 'https://images.unsplash.com/photo-1464822759023-fed6
 const HERO_RANDOM_POOL = 12
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY?.trim() ?? ''
 const GOOGLE_MAPS_MAP_ID = import.meta.env.VITE_GOOGLE_MAPS_MAP_ID?.trim() ?? ''
+const APP_BUILD = import.meta.env.VITE_APP_BUILD ?? '—'
+const MAPS_MAP_ID_ERROR =
+  'Google Maps Map ID missing (set VITE_GOOGLE_MAPS_MAP_ID). With Docker, use deploy/.env so Compose loads it, or pass --env-file deploy/.env.production, then rebuild — Vite inlines env at build time.'
 
 function getCountrySuggestionsFromIntl(): string[] {
   try {
@@ -534,21 +573,55 @@ const haversineKm = (a: { lat: number; lon: number }, b: { lat: number; lon: num
 }
 
 
-/** Full-day week calendar: hours 0–23 (24 rows) covering 0:00–24:00. */
+/** Calendar day grid: full day (midnight–midnight). Desktop shows CAL_VISIBLE_HOURS rows; narrow mobile shows CAL_MOBILE_VISIBLE_HOURS; scroll for the rest. */
 const CAL_START_HOUR = 0
 const CAL_END_HOUR = 24
-const CAL_PX_PER_HOUR = 44
+const CAL_PX_PER_HOUR = 66
 const CAL_SNAP_MINUTES = 15
 const CAL_EVENT_DURATION_MIN = 60
-/** First hour row visible in the scroll viewport (6am). */
-const CAL_VIEW_START_HOUR = 6
-/** One past last visible hour row in default viewport (exclusive; shows through 9pm). */
-const CAL_VIEW_END_HOUR_EXCLUSIVE = 22
-const CAL_VIEWPORT_HEIGHT_PX = (CAL_VIEW_END_HOUR_EXCLUSIVE - CAL_VIEW_START_HOUR) * CAL_PX_PER_HOUR
+const CAL_GRID_RANGE_MIN = (CAL_END_HOUR - CAL_START_HOUR) * 60
+const CAL_VISIBLE_HOURS = 12
+const CAL_MOBILE_VISIBLE_HOURS = 6
+const CAL_VIEWPORT_HEIGHT_PX = CAL_VISIBLE_HOURS * CAL_PX_PER_HOUR
+const CAL_MOBILE_VIEWPORT_HEIGHT_PX = CAL_MOBILE_VISIBLE_HOURS * CAL_PX_PER_HOUR
+/** After week change / reset, show a daytime band first (scrollTop aligns with 6am). */
+const CAL_DEFAULT_SCROLL_TOP_PX = 6 * CAL_PX_PER_HOUR
+const CAL_MOBILE_MAX_WIDTH_MEDIA = '(max-width: 639px)'
+
+function useCalMobileNarrowViewport(): boolean {
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      if (typeof window === 'undefined') return () => {}
+      const mq = window.matchMedia(CAL_MOBILE_MAX_WIDTH_MEDIA)
+      mq.addEventListener('change', onStoreChange)
+      return () => mq.removeEventListener('change', onStoreChange)
+    },
+    () => (typeof window !== 'undefined' ? window.matchMedia(CAL_MOBILE_MAX_WIDTH_MEDIA).matches : false),
+    () => false,
+  )
+}
+
 /** Duration of the horizontal slide when edge-nudging the visible calendar week while dragging. */
 const CAL_EDGE_SLIDE_MS = 260
 /** Edge nudge while dragging advances the calendar by this many trip days (matches toolbar week step). */
 const CAL_EDGE_SHIFT_DAYS = 7
+
+/** Autoscroll while dragging near calendar viewport edges (narrow = mobile: slower / less jumpy). */
+const CAL_EDGE_SCROLL_MARGIN_DESKTOP = 56
+const CAL_EDGE_SCROLL_STEP_DESKTOP = 4
+const CAL_EDGE_SCROLL_MARGIN_MOBILE = 44
+const CAL_EDGE_SCROLL_STEP_MOBILE = 2
+const CAL_EDGE_H_MARGIN_DESKTOP = 52
+const CAL_EDGE_H_MARGIN_MOBILE = 44
+const CAL_EDGE_WEEK_COOLDOWN_MS_DESKTOP = 380
+const CAL_EDGE_WEEK_COOLDOWN_MS_MOBILE = 780
+/** Hold before calendar item drag activates; movement beyond tolerance first cancels (e.g. scroll). */
+const CAL_DRAG_ACTIVATION_DELAY_MS = 220
+const CAL_DRAG_ACTIVATION_TOLERANCE_PX = 10
+/** Narrow layout: horizontal swipe changes week (same as toolbar arrows). */
+const CAL_MOBILE_WEEK_SWIPE_MIN_PX = 56
+const CAL_MOBILE_WEEK_SWIPE_DOMINANCE = 1.35
+const CAL_MOBILE_WEEK_SWIPE_MAX_MS = 900
 
 const snapCalendarMinutes = (m: number) => Math.round(m / CAL_SNAP_MINUTES) * CAL_SNAP_MINUTES
 
@@ -559,7 +632,9 @@ const parseTimeToMinutes = (time: string): number | null => {
   if (!m) return null
   const h = Number(m[1])
   const min = Number(m[2])
-  if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) return null
+  if (!Number.isFinite(h) || !Number.isFinite(min) || min > 59) return null
+  if (h === 24 && min === 0) return 24 * 60
+  if (h > 23) return null
   return h * 60 + min
 }
 
@@ -568,8 +643,11 @@ const normalizeHhMmTime = (raw: string): string => {
   const t = raw.trim()
   const m = t.match(/^(\d{1,2}):(\d{2})/)
   if (!m) return t
-  const h = Math.min(23, Math.max(0, parseInt(m[1], 10)))
-  const min = Math.min(59, Math.max(0, parseInt(m[2], 10)))
+  const hRaw = parseInt(m[1], 10)
+  const minRaw = parseInt(m[2], 10)
+  if (hRaw === 24 && minRaw === 0) return '24:00'
+  const h = Math.min(23, Math.max(0, hRaw))
+  const min = Math.min(59, Math.max(0, minRaw))
   return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`
 }
 
@@ -581,8 +659,20 @@ const parseLegacyFlightRoute = (route: string): { from?: string; to?: string } =
 
 const formatMinutesToTime = (total: number): string => {
   const lo = 0
-  const hi = 24 * 60 - CAL_SNAP_MINUTES
+  const hi = 24 * 60
   const clamped = Math.max(lo, Math.min(hi, snapCalendarMinutes(total)))
+  if (clamped >= 24 * 60) return '24:00'
+  const h = Math.floor(clamped / 60)
+  const m = clamped % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+}
+
+/** On-grid labels only: wall clock without 15-minute snap (see formatMinutesToTime for snapped storage/UI). */
+const formatMinutesToClockExact = (total: number): string => {
+  const lo = 0
+  const hi = 24 * 60
+  const clamped = Math.max(lo, Math.min(hi, Math.round(total)))
+  if (clamped >= 24 * 60) return '24:00'
   const h = Math.floor(clamped / 60)
   const m = clamped % 60
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
@@ -609,6 +699,28 @@ function effectiveActivityStartMinutes(activity: StayActivity, dayIso: string): 
   return untimedLayoutMinutes(activity.id, dayIso)
 }
 
+function effectiveActivityEndMinutes(activity: StayActivity, dayIso: string): number {
+  const start = effectiveActivityStartMinutes(activity, dayIso)
+  const endParsed = parseTimeToMinutes((activity.endTime ?? '').trim())
+  if (endParsed !== null && endParsed > start) {
+    return Math.min(endParsed, 24 * 60)
+  }
+  return Math.min(start + CAL_EVENT_DURATION_MIN, 24 * 60)
+}
+
+function computeCalendarResizeRange(
+  dyPx: number,
+  gridHeightPx: number,
+  rangeMin: number,
+  start0: number,
+  end0: number,
+): { start: number; end: number } {
+  const dMin = Math.round(((dyPx / gridHeightPx) * rangeMin) / CAL_SNAP_MINUTES) * CAL_SNAP_MINUTES
+  let end = snapCalendarMinutes(end0 + dMin)
+  end = Math.max(start0 + CAL_SNAP_MINUTES, Math.min(end, CAL_END_HOUR * 60))
+  return { start: start0, end }
+}
+
 function activityHasConfirmation(activity: StayActivity, stay?: Stay | null): boolean {
   if (activity.confirmationRef?.trim()) return true
   return Boolean(stay?.confirmationRef?.trim())
@@ -624,20 +736,23 @@ type CalSlideStripPanes =
   | { mode: 'next'; left: string[]; right: string[] }
   | { mode: 'prev'; left: string[]; right: string[] }
 
+/** Set on pointerdown on a calendar block so grab offset survives the activation-distance move. */
+const SetCalDragGrabYPxContext = createContext<null | ((offsetYPx: number) => void)>(null)
+
 type CalDragOverlayPayload = {
   stayId: string
   activity: StayActivity
   stay?: Stay
   important: boolean
   inProgress: boolean
-  parsed: number | null
+  markerKind: MapMarkerKind
 }
 
 function computeCalendarOverlapLayouts(items: CalendarDayItem[], dayIso: string): Map<string, CalOverlapLayout> {
   type Ev = { id: string; startMin: number; endMin: number }
   const events: Ev[] = items.map(({ stayId, activity }) => {
     const startMin = effectiveActivityStartMinutes(activity, dayIso)
-    const endMin = Math.min(startMin + CAL_EVENT_DURATION_MIN, 24 * 60)
+    const endMin = effectiveActivityEndMinutes(activity, dayIso)
     return { id: `${stayId}-${activity.id}`, startMin, endMin }
   })
   events.sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin)
@@ -935,6 +1050,25 @@ const DASHBOARD_TAB_LABELS: Record<Tab, string> = {
 }
 
 type View = 'home' | 'dashboard'
+
+const DASHBOARD_TABS: readonly Tab[] = ['planner', 'itinerary', 'budget', 'map', 'tips']
+
+function parseAppUrlSearch(search: string): { view: View; tab: Tab; tripId: string | null; shareToken: string | null } {
+  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+  const view: View = params.get('v') === 'dashboard' ? 'dashboard' : 'home'
+  const tRaw = params.get('t')
+  const tab: Tab =
+    tRaw && (DASHBOARD_TABS as readonly string[]).includes(tRaw) ? (tRaw as Tab) : 'planner'
+  const tripRaw = params.get('trip')?.trim()
+  const shareRaw = params.get('share')?.trim()
+  return { view, tab, tripId: tripRaw || null, shareToken: shareRaw || null }
+}
+
+function readInitialAppUrl(): { view: View; tab: Tab; tripId: string | null; shareToken: string | null } {
+  if (typeof window === 'undefined') return { view: 'home', tab: 'planner', tripId: null, shareToken: null }
+  return parseAppUrlSearch(window.location.search)
+}
+
 type BookingTab = 'rentalCar' | 'flight' | 'restaurant' | 'accommodation'
 /** Synthetic stay id for trip-booking rows merged into the day schedule (calendar + timeline). */
 const CAL_BOOKING_STAY_ID = '__trip_booking__'
@@ -946,7 +1080,24 @@ type CalendarDayItem = {
   bookingRef?: CalendarBookingRef
 }
 
+/** Payload for the calendar item details / edit modal (activity or merged booking row). */
+type CalendarActivityModalPayload = {
+  stayId: string
+  activity: StayActivity
+  bookingRef?: CalendarBookingRef
+  stayLocation?: string
+}
+
 const EMPTY_CALENDAR_DAY_ITEMS: CalendarDayItem[] = []
+
+/** Matches map pin colours in mapMarkers.ts (stay / flight / rental / restaurant / activity / place). */
+function calendarMapMarkerKind(item: Pick<CalendarDayItem, 'bookingRef'>): MapMarkerKind {
+  const tab = item.bookingRef?.tab
+  if (tab === 'flight') return 'flight'
+  if (tab === 'rentalCar') return 'rental'
+  if (tab === 'restaurant') return 'restaurant'
+  return 'activity'
+}
 
 /** Uses the place line from search (name + address) or notes — no separate directions field. */
 function activityDirectionsDestination(a: StayActivity): string {
@@ -969,6 +1120,30 @@ function directionsDestinationForScheduleItem(item: CalendarDayItem | undefined)
     return (a.name || '').trim()
   }
   return activityDirectionsDestination(a)
+}
+
+function resolveActivityForCalendarModal(p: CalendarActivityModalPayload, trip: Trip | null): StayActivity {
+  if (!trip || p.bookingRef) return p.activity
+  const stay = trip.stays.find((s) => s.id === p.stayId)
+  return stay?.activities.find((a) => a.id === p.activity.id) ?? p.activity
+}
+
+function calendarItemKindLabel(p: Pick<CalendarActivityModalPayload, 'bookingRef'>): string {
+  const tab = p.bookingRef?.tab
+  if (tab === 'flight') return 'Flight'
+  if (tab === 'rentalCar') return 'Rental car'
+  if (tab === 'restaurant') return 'Restaurant'
+  if (tab === 'accommodation') return 'Accommodation'
+  return 'Activity'
+}
+
+function calendarPayloadToDayItem(p: CalendarActivityModalPayload): CalendarDayItem {
+  return {
+    stayId: p.stayId,
+    stayLocation: p.stayLocation ?? '',
+    activity: p.activity,
+    bookingRef: p.bookingRef,
+  }
 }
 
 type BookingFilter = BookingTab | 'all'
@@ -1109,11 +1284,102 @@ const formatSingleDateLabel = (iso?: string) => {
   return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(date)
 }
 
-/** Weekday + date for calendar column headers, e.g. Fri, Dec 1 */
-const formatCalendarDayHeaderLabel = (iso?: string) => {
+function CalendarBookingDetailsReadonly({
+  tab,
+  id,
+  bookings,
+}: {
+  tab: BookingTab
+  id: string
+  bookings: TripBookings
+}) {
+  const row = (label: string, value: string | undefined) =>
+    value?.trim() ? (
+      <div key={label}>
+        <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">{label}</p>
+        <p className="text-sm text-neutral-900 dark:text-neutral-100 whitespace-pre-wrap break-words">{value.trim()}</p>
+      </div>
+    ) : null
+
+  if (tab === 'rentalCar') {
+    const b = bookings.rentalCars.find((x) => x.id === id)
+    if (!b) return <p className="text-sm text-rose-600 dark:text-rose-400">This booking could not be found.</p>
+    return (
+      <div className="space-y-3 border-t border-neutral-200 dark:border-neutral-700 pt-4 mt-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Planner booking</p>
+        <div className="space-y-2.5">
+          {row('Company', b.company)}
+          {row('Pickup', `${b.pickupLocation} · ${formatSingleDateLabel(b.pickupDate)} ${(b.pickupTime ?? '').trim()}`)}
+          {row('Dropoff', `${b.dropoffLocation} · ${formatSingleDateLabel(b.dropoffDate)} ${(b.dropoffTime ?? '').trim()}`)}
+          {row('Confirmation', b.confirmation)}
+          {row('Price', b.price)}
+        </div>
+      </div>
+    )
+  }
+  if (tab === 'flight') {
+    const b = bookings.flights.find((x) => x.id === id)
+    if (!b) return <p className="text-sm text-rose-600 dark:text-rose-400">This booking could not be found.</p>
+    const routeDisp = buildFlightRouteDisplay(b.fromIata, b.toIata, b.route)
+    return (
+      <div className="space-y-3 border-t border-neutral-200 dark:border-neutral-700 pt-4 mt-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Planner booking</p>
+        <div className="space-y-2.5">
+          {row('Route', routeDisp)}
+          {row('From', [b.fromLabel?.trim(), b.fromIata?.trim().toUpperCase()].filter(Boolean).join(' · '))}
+          {row('To', [b.toLabel?.trim(), b.toIata?.trim().toUpperCase()].filter(Boolean).join(' · '))}
+          {row('Airline', b.airline)}
+          {row('Depart', `${formatSingleDateLabel(b.departDate)} ${(b.departTime ?? '').trim()}`)}
+          {row('Arrive', `${formatSingleDateLabel(b.arriveDate || b.departDate)} ${(b.arriveTime ?? '').trim()}`)}
+          {row('Bags', `Checked ${b.checkedBags} · Carry-on ${b.carryOnBags}${b.personalItem ? ' · Personal item' : ''}`)}
+          {row('Confirmation', b.confirmation)}
+          {row('Price', b.price)}
+        </div>
+      </div>
+    )
+  }
+  if (tab === 'restaurant') {
+    const b = bookings.restaurants.find((x) => x.id === id)
+    if (!b) return <p className="text-sm text-rose-600 dark:text-rose-400">This booking could not be found.</p>
+    return (
+      <div className="space-y-3 border-t border-neutral-200 dark:border-neutral-700 pt-4 mt-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Planner booking</p>
+        <div className="space-y-2.5">
+          {row('Restaurant', b.name)}
+          {row('Reservation', formatSingleDateLabel(b.reservationDate))}
+          {row('Confirmation', b.confirmation)}
+          {row('Cost', b.cost)}
+          {row('Notes', b.notes)}
+        </div>
+      </div>
+    )
+  }
+  const b = bookings.accommodations.find((x) => x.id === id)
+  if (!b) return <p className="text-sm text-rose-600 dark:text-rose-400">This booking could not be found.</p>
+  return (
+    <div className="space-y-3 border-t border-neutral-200 dark:border-neutral-700 pt-4 mt-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Planner booking</p>
+      <div className="space-y-2.5">
+        {row('Name', b.name)}
+        {row('Check-in', formatSingleDateLabel(b.checkIn))}
+        {row('Check-out', formatSingleDateLabel(b.checkOut))}
+        {row('Confirmation', b.confirmation)}
+      </div>
+    </div>
+  )
+}
+
+/** Month and year for the calendar strip title (from the leftmost visible trip day). */
+const formatCalendarMonthYearLabel = (iso?: string) => {
   const date = parseIsoDate(iso)
   if (!date) return ''
-  return new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(date)
+  return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(date)
+}
+
+const formatCalendarWeekdayShort = (iso?: string) => {
+  const date = parseIsoDate(iso)
+  if (!date) return ''
+  return new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(date)
 }
 
 type PeakSeasonInfo = {
@@ -1375,8 +1641,10 @@ type ItineraryCalendarGridProps = {
   selectedTimelineDate: string
   onSelectDay: (iso: string) => void
   onCalendarActivityDrop: (fromStayId: string, activityId: string, targetDayIso: string, newTime: string) => void
-  onOpenActivityDetail: (stayId: string, activity: StayActivity) => void
-  onOpenBookingFromCalendar?: (tab: BookingTab, id: string) => void
+  onCalendarActivityResize?: (stayId: string, activityId: string, dayIso: string, startMinutes: number, endMinutes: number) => void
+  onSelectCalendarItem: (item: CalendarDayItem) => void
+  /** When true, activity blocks cannot be dragged or resized (e.g. shared trip viewer). */
+  calendarReadOnly?: boolean
   weekStartIndex: number
   onPrevWeek: () => void
   onNextWeek: () => void
@@ -1386,7 +1654,6 @@ type ItineraryCalendarGridProps = {
   onShiftCalendarDays: (delta: number) => void
   canShiftCalendarPrev: boolean
   canShiftCalendarNext: boolean
-  formatDayLabel: (iso: string) => string
 }
 
 const formatCalendarHourLabel = (h: number) => {
@@ -1394,6 +1661,13 @@ const formatCalendarHourLabel = (h: number) => {
   if (h < 12) return `${h} AM`
   if (h === 12) return '12 PM'
   return `${h - 12} PM`
+}
+
+type CalResizeSession = {
+  pointerId: number
+  originY: number
+  start0: number
+  end0: number
 }
 
 function CalendarActivityBlock({
@@ -1408,6 +1682,9 @@ function CalendarActivityBlock({
   nowMinutes,
   isTodayColumn,
   isBookingCalendarItem = false,
+  markerKind,
+  onResizeCommit,
+  dragDisabled = false,
 }: {
   activity: StayActivity
   stayId: string
@@ -1420,56 +1697,181 @@ function CalendarActivityBlock({
   nowMinutes: number
   isTodayColumn: boolean
   isBookingCalendarItem?: boolean
+  markerKind: MapMarkerKind
+  onResizeCommit?: (startMinutes: number, endMinutes: number) => void
+  dragDisabled?: boolean
 }) {
+  const setCalDragGrabYPx = useContext(SetCalDragGrabYPxContext)
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `cal-drag-${stayId}-${activity.id}`,
     data: { stayId, activityId: activity.id },
-    disabled: isBookingCalendarItem,
+    disabled: isBookingCalendarItem || dragDisabled,
   })
-  const startMin = effectiveActivityStartMinutes(activity, dayIso)
+  const [resizeSession, setResizeSession] = useState<CalResizeSession | null>(null)
+  const [previewRange, setPreviewRange] = useState<{ start: number; end: number } | null>(null)
+  const onResizeCommitRef = useRef(onResizeCommit)
+  onResizeCommitRef.current = onResizeCommit
+  const showResize = Boolean(onResizeCommit && !isBookingCalendarItem && !dragDisabled)
+
+  const baseStart = effectiveActivityStartMinutes(activity, dayIso)
+  const baseEnd = effectiveActivityEndMinutes(activity, dayIso)
+  const startMin = previewRange?.start ?? baseStart
+  const endMin = previewRange?.end ?? baseEnd
+
   const parsed = parseTimeToMinutes(activity.time)
-  const timeLine =
+  const bookingTimeLine =
     activity.calendarTimeLabel?.trim() ||
     (parsed !== null ? activity.time : 'No time')
+  const timeRangeLabel = `${formatMinutesToClockExact(startMin)}–${formatMinutesToClockExact(endMin)}`
+  const scheduleLine = isBookingCalendarItem ? bookingTimeLine : timeRangeLabel
+
   const topPx = ((startMin - CAL_START_HOUR * 60) / rangeMin) * gridHeightPx
-  const heightPx = Math.max(32, Math.min(CAL_PX_PER_HOUR, gridHeightPx - topPx))
+  const durationMin = Math.max(1, endMin - startMin)
+  const minBlockPx = showResize ? 20 : 14
+  const heightPx = Math.max(minBlockPx, (durationMin / rangeMin) * gridHeightPx)
+
   const important = isBookingCalendarItem
     ? Boolean(activity.confirmationRef?.trim())
     : isActivityImportant(activity, stay)
   const inProgress =
     isTodayColumn &&
-    parsed !== null &&
     nowMinutes >= startMin &&
-    nowMinutes < startMin + CAL_EVENT_DURATION_MIN
+    nowMinutes < endMin
+
+  useEffect(() => {
+    if (!resizeSession) return undefined
+    const { pointerId, originY, start0, end0 } = resizeSession
+
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return
+      const { start, end } = computeCalendarResizeRange(e.clientY - originY, gridHeightPx, rangeMin, start0, end0)
+      setPreviewRange({ start, end })
+    }
+
+    const onEnd = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return
+      const { start, end } = computeCalendarResizeRange(e.clientY - originY, gridHeightPx, rangeMin, start0, end0)
+      onResizeCommitRef.current?.(start, end)
+      setResizeSession(null)
+      setPreviewRange(null)
+    }
+
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onEnd)
+    window.addEventListener('pointercancel', onEnd)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onEnd)
+      window.removeEventListener('pointercancel', onEnd)
+    }
+  }, [resizeSession, gridHeightPx, rangeMin])
+
+  const beginResizeEnd = (e: React.PointerEvent) => {
+    if (!onResizeCommit || isBookingCalendarItem) return
+    e.preventDefault()
+    e.stopPropagation()
+    const s0 = effectiveActivityStartMinutes(activity, dayIso)
+    const e0 = effectiveActivityEndMinutes(activity, dayIso)
+    setPreviewRange({ start: s0, end: e0 })
+    setResizeSession({
+      pointerId: e.pointerId,
+      originY: e.clientY,
+      start0: s0,
+      end0: e0,
+    })
+  }
+
+  const nudgeEndResizeWithKeyboard = (deltaMinutes: number) => {
+    if (!onResizeCommit || isBookingCalendarItem) return
+    const s0 = effectiveActivityStartMinutes(activity, dayIso)
+    const e0 = effectiveActivityEndMinutes(activity, dayIso)
+    let end = snapCalendarMinutes(e0 + deltaMinutes)
+    end = Math.max(s0 + CAL_SNAP_MINUTES, Math.min(end, CAL_END_HOUR * 60))
+    onResizeCommit(s0, end)
+  }
+
+  const onEndHandleKeyDown = (e: React.KeyboardEvent) => {
+    if (!onResizeCommit || isBookingCalendarItem) return
+    const step = e.shiftKey ? 60 : CAL_SNAP_MINUTES
+    if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      e.preventDefault()
+      nudgeEndResizeWithKeyboard(-step)
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      e.preventDefault()
+      nudgeEndResizeWithKeyboard(step)
+    }
+  }
+
   const style: CSSProperties = {
     top: topPx,
     height: heightPx,
     left: `calc(${layout.leftPct}% + 2px)`,
     width: `calc(${layout.widthPct}% - 4px)`,
     ...(transform && !isDragging ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` } : {}),
-    zIndex: isDragging ? 20 : 2,
-    opacity: isDragging ? 0 : 1,
+    zIndex: isDragging ? 20 : resizeSession ? 25 : 2,
     pointerEvents: isDragging ? 'none' : undefined,
   }
+
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className={`itinerary-calendar-event${important ? ' itinerary-calendar-event--important' : ''}${inProgress ? ' itinerary-calendar-event--in-progress' : ''}`}
-      {...listeners}
-      {...attributes}
-      onClick={() => onOpenDetail()}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onOpenDetail()
-        }
-      }}
-      role="button"
-      tabIndex={0}
+      className={`itinerary-calendar-event itinerary-calendar-event--mk-${markerKind}${important ? ' itinerary-calendar-event--important' : ''}${inProgress ? ' itinerary-calendar-event--in-progress' : ''}${isBookingCalendarItem ? ' itinerary-calendar-event--locked' : ''}${resizeSession ? ' itinerary-calendar-event--resizing' : ''}${isDragging ? ' itinerary-calendar-event--drag-origin' : ''}`}
+      {...(!isBookingCalendarItem
+        ? {
+            'data-cal-drag-stay': stayId,
+            'data-cal-drag-activity': String(activity.id),
+          }
+        : {})}
+      {...(durationMin < 60 ? { 'data-cal-sub-hour': '' } : {})}
+      {...(durationMin >= 60 ? { 'data-cal-hour-plus': '' } : {})}
     >
-      <p className="itinerary-calendar-event-title truncate">{activity.name}</p>
-      <p className="itinerary-calendar-event-time">{timeLine}</p>
+      <div
+        className="itinerary-calendar-event-drag"
+        {...listeners}
+        {...attributes}
+        onPointerDownCapture={(e) => {
+          if (isBookingCalendarItem || !setCalDragGrabYPx) return
+          const root = (e.currentTarget as HTMLElement).closest('.itinerary-calendar-event') as HTMLElement | null
+          if (!root) return
+          const br = root.getBoundingClientRect()
+          if (!(br.height > 0)) return
+          const offset = Math.max(0, Math.min(br.height, e.clientY - br.top))
+          setCalDragGrabYPx(offset)
+        }}
+        onClick={() => onOpenDetail()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onOpenDetail()
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        title={
+          isBookingCalendarItem
+            ? `From Planner — open to edit time or day (${bookingTimeLine})`
+            : `${activity.name} — ${timeRangeLabel}`
+        }
+      >
+        {isBookingCalendarItem ? (
+          <span className="itinerary-calendar-event-lock" aria-hidden>
+            <Lock size={11} strokeWidth={2.25} />
+          </span>
+        ) : null}
+        <p className="itinerary-calendar-event-title">{activity.name}</p>
+        <p className="itinerary-calendar-event-time">{scheduleLine}</p>
+      </div>
+      {showResize ? (
+        <button
+          type="button"
+          className="itinerary-calendar-event-resize itinerary-calendar-event-resize--end"
+          aria-label="Adjust end time. Arrow up earlier end, arrow down later end. Shift for one hour."
+          onPointerDown={beginResizeEnd}
+          onKeyDown={onEndHandleKeyDown}
+          tabIndex={0}
+        />
+      ) : null}
     </div>
   )
 }
@@ -1480,7 +1882,6 @@ function CalendarDayHeaderCell({
   isSelected,
   isToday,
   onHeaderClick,
-  formatDayLabel,
   staysForDay,
 }: {
   dayIso: string
@@ -1488,14 +1889,16 @@ function CalendarDayHeaderCell({
   isSelected: boolean
   isToday: boolean
   onHeaderClick: () => void
-  formatDayLabel: (iso: string) => string
   staysForDay: Stay[]
 }) {
+  const weekdayShort = formatCalendarWeekdayShort(dayIso)
+  const dateLabel = formatSingleDateLabel(dayIso)
   return (
     <div className={`itinerary-calendar-head-col ${isSelected ? 'is-selected' : ''}${isToday ? ' is-today' : ''}`}>
       <button type="button" className="itinerary-calendar-col-head" onClick={onHeaderClick}>
         <span className="itinerary-calendar-col-daynum">Day {dayIndex}</span>
-        <span className="itinerary-calendar-col-date">{formatDayLabel(dayIso)}</span>
+        {weekdayShort ? <span className="itinerary-calendar-col-weekday">{weekdayShort}</span> : null}
+        {dateLabel ? <span className="itinerary-calendar-col-date">{dateLabel}</span> : null}
       </button>
       <div className="itinerary-calendar-acc-strip" title={staysForDay.map((s) => s.location).join(' · ') || undefined}>
         {staysForDay.length === 0 ? (
@@ -1503,7 +1906,7 @@ function CalendarDayHeaderCell({
         ) : (
           staysForDay.map((s) => (
             <span key={s.id} className="itinerary-calendar-acc-strip-chip">
-              <BedDouble size={11} aria-hidden className="shrink-0 opacity-80 itinerary-calendar-acc-strip-icon" />
+              <BedDouble size={11} aria-hidden className="shrink-0 itinerary-calendar-acc-strip-icon" />
               <span className="itinerary-calendar-acc-strip-text">{s.location}</span>
             </span>
           ))
@@ -1537,6 +1940,74 @@ function resolveCalendarDropFromPointer(
   return null
 }
 
+type SnappedCalendarDropArgs = {
+  overDayId?: string | null
+  overRectTop?: number
+  overRectHeight?: number
+  lastHoveredDayIso?: string | null
+  /** clientY − this = event block top (viewport Y); keeps the same point on the card under the cursor. */
+  grabOffsetYPx?: number
+  /** When set, snapped start is clamped so start + durationMin fits in the calendar day. */
+  durationMin?: number
+}
+
+function resolveSnappedCalendarDrop(
+  clientX: number,
+  clientY: number,
+  dayIsos: string[],
+  args?: SnappedCalendarDropArgs,
+): { dayIso: string; snappedStartMin: number } | null {
+  const pointerHit = resolveCalendarDropFromPointer(clientX, clientY, dayIsos)
+  let targetDayIso: string | null = pointerHit?.dayIso ?? null
+
+  if (!targetDayIso && args?.overDayId?.startsWith('cal-day-')) {
+    targetDayIso = args.overDayId.slice('cal-day-'.length)
+  }
+  if (!targetDayIso && args?.lastHoveredDayIso) {
+    targetDayIso = args.lastHoveredDayIso
+  }
+
+  if (!targetDayIso) return null
+
+  /* Always use live layout geometry. dnd-kit's over.rect can stay stale after scrollTop changes, which pins rel≈0 and glues the preview to the top. */
+  const dropEl = document.querySelector(`[data-cal-drop-body="${targetDayIso}"]`) as HTMLElement | null
+  if (!dropEl) return null
+  const br = dropEl.getBoundingClientRect()
+  if (br.width <= 0 || br.height <= 0) return null
+  const dropTop = br.top
+  const dropHeight = br.height
+
+  const grab =
+    args?.grabOffsetYPx != null && Number.isFinite(args.grabOffsetYPx) ? args.grabOffsetYPx : 0
+  const anchorY = clientY - grab
+  const rel = Math.min(1, Math.max(0, (anchorY - dropTop) / dropHeight))
+  const rangeMinCalc = (CAL_END_HOUR - CAL_START_HOUR) * 60
+  let newMin = Math.round(CAL_START_HOUR * 60 + rel * rangeMinCalc)
+  newMin = snapCalendarMinutes(newMin)
+  const calMin = CAL_START_HOUR * 60
+  const calEndMin = CAL_END_HOUR * 60
+  const dur =
+    args?.durationMin != null && Number.isFinite(args.durationMin) && args.durationMin > 0
+      ? Math.max(CAL_SNAP_MINUTES, args.durationMin)
+      : null
+  const maxStartByDuration =
+    dur != null
+      ? Math.floor((calEndMin - dur) / CAL_SNAP_MINUTES) * CAL_SNAP_MINUTES
+      : calEndMin - CAL_SNAP_MINUTES
+  newMin = Math.max(calMin, Math.min(maxStartByDuration, newMin))
+  return { dayIso: targetDayIso, snappedStartMin: newMin }
+}
+
+/** Pointer position for this drag tick — matches @dnd-kit's internal pointer (avoids lag vs a separate window listener). */
+function clientPointerFromDndEvent(event: { activatorEvent: Event; delta: { x: number; y: number } }): {
+  x: number
+  y: number
+} | null {
+  const base = getEventCoordinates(event.activatorEvent)
+  if (!base) return null
+  return { x: base.x + event.delta.x, y: base.y + event.delta.y }
+}
+
 function CalendarDayGridColumn({
   dayIso,
   gridHeightPx,
@@ -1554,7 +2025,10 @@ function CalendarDayGridColumn({
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `cal-day-${dayIso}` })
   const hourCount = CAL_END_HOUR - CAL_START_HOUR
-  const nowFrac = nowMinutes / (24 * 60)
+  const nowElapsedMin = nowMinutes - CAL_START_HOUR * 60
+  const nowInGrid =
+    isToday && nowElapsedMin >= 0 && nowElapsedMin < CAL_END_HOUR * 60
+  const nowFrac = CAL_GRID_RANGE_MIN > 0 ? nowElapsedMin / CAL_GRID_RANGE_MIN : 0
   return (
     <div className={`itinerary-calendar-col itinerary-calendar-grid-col ${isSelected ? 'is-selected' : ''}${isToday ? ' is-today' : ''}`}>
       <div
@@ -1568,8 +2042,12 @@ function CalendarDayGridColumn({
             <div key={i} className="itinerary-calendar-hour-line" style={{ height: CAL_PX_PER_HOUR }} />
           ))}
         </div>
-        {isToday ? (
-          <div className="itinerary-calendar-now-line" style={{ top: `${nowFrac * 100}%` }} aria-hidden />
+        {nowInGrid ? (
+          <div
+            className="itinerary-calendar-now-line"
+            style={{ top: `${Math.min(1, Math.max(0, nowFrac)) * 100}%` }}
+            aria-hidden
+          />
         ) : null}
         <div className="itinerary-calendar-events-layer">{children}</div>
       </div>
@@ -1588,8 +2066,9 @@ function ItineraryCalendarGrid({
   selectedTimelineDate,
   onSelectDay,
   onCalendarActivityDrop,
-  onOpenActivityDetail,
-  onOpenBookingFromCalendar,
+  onCalendarActivityResize,
+  onSelectCalendarItem,
+  calendarReadOnly = false,
   weekStartIndex,
   onPrevWeek,
   onNextWeek,
@@ -1598,19 +2077,36 @@ function ItineraryCalendarGrid({
   onShiftCalendarDays,
   canShiftCalendarPrev,
   canShiftCalendarNext,
-  formatDayLabel,
 }: ItineraryCalendarGridProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  /** Day column grid only (excludes time gutter and scroll chrome); wheel here scrolls hours. */
+  const calDayColumnsRef = useRef<HTMLDivElement | null>(null)
+  const calShellRef = useRef<HTMLDivElement | null>(null)
   const bodySlideRef = useRef<HTMLDivElement | null>(null)
   const pointerRef = useRef({ x: 0, y: 0 })
   const isDraggingCalRef = useRef(false)
   const lastHorizontalNudgeRef = useRef(0)
   /** When DragOverlay yields over=null on drop, use last hovered cal-day column. */
   const lastCalDayOverRef = useRef<string | null>(null)
+  /** Pointer Y minus block top at drag start (client coords), for grab-point–preserving drop math. */
+  const calGrabOffsetYPxRef = useRef(0)
+  /** At most one vertical edge scroll per animation frame (avoids stacked DragMove scroll + snap jank). */
+  const calEdgeScrollRafRef = useRef<number | null>(null)
+  /** Restored in resetCalDragUi when a cal item drag ends; blocks native hour-viewport pan during drag. */
+  const calHourViewportPrevTouchActionRef = useRef<string | null>(null)
+  /** Set when a calendar item drag starts; cleared on week-swipe touchend so we never change week after moving an item. */
+  const calMobileWeekSwipeSkipForDragRef = useRef(false)
+  /** Latest `event.over` rect/id for drop preview; read inside rAF after scroll. */
+  const lastCalSnapOverRef = useRef<{
+    oid: string | null
+    otop: number | undefined
+    oheight: number | undefined
+  }>({ oid: null, otop: undefined, oheight: undefined })
   const slideBusyRef = useRef(false)
   const pendingShiftDeltaRef = useRef<number | null>(null)
   const slideFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [calDragOverlay, setCalDragOverlay] = useState<CalDragOverlayPayload | null>(null)
+  const [calDropPreview, setCalDropPreview] = useState<{ dayIso: string; startMin: number } | null>(null)
   const [calSlideStrip, setCalSlideStrip] = useState<CalSlideStripPanes | null>(null)
   const [calSlide, setCalSlide] = useState<{ transform: string; transition: string }>({
     transform: 'translateX(0px)',
@@ -1633,9 +2129,19 @@ function ItineraryCalendarGrid({
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: { distance: 8 },
+      activationConstraint: {
+        delay: CAL_DRAG_ACTIVATION_DELAY_MS,
+        tolerance: CAL_DRAG_ACTIVATION_TOLERANCE_PX,
+      },
     }),
   )
+  const weekSwipeNavRef = useRef({ onPrevWeek, onNextWeek, canPrev, canNext })
+  weekSwipeNavRef.current = { onPrevWeek, onNextWeek, canPrev, canNext }
+  const setCalDragGrabYPx = useCallback((offsetYPx: number) => {
+    calGrabOffsetYPxRef.current = offsetYPx
+  }, [])
+  const isCalMobileNarrow = useCalMobileNarrowViewport()
+  const calScrollMaxHeightPx = isCalMobileNarrow ? CAL_MOBILE_VIEWPORT_HEIGHT_PX : CAL_VIEWPORT_HEIGHT_PX
   const gridHeightPx = (CAL_END_HOUR - CAL_START_HOUR) * CAL_PX_PER_HOUR
   const rangeMin = (CAL_END_HOUR - CAL_START_HOUR) * 60
   const hours = useMemo(() => {
@@ -1644,6 +2150,8 @@ function ItineraryCalendarGrid({
     return out
   }, [])
   const rangeLabelEnd = Math.min(weekStartIndex + visibleDays.length, timelineDays.length)
+  const leftmostDayIso = visibleDays[0] ?? ''
+  const monthYearLabel = formatCalendarMonthYearLabel(leftmostDayIso)
 
   const stayById = useMemo(() => new Map(stays.map((s) => [s.id, s])), [stays])
 
@@ -1679,8 +2187,219 @@ function ItineraryCalendarGrid({
     if (!el) return
     if (isDraggingCalRef.current) return
     if (calSlideStrip) return
-    el.scrollTop = CAL_VIEW_START_HOUR * CAL_PX_PER_HOUR
-  }, [weekStartIndex, visibleDaysKey, calSlideStrip])
+    const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight)
+    el.scrollTop = Math.min(CAL_DEFAULT_SCROLL_TOP_PX, maxScroll)
+  }, [weekStartIndex, visibleDaysKey, calSlideStrip, isCalMobileNarrow])
+
+  useEffect(() => {
+    const shell = calShellRef.current
+    const cols = calDayColumnsRef.current
+    if (!shell || !cols) return
+
+    const onWheelCapture = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) return
+      if (isDraggingCalRef.current) return
+      const t = e.target
+      if (!(t instanceof Node) || !shell.contains(t)) return
+      if (cols.contains(t)) return
+      e.preventDefault()
+      window.scrollBy({ top: e.deltaY, left: 0, behavior: 'auto' })
+    }
+
+    shell.addEventListener('wheel', onWheelCapture, { capture: true, passive: false })
+    return () => shell.removeEventListener('wheel', onWheelCapture, { capture: true })
+  }, [visibleDaysKey, calSlideStrip])
+
+  /** Narrow viewports: vertical pans on toolbar / week header (above the hour viewport) scroll the page — same idea as the wheel handler. */
+  useEffect(() => {
+    if (!isCalMobileNarrow) return
+    const shell = calShellRef.current
+    const hourViewport = scrollRef.current
+    if (!shell || !hourViewport) return
+
+    let lastY = 0
+    let active = false
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        active = false
+        return
+      }
+      const { clientX, clientY } = e.touches[0]
+      const el = document.elementFromPoint(clientX, clientY)
+      if (!(el instanceof Element) || !shell.contains(el) || hourViewport.contains(el)) {
+        active = false
+        return
+      }
+      active = true
+      lastY = clientY
+    }
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (isDraggingCalRef.current) return
+      if (!active || e.touches.length !== 1) return
+      const { clientX, clientY } = e.touches[0]
+      const el = document.elementFromPoint(clientX, clientY)
+      if (!(el instanceof Element) || hourViewport.contains(el)) {
+        active = false
+        return
+      }
+      if (!shell.contains(el)) {
+        active = false
+        return
+      }
+      e.preventDefault()
+      const dy = lastY - clientY
+      lastY = clientY
+      window.scrollBy(0, dy)
+    }
+
+    const onTouchEnd = () => {
+      active = false
+    }
+
+    const touchMoveOpts: AddEventListenerOptions = { passive: false }
+    shell.addEventListener('touchstart', onTouchStart, { passive: true })
+    shell.addEventListener('touchmove', onTouchMove, touchMoveOpts)
+    shell.addEventListener('touchend', onTouchEnd)
+    shell.addEventListener('touchcancel', onTouchEnd)
+
+    return () => {
+      shell.removeEventListener('touchstart', onTouchStart)
+      shell.removeEventListener('touchmove', onTouchMove, touchMoveOpts)
+      shell.removeEventListener('touchend', onTouchEnd)
+      shell.removeEventListener('touchcancel', onTouchEnd)
+    }
+  }, [visibleDaysKey, calSlideStrip, isCalMobileNarrow])
+
+  /** Narrow layout: horizontal swipe on the calendar shell moves the visible week (same as prev/next arrows). */
+  useEffect(() => {
+    if (!isCalMobileNarrow) return
+    const shell = calShellRef.current
+    if (!shell) return
+
+    let startX = 0
+    let startY = 0
+    let startT = 0
+    let touchId: number | null = null
+    let tracking = false
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        tracking = false
+        touchId = null
+        return
+      }
+      const raw = e.target
+      if (!(raw instanceof Element) || !shell.contains(raw)) {
+        tracking = false
+        touchId = null
+        return
+      }
+      if (raw.closest('button, a, input, textarea, select, [role="slider"]')) {
+        tracking = false
+        touchId = null
+        return
+      }
+      const t = e.touches[0]
+      calMobileWeekSwipeSkipForDragRef.current = false
+      startX = t.clientX
+      startY = t.clientY
+      startT = performance.now()
+      touchId = t.identifier
+      tracking = true
+    }
+
+    const finishTouch = (e: TouchEvent) => {
+      if (!tracking || touchId === null) return
+      const ended = Array.from(e.changedTouches).find((c) => c.identifier === touchId)
+      if (!ended) return
+      tracking = false
+      touchId = null
+
+      if (calSlideStrip || slideBusyRef.current) return
+      if (isDraggingCalRef.current) return
+      if (calMobileWeekSwipeSkipForDragRef.current) {
+        calMobileWeekSwipeSkipForDragRef.current = false
+        return
+      }
+
+      const dt = performance.now() - startT
+      if (dt > CAL_MOBILE_WEEK_SWIPE_MAX_MS) return
+
+      const dx = ended.clientX - startX
+      const dy = ended.clientY - startY
+      const adx = Math.abs(dx)
+      const ady = Math.abs(dy)
+      if (adx < CAL_MOBILE_WEEK_SWIPE_MIN_PX) return
+      if (adx < ady * CAL_MOBILE_WEEK_SWIPE_DOMINANCE) return
+
+      const { onPrevWeek, onNextWeek, canPrev, canNext } = weekSwipeNavRef.current
+      if (dx < 0 && canNext) onNextWeek()
+      else if (dx > 0 && canPrev) onPrevWeek()
+    }
+
+    const capOpts: AddEventListenerOptions = { capture: true, passive: true }
+    shell.addEventListener('touchstart', onTouchStart, capOpts)
+    shell.addEventListener('touchend', finishTouch, capOpts)
+    shell.addEventListener('touchcancel', finishTouch, capOpts)
+
+    return () => {
+      shell.removeEventListener('touchstart', onTouchStart, capOpts)
+      shell.removeEventListener('touchend', finishTouch, capOpts)
+      shell.removeEventListener('touchcancel', finishTouch, capOpts)
+    }
+  }, [isCalMobileNarrow, visibleDaysKey, calSlideStrip])
+
+  useEffect(() => {
+    if (!calDragOverlay) return undefined
+    const html = document.documentElement
+    const body = document.body
+    const prevHtmlOverflow = html.style.overflow
+    const prevBodyOverflow = body.style.overflow
+    const prevBodyTouchAction = body.style.touchAction
+    html.style.overflow = 'hidden'
+    body.style.overflow = 'hidden'
+    body.style.touchAction = 'none'
+
+    const gestureOverHourViewport = (clientX: number, clientY: number, fallbackTarget: EventTarget | null) => {
+      const vp = scrollRef.current
+      if (!vp) return false
+      if (
+        Number.isFinite(clientX) &&
+        Number.isFinite(clientY) &&
+        typeof document.elementFromPoint === 'function'
+      ) {
+        const hit = document.elementFromPoint(clientX, clientY)
+        if (hit instanceof Node && vp.contains(hit)) return true
+      }
+      return fallbackTarget instanceof Node && vp.contains(fallbackTarget)
+    }
+
+    const onWheelCapture = (e: WheelEvent) => {
+      if (gestureOverHourViewport(e.clientX, e.clientY, e.target)) return
+      e.preventDefault()
+    }
+    const onTouchMoveCapture = (e: TouchEvent) => {
+      /* Always preventDefault: exempting the hour viewport used to allow native scroll there, which steals the drag after long-press activation. */
+      e.preventDefault()
+    }
+    window.addEventListener('wheel', onWheelCapture, { capture: true, passive: false })
+    window.addEventListener('touchmove', onTouchMoveCapture, { capture: true, passive: false })
+
+    return () => {
+      html.style.overflow = prevHtmlOverflow
+      body.style.overflow = prevBodyOverflow
+      body.style.touchAction = prevBodyTouchAction
+      window.removeEventListener('wheel', onWheelCapture, true)
+      window.removeEventListener('touchmove', onTouchMoveCapture, true)
+      const vp = scrollRef.current
+      if (vp && calHourViewportPrevTouchActionRef.current !== null) {
+        vp.style.touchAction = calHourViewportPrevTouchActionRef.current
+        calHourViewportPrevTouchActionRef.current = null
+      }
+    }
+  }, [calDragOverlay])
 
   const slideSurfaceStyle: CSSProperties = {
     transform: calSlide.transform,
@@ -1772,52 +2491,160 @@ function ItineraryCalendarGrid({
     finishShiftAnimation()
   }
 
+  const flushCalDropPreviewSnap = useCallback(() => {
+    const dragAct = calDragOverlay?.activity
+    const durationMin =
+      dragAct != null
+        ? Math.max(
+            CAL_SNAP_MINUTES,
+            effectiveActivityEndMinutes(dragAct, dragAct.date) -
+              effectiveActivityStartMinutes(dragAct, dragAct.date),
+          )
+        : undefined
+    const { oid, otop, oheight } = lastCalSnapOverRef.current
+    const snapped = resolveSnappedCalendarDrop(pointerRef.current.x, pointerRef.current.y, layoutDays, {
+      overDayId: oid,
+      overRectTop: otop,
+      overRectHeight: oheight,
+      lastHoveredDayIso: lastCalDayOverRef.current,
+      grabOffsetYPx: calGrabOffsetYPxRef.current,
+      durationMin,
+    })
+    const nextPreview = snapped ? { dayIso: snapped.dayIso, startMin: snapped.snappedStartMin } : null
+    setCalDropPreview((prev) => {
+      if (
+        (prev === null && nextPreview === null) ||
+        (prev !== null &&
+          nextPreview !== null &&
+          prev.dayIso === nextPreview.dayIso &&
+          prev.startMin === nextPreview.startMin)
+      ) {
+        return prev
+      }
+      return nextPreview
+    })
+  }, [layoutDays, calDragOverlay])
+
   const handleDragMove = (event: DragMoveEvent) => {
     if (!event.active) return
-    const el = scrollRef.current
-    if (!el) return
-    const r = el.getBoundingClientRect()
-    const y = pointerRef.current.y
+    const activeId = String(event.active.id)
+    /* Real PointerEvent stream (window listener) — dnd-kit activator+delta can drift from the OS cursor after autoscroll. */
     const x = pointerRef.current.x
-    const margin = 56
-    const step = 14
-    if (y < r.top + margin) el.scrollTop -= step
-    else if (y > r.bottom - margin) el.scrollTop += step
+    const y = pointerRef.current.y
 
-    const hMargin = 52
-    const now = performance.now()
-    const horizontalCooldownMs = 380
-    if (now - lastHorizontalNudgeRef.current >= horizontalCooldownMs) {
-      if (x > r.right - hMargin && canShiftCalendarNext) {
-        if (beginSlideShift(1)) lastHorizontalNudgeRef.current = now
-      } else if (x < r.left + hMargin && canShiftCalendarPrev) {
-        if (beginSlideShift(-1)) lastHorizontalNudgeRef.current = now
+    let scheduledVertRafThisCall = false
+
+    if (activeId.startsWith('cal-drag-')) {
+      const o = event.over
+      const oid = o?.id != null ? String(o.id) : null
+      const orect = o?.rect
+      lastCalSnapOverRef.current = {
+        oid,
+        otop: orect?.top,
+        oheight: orect?.height,
+      }
+
+      const el = scrollRef.current
+      if (el) {
+        const r = el.getBoundingClientRect()
+        const margin = isCalMobileNarrow ? CAL_EDGE_SCROLL_MARGIN_MOBILE : CAL_EDGE_SCROLL_MARGIN_DESKTOP
+        const inTop = y < r.top + margin
+        const inBottom = y > r.bottom - margin
+        const inVertEdge = inTop || inBottom
+        /* Pending rAF from the edge band must not run after the pointer leaves it — that scroll+snap fights sync updates and flashes. */
+        if (!inVertEdge && calEdgeScrollRafRef.current != null) {
+          cancelAnimationFrame(calEdgeScrollRafRef.current)
+          calEdgeScrollRafRef.current = null
+        }
+        if (inVertEdge && calEdgeScrollRafRef.current == null) {
+          scheduledVertRafThisCall = true
+          calEdgeScrollRafRef.current = requestAnimationFrame(() => {
+            calEdgeScrollRafRef.current = null
+            const s = scrollRef.current
+            if (!s || !isDraggingCalRef.current) return
+            const br = s.getBoundingClientRect()
+            const yy = pointerRef.current.y
+            const marginRaf = isCalMobileNarrow ? CAL_EDGE_SCROLL_MARGIN_MOBILE : CAL_EDGE_SCROLL_MARGIN_DESKTOP
+            const stepRaf = isCalMobileNarrow ? CAL_EDGE_SCROLL_STEP_MOBILE : CAL_EDGE_SCROLL_STEP_DESKTOP
+            const stillTop = yy < br.top + marginRaf
+            const stillBottom = yy > br.bottom - marginRaf
+            if (stillTop) s.scrollTop -= stepRaf
+            else if (stillBottom) s.scrollTop += stepRaf
+            flushCalDropPreviewSnap()
+          })
+        }
+
+        const hMargin = isCalMobileNarrow ? CAL_EDGE_H_MARGIN_MOBILE : CAL_EDGE_H_MARGIN_DESKTOP
+        const now = performance.now()
+        const horizontalCooldownMs = isCalMobileNarrow
+          ? CAL_EDGE_WEEK_COOLDOWN_MS_MOBILE
+          : CAL_EDGE_WEEK_COOLDOWN_MS_DESKTOP
+        if (now - lastHorizontalNudgeRef.current >= horizontalCooldownMs) {
+          if (x > r.right - hMargin && canShiftCalendarNext) {
+            if (beginSlideShift(1)) lastHorizontalNudgeRef.current = now
+          } else if (x < r.left + hMargin && canShiftCalendarPrev) {
+            if (beginSlideShift(-1)) lastHorizontalNudgeRef.current = now
+          }
+        }
+      }
+
+      if (!scheduledVertRafThisCall) {
+        flushCalDropPreviewSnap()
       }
     }
   }
 
   const resetCalDragUi = () => {
+    if (calEdgeScrollRafRef.current != null) {
+      cancelAnimationFrame(calEdgeScrollRafRef.current)
+      calEdgeScrollRafRef.current = null
+    }
+    const vp = scrollRef.current
+    if (vp && calHourViewportPrevTouchActionRef.current !== null) {
+      vp.style.touchAction = calHourViewportPrevTouchActionRef.current
+      calHourViewportPrevTouchActionRef.current = null
+    }
     isDraggingCalRef.current = false
+    calGrabOffsetYPxRef.current = 0
     setCalDragOverlay(null)
+    setCalDropPreview(null)
   }
 
   const handleCalDragStart = (event: DragStartEvent) => {
+    if (String(event.active.id).startsWith('cal-drag-')) {
+      calMobileWeekSwipeSkipForDragRef.current = true
+    }
     isDraggingCalRef.current = true
     lastCalDayOverRef.current = null
+    const startCoords = getEventCoordinates(event.activatorEvent)
+    if (startCoords) pointerRef.current = { x: startCoords.x, y: startCoords.y }
     const d = event.active.data.current as { stayId: string; activityId: string } | undefined
     if (!d) return
     const stay = stays.find((s) => s.id === d.stayId)
     const activity = stay?.activities?.find((a) => a.id === d.activityId)
     if (!activity) return
-    const parsed = parseTimeToMinutes(activity.time)
+    const hourVp = scrollRef.current
+    if (hourVp && calHourViewportPrevTouchActionRef.current === null) {
+      calHourViewportPrevTouchActionRef.current = hourVp.style.touchAction
+      hourVp.style.touchAction = 'none'
+    }
+    /* Grab offset was set in pointerdown capture (see CalendarActivityBlock). */
     const important = isActivityImportant(activity, stay)
     const startMin = effectiveActivityStartMinutes(activity, activity.date)
-    const inProgress =
-      activity.date === todayIso &&
-      parsed !== null &&
-      nowMinutes >= startMin &&
-      nowMinutes < startMin + CAL_EVENT_DURATION_MIN
-    setCalDragOverlay({ stayId: d.stayId, activity, stay, important, inProgress, parsed })
+    const endMin = effectiveActivityEndMinutes(activity, activity.date)
+    const inProgress = activity.date === todayIso && nowMinutes >= startMin && nowMinutes < endMin
+    setCalDragOverlay({
+      stayId: d.stayId,
+      activity,
+      stay,
+      important,
+      inProgress,
+      markerKind: 'activity',
+    })
+    setCalDropPreview({
+      dayIso: activity.date,
+      startMin: snapCalendarMinutes(effectiveActivityStartMinutes(activity, activity.date)),
+    })
   }
 
   const handleDragOverCal = (event: DragOverEvent) => {
@@ -1830,6 +2657,11 @@ function ItineraryCalendarGrid({
   }
 
   const handleCalendarDragEnd = (event: DragEndEvent) => {
+    if (calendarReadOnly) {
+      lastCalDayOverRef.current = null
+      resetCalDragUi()
+      return
+    }
     const { active, over } = event
     const data = active.data.current as { stayId: string; activityId: string } | undefined
     if (!data) {
@@ -1838,51 +2670,35 @@ function ItineraryCalendarGrid({
       return
     }
 
-    const px = pointerRef.current.x
-    const py = pointerRef.current.y
-    const pointerHit = resolveCalendarDropFromPointer(px, py, layoutDays)
-
-    let targetDayIso: string | null = null
-    let dropTop = 0
-    let dropHeight = 0
-
-    if (pointerHit) {
-      targetDayIso = pointerHit.dayIso
-      dropTop = pointerHit.top
-      dropHeight = pointerHit.height
-    }
-    if (!targetDayIso && over) {
-      const overId = String(over.id)
-      if (overId.startsWith('cal-day-')) {
-        targetDayIso = overId.slice('cal-day-'.length)
-        const r = over.rect
-        dropTop = r.top
-        dropHeight = r.height
-      }
-    }
-    if (!targetDayIso && lastCalDayOverRef.current) {
-      targetDayIso = lastCalDayOverRef.current
-      const el = document.querySelector(`[data-cal-drop-body="${targetDayIso}"]`) as HTMLElement | null
-      if (el) {
-        const br = el.getBoundingClientRect()
-        dropTop = br.top
-        dropHeight = br.height
-      }
-    }
-
+    const fromDnd = clientPointerFromDndEvent(event)
+    const px = fromDnd?.x ?? pointerRef.current.x
+    const py = fromDnd?.y ?? pointerRef.current.y
+    const lastHovered = lastCalDayOverRef.current
     lastCalDayOverRef.current = null
+    const oid = over?.id != null ? String(over.id) : null
+    const orect = over?.rect
+    const endStay = stays.find((s) => s.id === data.stayId)
+    const endAct = endStay?.activities?.find((a) => a.id === data.activityId)
+    const durationMin =
+      endAct != null
+        ? Math.max(
+            CAL_SNAP_MINUTES,
+            effectiveActivityEndMinutes(endAct, endAct.date) - effectiveActivityStartMinutes(endAct, endAct.date),
+          )
+        : undefined
+    const snapped = resolveSnappedCalendarDrop(px, py, layoutDays, {
+      overDayId: oid,
+      overRectTop: orect?.top,
+      overRectHeight: orect?.height,
+      lastHoveredDayIso: lastHovered,
+      grabOffsetYPx: calGrabOffsetYPxRef.current,
+      durationMin,
+    })
     resetCalDragUi()
 
-    if (!targetDayIso || dropHeight <= 0) return
-
-    const cy = pointerRef.current.y
-    const rel = Math.min(1, Math.max(0, (cy - dropTop) / dropHeight))
-    const rangeMinCalc = (CAL_END_HOUR - CAL_START_HOUR) * 60
-    let newMin = Math.round(CAL_START_HOUR * 60 + rel * rangeMinCalc)
-    newMin = snapCalendarMinutes(newMin)
-    newMin = Math.max(0, Math.min(24 * 60 - CAL_SNAP_MINUTES, newMin))
-    const newTime = formatMinutesToTime(newMin)
-    onCalendarActivityDrop(data.stayId, data.activityId, targetDayIso, newTime)
+    if (!snapped) return
+    const newTime = formatMinutesToTime(snapped.snappedStartMin)
+    onCalendarActivityDrop(data.stayId, data.activityId, snapped.dayIso, newTime)
   }
 
   const handleCalDragCancel = () => {
@@ -1902,7 +2718,6 @@ function ItineraryCalendarGrid({
           isSelected={selectedTimelineDate === dayIso}
           isToday={dayIso === todayIso}
           onHeaderClick={() => onSelectDay(dayIso)}
-          formatDayLabel={formatDayLabel}
           staysForDay={staysForDay}
         />
       )
@@ -1912,6 +2727,43 @@ function ItineraryCalendarGrid({
     days.map((dayIso) => {
       const items = activitiesByDay.get(dayIso) ?? []
       const layouts = layoutByDay.get(dayIso) ?? new Map()
+      let dropPreviewEl: ReactNode = null
+      if (calDropPreview && calDragOverlay && calDropPreview.dayIso === dayIso) {
+        const act = calDragOverlay.activity
+        const previewStart = calDropPreview.startMin
+        const durMin = Math.max(
+          CAL_SNAP_MINUTES,
+          effectiveActivityEndMinutes(act, act.date) - effectiveActivityStartMinutes(act, act.date),
+        )
+        const topPx = ((previewStart - CAL_START_HOUR * 60) / rangeMin) * gridHeightPx
+        const minBlockPx = 14
+        const heightPx = Math.max(minBlockPx, (durMin / rangeMin) * gridHeightPx)
+        const previewLayout =
+          layouts.get(`${calDragOverlay.stayId}-${act.id}`) ?? { leftPct: 0, widthPct: 100 }
+        const previewTimeLabel = `${formatMinutesToTime(previewStart)}–${formatMinutesToTime(previewStart + durMin)}`
+        dropPreviewEl = (
+          <div
+            key={`cal-preview-${calDragOverlay.stayId}-${act.id}`}
+            className={`itinerary-calendar-event itinerary-calendar-event--mk-${calDragOverlay.markerKind} itinerary-calendar-drag-preview${
+              calDragOverlay.important ? ' itinerary-calendar-event--important' : ''
+            }${calDragOverlay.inProgress ? ' itinerary-calendar-event--in-progress' : ''}`}
+            style={{
+              top: topPx,
+              height: heightPx,
+              left: `calc(${previewLayout.leftPct}% + 2px)`,
+              width: `calc(${previewLayout.widthPct}% - 4px)`,
+            }}
+            {...(durMin < 60 ? { 'data-cal-sub-hour': '' } : {})}
+            {...(durMin >= 60 ? { 'data-cal-hour-plus': '' } : {})}
+            aria-hidden
+          >
+            <div className="itinerary-calendar-event-drag itinerary-calendar-drag-preview-body">
+              <p className="itinerary-calendar-event-title">{act.name}</p>
+              <p className="itinerary-calendar-event-time">{previewTimeLabel}</p>
+            </div>
+          </div>
+        )
+      }
       return (
         <CalendarDayGridColumn
           key={`${paneId}-${dayIso}`}
@@ -1921,9 +2773,11 @@ function ItineraryCalendarGrid({
           isToday={dayIso === todayIso}
           nowMinutes={nowMinutes}
         >
-          {items.map(({ stayId, activity, bookingRef }) => {
+          {items.map((item) => {
+            const { stayId, activity, bookingRef } = item
             const key = `${stayId}-${activity.id}`
             const layout = layouts.get(key) ?? { leftPct: 0, widthPct: 100 }
+            const markerKind = calendarMapMarkerKind(item)
             return (
               <CalendarActivityBlock
                 key={key}
@@ -1934,32 +2788,38 @@ function ItineraryCalendarGrid({
                 gridHeightPx={gridHeightPx}
                 rangeMin={rangeMin}
                 layout={layout}
-                onOpenDetail={() =>
-                  bookingRef
-                    ? onOpenBookingFromCalendar?.(bookingRef.tab, bookingRef.id)
-                    : onOpenActivityDetail(stayId, activity)
-                }
+                onOpenDetail={() => onSelectCalendarItem(item)}
                 nowMinutes={nowMinutes}
                 isTodayColumn={dayIso === todayIso}
                 isBookingCalendarItem={Boolean(bookingRef)}
+                markerKind={markerKind}
+                dragDisabled={calendarReadOnly}
+                onResizeCommit={
+                  onCalendarActivityResize && !bookingRef && !calendarReadOnly
+                    ? (startM, endM) => onCalendarActivityResize(stayId, activity.id, dayIso, startM, endM)
+                    : undefined
+                }
               />
             )
           })}
+          {dropPreviewEl}
         </CalendarDayGridColumn>
       )
     })
 
   return (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={pointerWithin}
-      onDragStart={handleCalDragStart}
-      onDragOver={handleDragOverCal}
-      onDragEnd={handleCalendarDragEnd}
-      onDragCancel={handleCalDragCancel}
-      onDragMove={handleDragMove}
-    >
-      <div className="itinerary-calendar-shell">
+    <SetCalDragGrabYPxContext.Provider value={setCalDragGrabYPx}>
+      <DndContext
+        autoScroll={false}
+        sensors={sensors}
+        collisionDetection={pointerWithin}
+        onDragStart={handleCalDragStart}
+        onDragOver={handleDragOverCal}
+        onDragEnd={handleCalendarDragEnd}
+        onDragCancel={handleCalDragCancel}
+        onDragMove={handleDragMove}
+      >
+      <div ref={calShellRef} className="itinerary-calendar-shell">
         <div className="itinerary-calendar-toolbar">
           <button
             type="button"
@@ -1984,8 +2844,13 @@ function ItineraryCalendarGrid({
           </button>
         </div>
         <p className="itinerary-calendar-hint text-xs text-neutral-500 mt-2">
-          Click an activity to edit, or drag to move time or day. Hold near the left or right edge while dragging to slide the visible week earlier or later (same step as the arrows). Scroll vertically for hours before 6am or after 9pm. Click a day header to select it for recommendations below.
+          Click an activity to edit, or drag to move time or day. The day shows 12 hours at a time (scroll for the full 24h). With a mouse wheel, only the day columns scroll the hours—the time labels, scrollbar strip, and rest of the card scroll the page. Hold near the left or right edge while dragging to slide the visible week earlier or later (same step as the arrows). On a narrow screen, scroll vertically within the day columns. Click a day header to select it for recommendations below.
         </p>
+        {monthYearLabel ? (
+          <div className="itinerary-calendar-month-banner">
+            <span className="itinerary-calendar-month-year">{monthYearLabel}</span>
+          </div>
+        ) : null}
         <div className="itinerary-calendar-week-header">
           <div className="itinerary-calendar-corner" aria-hidden />
           <div className="itinerary-calendar-header-slide-clip">
@@ -2007,7 +2872,7 @@ function ItineraryCalendarGrid({
         <div
           ref={scrollRef}
           className="itinerary-calendar-scroll itinerary-calendar-hour-viewport"
-          style={{ maxHeight: CAL_VIEWPORT_HEIGHT_PX }}
+          style={{ maxHeight: calScrollMaxHeightPx }}
         >
           <div className="itinerary-calendar-time-gutter">
             {hours.map((h) => (
@@ -2016,7 +2881,7 @@ function ItineraryCalendarGrid({
               </div>
             ))}
           </div>
-          <div className="itinerary-calendar-columns-slide-clip">
+          <div ref={calDayColumnsRef} className="itinerary-calendar-columns-slide-clip">
             {calSlideStrip ? (
               <div
                 ref={bodySlideRef}
@@ -2062,30 +2927,24 @@ function ItineraryCalendarGrid({
                 gridHeightPx={gridHeightPx}
                 rangeMin={rangeMin}
                 layout={dragAnchorLayoutInfo.layout}
-                onOpenDetail={() => onOpenActivityDetail(calDragOverlay.stayId, calDragOverlay.activity)}
+                onOpenDetail={() =>
+                  onSelectCalendarItem({
+                    stayId: calDragOverlay.stayId,
+                    stayLocation: stayById.get(calDragOverlay.stayId)?.location ?? '',
+                    activity: calDragOverlay.activity,
+                  })
+                }
                 nowMinutes={nowMinutes}
                 isTodayColumn={dragAnchorLayoutInfo.dayIso === todayIso}
+                markerKind={calDragOverlay.markerKind}
               />
             </CalendarDayGridColumn>
           </div>
         </div>
       ) : null}
-      <DragOverlay dropAnimation={null}>
-        {calDragOverlay ? (
-          <div
-            className={`itinerary-calendar-event itinerary-calendar-event--drag-overlay${
-              calDragOverlay.important ? ' itinerary-calendar-event--important' : ''
-            }${calDragOverlay.inProgress ? ' itinerary-calendar-event--in-progress' : ''}`}
-          >
-            <p className="itinerary-calendar-event-title truncate">{calDragOverlay.activity.name}</p>
-            <p className="itinerary-calendar-event-time">
-              {calDragOverlay.activity.calendarTimeLabel?.trim() ||
-                (calDragOverlay.parsed !== null ? calDragOverlay.activity.time : 'No time')}
-            </p>
-          </div>
-        ) : null}
-      </DragOverlay>
-    </DndContext>
+      <DragOverlay dropAnimation={null} />
+      </DndContext>
+    </SetCalDragGrabYPxContext.Provider>
   )
 }
 
@@ -2111,20 +2970,37 @@ export default function App() {
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
   })
   const [displayCurrency, setDisplayCurrency] = useState(() => loadDisplayCurrency())
-  const [view, setView] = useState<View>('home')
-  const [activeTab, setActiveTab] = useState<Tab>('planner')
+  const initialAppUrl = useMemo(() => readInitialAppUrl(), [])
+  const [view, setView] = useState<View>(() => {
+    if (isSupabaseConfigured() && !isDevAuthBypass() && initialAppUrl.shareToken) return 'dashboard'
+    return initialAppUrl.view
+  })
+  const [activeTab, setActiveTab] = useState<Tab>(() => initialAppUrl.tab)
+  const tripPendingFromUrlRef = useRef<string | null>(
+    isSupabaseConfigured() && !isDevAuthBypass() && initialAppUrl.view === 'dashboard' && initialAppUrl.tripId
+      ? initialAppUrl.tripId
+      : null,
+  )
+  const shareTokenFromUrlRef = useRef<string | null>(
+    isSupabaseConfigured() && !isDevAuthBypass() && initialAppUrl.shareToken ? initialAppUrl.shareToken : null,
+  )
+  const shareUrlHandledRef = useRef(false)
+  const [shareInviteBanner, setShareInviteBanner] = useState<string | null>(null)
   const [expandedTripPanel, setExpandedTripPanel] = useState(true)
   const [selectedTimelineDate, setSelectedTimelineDate] = useState('')
   const [itineraryViewMode, setItineraryViewMode] = useState<'timeline' | 'calendar'>('timeline')
   const [calendarWeekStartIndex, setCalendarWeekStartIndex] = useState(0)
   const [calendarDropError, setCalendarDropError] = useState<string | null>(null)
-  const [calendarActivityDetail, setCalendarActivityDetail] = useState<{ stayId: string; activity: StayActivity } | null>(null)
+  const isMobileCalNarrow = useCalMobileNarrowViewport()
+  const [calendarActivityDetail, setCalendarActivityDetail] = useState<CalendarActivityModalPayload | null>(null)
+  const [calendarActivityDetailEditing, setCalendarActivityDetailEditing] = useState(false)
   const [calendarDetailDraft, setCalendarDetailDraft] = useState<Partial<StayActivity> | null>(null)
   const [itineraryClock, setItineraryClock] = useState(() => Date.now())
 
-  const [authReady, setAuthReady] = useState(!isSupabaseConfigured())
+  const [authReady, setAuthReady] = useState(() => !isSupabaseConfigured() || isDevAuthBypass())
   const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null)
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
+    if (isDevAuthBypass()) return DEV_BYPASS_SESSION
     if (isSupabaseConfigured()) return null
     return loadAuthSession()
   })
@@ -2144,9 +3020,13 @@ export default function App() {
   const remoteFetchGenRef = useRef(0)
 
   const [state, setState] = useState<TripsState>(() => {
-    if (isSupabaseConfigured()) return { trips: [], selectedTripId: null }
-    const s = loadAuthSession()
-    return loadTripsState(s ? tripsStorageKey(s.email) : null)
+    if (isSupabaseConfigured() && !isDevAuthBypass()) return { trips: [], selectedTripId: null }
+    const s = isDevAuthBypass() ? DEV_BYPASS_SESSION : loadAuthSession()
+    const base = loadTripsState(s ? tripsStorageKey(s.email) : null)
+    if (initialAppUrl.tripId && base.trips.some((t) => t.id === initialAppUrl.tripId)) {
+      return { ...base, selectedTripId: initialAppUrl.tripId }
+    }
+    return base
   })
   const [placeSearchInput, setPlaceSearchInput] = useState('')
   const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false)
@@ -2244,6 +3124,13 @@ export default function App() {
     variant?: 'default' | 'danger'
     onConfirm: () => void
   } | null>(null)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  const [shareModalBusy, setShareModalBusy] = useState(false)
+  const [shareModalError, setShareModalError] = useState<string | null>(null)
+  const [shareModalMembers, setShareModalMembers] = useState<SharedMemberListItem[]>([])
+  const [shareModalLinkToken, setShareModalLinkToken] = useState<string | null>(null)
+  const [shareModalDefaultPerm, setShareModalDefaultPerm] = useState<'viewer' | 'editor'>('viewer')
+  const [shareModalCopied, setShareModalCopied] = useState(false)
 
   const handleConfirmDialogAction = () => {
     if (!confirmDialog) return
@@ -2253,6 +3140,7 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (isDevAuthBypass()) return
     if (!isSupabaseConfigured()) return
     const supabase = getSupabase()
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -2282,6 +3170,12 @@ export default function App() {
 
   useEffect(() => {
     if (!isSupabaseConfigured() || !authReady) return
+    if (isDevAuthBypass()) {
+      if (!authSession) return
+      setState(loadTripsState(tripsStorageKey(authSession.email)))
+      skipRemoteSaveRef.current = false
+      return
+    }
     if (!authSession || !supabaseUserId) {
       setState({ trips: [], selectedTripId: null })
       skipRemoteSaveRef.current = true
@@ -2289,7 +3183,7 @@ export default function App() {
     }
     const gen = ++remoteFetchGenRef.current
     skipRemoteSaveRef.current = true
-    fetchUserTripsState().then((s) => {
+    fetchMergedTripsState().then((s) => {
       if (gen !== remoteFetchGenRef.current) return
       setState(s)
       requestAnimationFrame(() => {
@@ -2299,14 +3193,58 @@ export default function App() {
   }, [authReady, supabaseUserId])
 
   useEffect(() => {
+    if (!isSupabaseConfigured() || isDevAuthBypass()) return
+    const tok = shareTokenFromUrlRef.current
+    if (!tok || shareUrlHandledRef.current) return
+    if (!authReady || !authSession) return
+    shareUrlHandledRef.current = true
+    const gen = remoteFetchGenRef.current
+    skipRemoteSaveRef.current = true
+    void acceptSharedItinerary(tok).then(async (r) => {
+      if (!r.ok) {
+        setShareInviteBanner(r.error)
+        shareUrlHandledRef.current = false
+        skipRemoteSaveRef.current = false
+        return
+      }
+      const merged = await fetchMergedTripsState()
+      if (gen !== remoteFetchGenRef.current) {
+        skipRemoteSaveRef.current = false
+        return
+      }
+      setState({ ...merged, selectedTripId: r.sourceTripId })
+      setView('dashboard')
+      shareTokenFromUrlRef.current = null
+      setShareInviteBanner(null)
+      const params = new URLSearchParams(window.location.search.startsWith('?') ? window.location.search.slice(1) : window.location.search)
+      params.delete('share')
+      const qs = params.toString()
+      window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+      requestAnimationFrame(() => {
+        skipRemoteSaveRef.current = false
+      })
+    })
+  }, [authReady, authSession])
+
+  useEffect(() => {
     if (!authSession?.email) return
-    if (!isSupabaseConfigured()) {
+    if (!isSupabaseConfigured() || isDevAuthBypass()) {
       saveTripsState(state, authSession.email)
       return
     }
     if (skipRemoteSaveRef.current) return
     const t = window.setTimeout(() => {
-      void upsertUserTrips(state)
+      void (async () => {
+        const personal = tripsStateForPersonalSave(state)
+        const pr = await upsertUserTrips(personal)
+        if (!pr.ok) console.warn('user_trips save:', pr.error)
+        for (const trip of state.trips) {
+          const sh = trip.sharing
+          if (!sh || (sh.role !== 'owner' && sh.role !== 'editor')) continue
+          const ur = await upsertSharedItineraryTrip(sh.sharedItineraryId, trip)
+          if (!ur.ok) console.warn('shared itinerary save:', ur.error)
+        }
+      })()
     }, 700)
     return () => window.clearTimeout(t)
   }, [state, authSession?.email])
@@ -2325,6 +3263,7 @@ export default function App() {
 
   const showLocalImportBanner =
     isSupabaseConfigured() &&
+    !isDevAuthBypass() &&
     authReady &&
     Boolean(authSession) &&
     !localImportDismissed &&
@@ -2336,6 +3275,42 @@ export default function App() {
       setView('home')
     }
   }, [authReady, authSession, view])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured()) return
+    const pending = tripPendingFromUrlRef.current
+    if (!pending) return
+    if (view !== 'dashboard') return
+    if (!authReady || !authSession) return
+    const hasTrip = state.trips.some((t) => t.id === pending)
+    if (hasTrip) {
+      setState((prev) => ({ ...prev, selectedTripId: pending }))
+      tripPendingFromUrlRef.current = null
+    } else if (state.trips.length > 0) {
+      tripPendingFromUrlRef.current = null
+    }
+  }, [view, authReady, authSession, state.trips])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const path = window.location.pathname
+    const hash = window.location.hash || ''
+    if (view === 'home') {
+      const target = path + hash
+      const current = path + window.location.search + hash
+      if (target !== current) window.history.replaceState(null, '', target)
+      return
+    }
+    const p = new URLSearchParams()
+    p.set('v', 'dashboard')
+    p.set('t', activeTab)
+    if (state.selectedTripId) p.set('trip', state.selectedTripId)
+    const search = `?${p.toString()}`
+    const target = path + search + hash
+    const current = path + window.location.search + hash
+    if (target !== current) window.history.replaceState(null, '', target)
+  }, [view, activeTab, state.selectedTripId])
+
   useEffect(() => {
     if (view === 'home') {
       document.title = formatDocumentTitle('Home')
@@ -2353,18 +3328,57 @@ export default function App() {
     const id = window.setInterval(() => setItineraryClock(Date.now()), 30000)
     return () => window.clearInterval(id)
   }, [])
-  useEffect(() => {
-    if (!calendarActivityDetail) {
-      setCalendarDetailDraft(null)
-      return
-    }
-    setCalendarDetailDraft({ ...calendarActivityDetail.activity })
-  }, [calendarActivityDetail])
 
   const selectedTrip = useMemo(() => {
     if (!state.selectedTripId) return null
     return state.trips.find((t) => t.id === state.selectedTripId) ?? null
   }, [state.selectedTripId, state.trips])
+
+  const tripIsReadOnly = useMemo(() => isTripReadOnly(selectedTrip), [selectedTrip])
+
+  useEffect(() => {
+    if (!calendarActivityDetail) {
+      setCalendarDetailDraft(null)
+      setCalendarActivityDetailEditing(false)
+      return
+    }
+    setCalendarActivityDetailEditing(false)
+    const a = resolveActivityForCalendarModal(calendarActivityDetail, selectedTrip)
+    const endT = (a.endTime ?? '').trim() || formatMinutesToTime(effectiveActivityEndMinutes(a, a.date))
+    setCalendarDetailDraft({ ...a, endTime: endT })
+  }, [calendarActivityDetail, selectedTrip])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured() || isDevAuthBypass()) return
+    if (!authSession || !supabaseUserId) return
+    const sid = selectedTrip?.sharing?.sharedItineraryId
+    if (!sid) return
+    const supabase = getSupabase()
+    const channel = supabase
+      .channel(`shared-itinerary-${sid}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'shared_itineraries', filter: `id=eq.${sid}` },
+        (payload) => {
+          const row = payload.new as { trip_json?: unknown }
+          if (row?.trip_json == null) return
+          const parsed = parseSingleTripFromUnknown(row.trip_json)
+          if (!parsed) return
+          setState((prev) => ({
+            ...prev,
+            trips: prev.trips.map((t) =>
+              t.sharing?.sharedItineraryId === sid
+                ? { ...parsed, sharing: t.sharing }
+                : t,
+            ),
+          }))
+        },
+      )
+      .subscribe()
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [authSession, supabaseUserId, selectedTrip?.sharing?.sharedItineraryId])
 
   const mustDos = selectedTrip?.mustDos ?? []
   const packList = selectedTrip?.packList ?? []
@@ -3185,7 +4199,7 @@ export default function App() {
       return
     }
     if (!GOOGLE_MAPS_MAP_ID) {
-      setMapApiError('Google Maps Map ID missing (set VITE_GOOGLE_MAPS_MAP_ID).')
+      setMapApiError(MAPS_MAP_ID_ERROR)
       return
     }
     const w = window as any
@@ -3287,7 +4301,7 @@ export default function App() {
     const g = w.google
     if (!g?.maps) return
     if (!GOOGLE_MAPS_MAP_ID) {
-      setMapApiError('Google Maps Map ID missing (set VITE_GOOGLE_MAPS_MAP_ID).')
+      setMapApiError(MAPS_MAP_ID_ERROR)
       return
     }
     const AdvancedMarker = g.maps?.marker?.AdvancedMarkerElement as
@@ -3356,6 +4370,9 @@ export default function App() {
         position: { lat: p.lat, lng: p.lon } as any,
         title: p.label,
         content: markerContent,
+        // Default anchor is bottom-center (-100% top); use center so markers sit on the route line.
+        anchorLeft: '-50%',
+        anchorTop: '-50%',
       })
       mapMarkersRef.current.push(marker)
       markerBounds.extend({ lat: p.lat, lng: p.lon })
@@ -3461,6 +4478,7 @@ export default function App() {
 
   const addPackListItem = () => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     const text = packListTextInput.trim()
     if (!text) return
     const category = packListCategoryInput.trim() || 'Other'
@@ -3480,6 +4498,7 @@ export default function App() {
 
   const togglePackListItem = (itemId: string) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((t) =>
@@ -3495,6 +4514,7 @@ export default function App() {
 
   const deletePackListItem = (itemId: string) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((t) =>
@@ -3531,6 +4551,7 @@ export default function App() {
 
   const addBooking = () => {
     if (!state.selectedTripId) return false
+    if (tripIsReadOnly) return false
     setBookingError(null)
     if (bookingsTab === 'rentalCar') {
       const company = carCompanyInput.trim()
@@ -3701,6 +4722,7 @@ export default function App() {
 
   const removeBooking = (tab: BookingTab, id: string) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((t) => {
@@ -3715,6 +4737,7 @@ export default function App() {
 
   const updateBooking = (tab: BookingTab, id: string, updater: (booking: any) => any) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((t) => {
@@ -3728,6 +4751,7 @@ export default function App() {
   }
 
   const openEditBookingForm = (tab: BookingTab, id: string) => {
+    if (tripIsReadOnly) return
     if (tab === 'rentalCar') {
       const b = bookings.rentalCars.find((x) => x.id === id)
       if (!b) return
@@ -3791,6 +4815,7 @@ export default function App() {
   }
 
   const openEditStayForm = (stayId: string) => {
+    if (tripIsReadOnly) return
     const s = stays.find((x) => x.id === stayId)
     if (!s) return
     setStayLocationInput(s.location)
@@ -3855,6 +4880,7 @@ export default function App() {
 
   const saveBookingFormEdit = () => {
     if (!editingBookingForm) return false
+    if (tripIsReadOnly) return false
     setBookingError(null)
     if (editingBookingForm.tab === 'rentalCar') {
       const company = carCompanyInput.trim()
@@ -3929,6 +4955,7 @@ export default function App() {
 
   const saveStayFormEdit = () => {
     if (!editingStayId || !state.selectedTripId || !selectedTrip) return false
+    if (tripIsReadOnly) return false
     const location = stayLocationInput.trim()
     const confirmationRef = stayConfirmationRefInput.trim()
     if (!location || !stayStartDate || !stayEndDate) {
@@ -3982,6 +5009,7 @@ export default function App() {
 
   const removeStay = (stayId: string) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) =>
@@ -3993,6 +5021,7 @@ export default function App() {
   const addVisitPlace = (label: string, coords?: { lat: number; lon: number }) => {
     const t = label.trim()
     if (!t || !state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) => {
@@ -4014,6 +5043,7 @@ export default function App() {
 
   const removeVisitPlace = (placeId: string) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) =>
@@ -4024,6 +5054,7 @@ export default function App() {
 
   const updateVisitPlaceCost = (placeId: string, cost: string) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) =>
@@ -4217,6 +5248,7 @@ export default function App() {
 
   const saveTripDates = () => {
     if (!selectedTrip || !state.selectedTripId) return
+    if (tripIsReadOnly) return
     if (!tripStartDateInput || !tripEndDateInput) {
       setTripDateError('Please set both trip start and end dates.')
       return
@@ -4245,6 +5277,7 @@ export default function App() {
 
   const addStay = () => {
     if (!state.selectedTripId || !selectedTrip) return false
+    if (tripIsReadOnly) return false
     const location = stayLocationInput.trim()
     const confirmationRef = stayConfirmationRefInput.trim()
     if (!location || !stayStartDate || !stayEndDate) {
@@ -4310,6 +5343,7 @@ export default function App() {
 
   const addStayActivity = (stayId: string, date: string) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     const draftKey = `${stayId}|${date}`
     const draft = activityDrafts[draftKey]
     const name = (draft?.name ?? '').trim()
@@ -4372,6 +5406,7 @@ export default function App() {
 
   const updateStayActivity = (stayId: string, activityId: string, patch: Partial<StayActivity>) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) => {
@@ -4388,6 +5423,7 @@ export default function App() {
 
   const moveStayActivityBetweenStays = (activityId: string, fromStayId: string, toStayId: string, patch: Partial<StayActivity>) => {
     if (!state.selectedTripId || fromStayId === toStayId) return
+    if (tripIsReadOnly) return
     setState((prev) => {
       const trip = prev.trips.find((t) => t.id === prev.selectedTripId)
       if (!trip) return prev
@@ -4419,21 +5455,66 @@ export default function App() {
   }
 
   const applyCalendarDrop = (fromStayId: string, activityId: string, targetDayIso: string, newTime: string) => {
+    if (tripIsReadOnly) return
     const targetStayId = resolveStayIdForActivityStorage(stays, targetDayIso)
     if (!targetStayId) {
       setCalendarDropError('Add at least one accommodation on the trip before scheduling activities.')
       return
     }
     setCalendarDropError(null)
+    const fromStay = stays.find((s) => s.id === fromStayId)
+    const act = fromStay?.activities?.find((a) => a.id === activityId)
+    const newStartM = parseTimeToMinutes(newTime)
+    const patch: Partial<StayActivity> = { date: targetDayIso, time: newTime }
+    if (act && newStartM !== null) {
+      const oldStart = effectiveActivityStartMinutes(act, act.date)
+      const oldEnd = effectiveActivityEndMinutes(act, act.date)
+      const dur = Math.max(CAL_SNAP_MINUTES, oldEnd - oldStart)
+      const newEndM = newStartM + dur
+      patch.endTime = formatMinutesToTime(snapCalendarMinutes(newEndM))
+    }
     if (fromStayId === targetStayId) {
-      updateStayActivity(fromStayId, activityId, { date: targetDayIso, time: newTime })
+      updateStayActivity(fromStayId, activityId, patch)
       return
     }
-    moveStayActivityBetweenStays(activityId, fromStayId, targetStayId, { date: targetDayIso, time: newTime })
+    moveStayActivityBetweenStays(activityId, fromStayId, targetStayId, patch)
+  }
+
+  const applyCalendarActivityResize = (
+    stayId: string,
+    activityId: string,
+    dayIso: string,
+    startMinutes: number,
+    endMinutes: number,
+  ) => {
+    if (tripIsReadOnly) return
+    const targetStayId = resolveStayIdForActivityStorage(stays, dayIso)
+    if (!targetStayId) {
+      setCalendarDropError('Add at least one accommodation on the trip before scheduling activities.')
+      return
+    }
+    setCalendarDropError(null)
+    let start = snapCalendarMinutes(startMinutes)
+    let end = snapCalendarMinutes(endMinutes)
+    end = Math.max(start + CAL_SNAP_MINUTES, Math.min(CAL_END_HOUR * 60, end))
+    start = Math.max(0, Math.min(start, end - CAL_SNAP_MINUTES))
+    start = snapCalendarMinutes(start)
+    end = snapCalendarMinutes(end)
+    const patch: Partial<StayActivity> = {
+      date: dayIso,
+      time: formatMinutesToTime(start),
+      endTime: formatMinutesToTime(end),
+    }
+    if (stayId === targetStayId) {
+      updateStayActivity(stayId, activityId, patch)
+    } else {
+      moveStayActivityBetweenStays(activityId, stayId, targetStayId, patch)
+    }
   }
 
   const removeStayActivity = (stayId: string, activityId: string) => {
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) => {
@@ -4467,6 +5548,7 @@ export default function App() {
     const t = text.trim()
     if (!t) return
     if (!state.selectedTripId) return
+    if (tripIsReadOnly) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) => {
@@ -4478,6 +5560,8 @@ export default function App() {
   }
 
   const setTripCancelledFlag = (tripId: string, cancelled: boolean) => {
+    const tr = state.trips.find((x) => x.id === tripId)
+    if (tr && isTripReadOnly(tr)) return
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) => (trip.id === tripId ? { ...trip, cancelled } : trip)),
@@ -4485,6 +5569,11 @@ export default function App() {
   }
 
   const permanentlyRemoveTrip = (tripId: string) => {
+    const tr = state.trips.find((x) => x.id === tripId)
+    if (tr?.sharing?.role === 'viewer' || tr?.sharing?.role === 'editor') return
+    if (tr?.sharing?.role === 'owner') {
+      void revokeSharedItineraryEntire(tr.sharing.sharedItineraryId)
+    }
     setState((prev) => {
       const trips = prev.trips.filter((t) => t.id !== tripId)
       const nextSelected =
@@ -4497,6 +5586,7 @@ export default function App() {
 
   const moveTripToCancelled = () => {
     if (!selectedTrip || selectedTrip.cancelled) return
+    if (tripIsReadOnly) return
     const trip = selectedTrip
     setConfirmDialog({
       title: 'Cancel trip?',
@@ -4516,6 +5606,20 @@ export default function App() {
   }
 
   const handleLogout = async () => {
+    if (isDevAuthBypass()) {
+      skipRemoteSaveRef.current = true
+      remoteFetchGenRef.current += 1
+      setAuthSession(null)
+      setSupabaseUserId(null)
+      setState({ trips: [], selectedTripId: null })
+      setView('home')
+      setAuthFormError(null)
+      setAuthPasswordInput('')
+      setAuthPasswordConfirmInput('')
+      setAuthPendingVerificationEmail(null)
+      setVerificationResendMessage(null)
+      return
+    }
     if (isSupabaseConfigured()) {
       skipRemoteSaveRef.current = true
       remoteFetchGenRef.current += 1
@@ -4546,7 +5650,7 @@ export default function App() {
         options: { emailRedirectTo: getAuthEmailRedirectTo() },
       })
       if (error) {
-        setAuthFormError(mapSupabaseAuthError(error.message))
+        setAuthFormError(mapSupabaseAuthError(error.message, error.code))
       } else {
         setVerificationResendMessage('Another confirmation email has been sent.')
       }
@@ -4566,12 +5670,16 @@ export default function App() {
     if (!authSession) return
     const next = loadTripsState(tripsStorageKey(authSession.email))
     setState(next)
-    skipRemoteSaveRef.current = true
-    void upsertUserTrips(next).then(() => {
-      requestAnimationFrame(() => {
-        skipRemoteSaveRef.current = false
+    if (!isSupabaseConfigured() || isDevAuthBypass()) {
+      skipRemoteSaveRef.current = false
+    } else {
+      skipRemoteSaveRef.current = true
+      void upsertUserTrips(next).then(() => {
+        requestAnimationFrame(() => {
+          skipRemoteSaveRef.current = false
+        })
       })
-    })
+    }
     sessionStorage.setItem(`itinerary:import-dismissed:${normalizeEmail(authSession.email)}`, '1')
     setLocalImportDismissed(true)
   }
@@ -4611,7 +5719,7 @@ export default function App() {
             },
           })
           if (error) {
-            setAuthFormError(mapSupabaseAuthError(error.message))
+            setAuthFormError(mapSupabaseAuthError(error.message, error.code))
             return
           }
           if (data.user && data.session) {
@@ -4632,7 +5740,7 @@ export default function App() {
           password,
         })
         if (error) {
-          setAuthFormError(mapSupabaseAuthError(error.message))
+          setAuthFormError(mapSupabaseAuthError(error.message, error.code))
           return
         }
         setAuthPasswordInput('')
@@ -4673,6 +5781,80 @@ export default function App() {
     }
   }
 
+  const buildShareUrl = (token: string, tripId: string) => {
+    const path = window.location.pathname || '/'
+    const p = new URLSearchParams()
+    p.set('v', 'dashboard')
+    p.set('trip', tripId)
+    p.set('share', token)
+    return `${window.location.origin}${path}?${p.toString()}`
+  }
+
+  const openShareModal = async () => {
+    if (!selectedTrip || !isSupabaseConfigured() || isDevAuthBypass()) return
+    setShareModalCopied(false)
+    setShareModalOpen(true)
+    setShareModalError(null)
+    setShareModalBusy(true)
+    if (!selectedTrip.sharing) {
+      setShareModalLinkToken(null)
+      setShareModalMembers([])
+      setShareModalDefaultPerm('viewer')
+      setShareModalBusy(false)
+      return
+    }
+    if (selectedTrip.sharing.role !== 'owner') {
+      setShareModalError('Only the trip owner can manage the share link.')
+      setShareModalMembers([])
+      setShareModalLinkToken(null)
+      setShareModalBusy(false)
+      return
+    }
+    const meta = await fetchSharedItineraryMeta(selectedTrip.sharing.sharedItineraryId)
+    if (!meta.ok) {
+      setShareModalError(meta.error)
+      setShareModalBusy(false)
+      return
+    }
+    setShareModalLinkToken(meta.shareToken)
+    setShareModalDefaultPerm(meta.defaultPermission)
+    const mem = await fetchSharedItineraryMembers(selectedTrip.sharing.sharedItineraryId)
+    if (mem.ok) setShareModalMembers(mem.members)
+    else setShareModalError(mem.error)
+    setShareModalBusy(false)
+  }
+
+  const enableSharing = async () => {
+    if (!selectedTrip?.id || selectedTrip.sharing) return
+    setShareModalBusy(true)
+    setShareModalError(null)
+    const r = await createSharedItinerary({
+      sourceTripId: selectedTrip.id,
+      trip: selectedTrip,
+      defaultPermission: shareModalDefaultPerm,
+    })
+    if (!r.ok) {
+      setShareModalError(r.error)
+      setShareModalBusy(false)
+      return
+    }
+    const tid = selectedTrip.id
+    setState((prev) => ({
+      ...prev,
+      trips: prev.trips.map((t) =>
+        t.id === tid
+          ? {
+              ...t,
+              sharing: { sharedItineraryId: r.sharedItineraryId, sourceTripId: tid, role: 'owner' as const },
+            }
+          : t,
+      ),
+    }))
+    setShareModalLinkToken(r.shareToken)
+    setShareModalMembers([])
+    setShareModalBusy(false)
+  }
+
   if (view === 'home') {
     const openTrip = (tripId: string) => {
       setState((prev) => ({ ...prev, selectedTripId: tripId }))
@@ -4688,15 +5870,15 @@ export default function App() {
         Boolean(startYearLabel) || section === 'active' || section === 'cancelled'
       const mainButtonPad = hasTopRightCluster
         ? section === 'cancelled'
-          ? 'p-5 pr-[10.5rem] sm:pr-40'
+          ? 'p-5 pr-[9.5rem] sm:pr-[10.5rem] md:pr-40'
           : section === 'active'
-            ? 'p-5 pr-32'
-            : 'p-5 pr-14'
+            ? 'p-5 pr-24 sm:pr-28 md:pr-32'
+            : 'p-5 pr-12 sm:pr-14'
         : 'p-5'
       return (
         <div
           key={trip.id}
-          className={`relative group rounded-2xl border transition-all ${
+          className={`relative group rounded-2xl border transition-[border-color,box-shadow,background-color] duration-150 ${
             muted
               ? 'border-neutral-200/80 bg-neutral-50/90 dark:bg-neutral-900/50 dark:border-neutral-700'
               : 'border-sky-200/80 bg-white dark:bg-neutral-900/90 dark:border-sky-900/50 shadow-sm hover:shadow-md hover:border-sky-300/80'
@@ -4707,8 +5889,11 @@ export default function App() {
             onClick={() => openTrip(trip.id)}
             className={`w-full text-left rounded-2xl ${mainButtonPad}`}
           >
-            <div className={`font-semibold text-lg ${section === 'cancelled' ? 'line-through text-neutral-500' : 'text-neutral-900 dark:text-neutral-100'}`}>
-              {trip.country}
+            <div
+              className={`font-semibold text-lg flex items-center gap-2 ${section === 'cancelled' ? 'line-through text-neutral-500' : 'text-neutral-900 dark:text-neutral-100'}`}
+            >
+              {trip.sharing ? <Users size={18} className="shrink-0 text-sky-600 dark:text-sky-400" aria-hidden /> : null}
+              <span>{trip.country}</span>
             </div>
             <div className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
               {formatDateRangeWithYear(trip.startDate, trip.endDate) || 'Dates not set'}
@@ -4716,7 +5901,7 @@ export default function App() {
             <div className="text-xs text-neutral-500 mt-2">{trip.mustDos.length} side-quests</div>
           </button>
           {hasTopRightCluster ? (
-            <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+            <div className="absolute top-3 right-3 z-10 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center justify-end gap-1.5 sm:gap-2">
               {section === 'active' ? (
                 <button
                   type="button"
@@ -4743,6 +5928,7 @@ export default function App() {
                   >
                     Restore
                   </button>
+                  {(!trip.sharing || trip.sharing.role === 'owner') ? (
                   <button
                     type="button"
                     title="Delete permanently"
@@ -4763,6 +5949,7 @@ export default function App() {
                   >
                     <Trash2 size={18} aria-hidden />
                   </button>
+                  ) : null}
                 </>
               ) : null}
               {startYearLabel ? (
@@ -4789,12 +5976,12 @@ export default function App() {
           onConfirm={handleConfirmDialogAction}
         />
         <div
-          className={`min-h-screen bg-gradient-to-br from-sky-100/90 via-white to-indigo-50/80 dark:from-neutral-950 dark:via-neutral-900 dark:to-sky-950/40 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}
+          className={`min-h-screen overflow-x-hidden bg-gradient-to-br from-sky-100/90 via-white to-indigo-50/80 dark:from-neutral-950 dark:via-neutral-900 dark:to-sky-950/40 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}
         >
         <div className="sticky top-0 z-40 border-b border-white/40 dark:border-neutral-800/80 bg-white/75 dark:bg-neutral-950/80 backdrop-blur-md">
-          <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-            <span className="text-lg font-serif font-semibold tracking-tight text-neutral-900 dark:text-white">{BRAND_NAME}</span>
-            <div className="flex items-center gap-2 flex-wrap justify-end">
+          <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3 min-w-0">
+            <span className="min-w-0 shrink text-lg font-serif font-semibold tracking-tight text-neutral-900 dark:text-white truncate">{BRAND_NAME}</span>
+            <div className="flex min-w-0 items-center gap-2 flex-wrap justify-end">
               <CurrencySelect value={displayCurrency} onChange={setDisplayCurrency} />
               {authSession ? (
                 <>
@@ -5032,7 +6219,7 @@ export default function App() {
                     setNewTripRange(undefined)
                     setShowAddTripModal(true)
                   }}
-                  className="px-8 py-3.5 rounded-2xl bg-gradient-to-r from-sky-600 to-indigo-600 text-white font-semibold shadow-lg shadow-sky-900/20 hover:from-sky-500 hover:to-indigo-500 transition-transform hover:scale-[1.02]"
+                  className="px-8 py-3.5 rounded-2xl bg-gradient-to-r from-sky-600 to-indigo-600 text-white font-semibold shadow-lg shadow-sky-900/20 hover:from-sky-500 hover:to-indigo-500 transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:hover:scale-100"
                 >
                   Add new trip
                 </button>
@@ -5271,153 +6458,605 @@ export default function App() {
         variant={confirmDialog?.variant ?? 'default'}
         onConfirm={handleConfirmDialogAction}
       />
-    <div className={`min-h-screen bg-gradient-to-b from-sky-50 via-white to-neutral-100 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}>
-
-      {calendarActivityDetail && calendarDetailDraft ? (
+      {shareModalOpen ? (
         <div
-          className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
           role="presentation"
-          onClick={() => setCalendarActivityDetail(null)}
+          onClick={() => {
+            if (!shareModalBusy) setShareModalOpen(false)
+          }}
         >
           <div
-            className="w-[min(100%,26rem)] bg-white dark:bg-neutral-900 rounded-2xl shadow-2xl p-6 border border-neutral-200 dark:border-neutral-700"
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-neutral-200 bg-white p-6 shadow-2xl dark:border-neutral-700 dark:bg-neutral-900"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="cal-activity-modal-title"
+            aria-labelledby="share-modal-title"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 id="cal-activity-modal-title" className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
-              Activity
-            </h3>
-            <div className="mt-4 space-y-3">
-              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Name</label>
-              <input
-                value={calendarDetailDraft.name ?? ''}
-                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, name: e.target.value } : d))}
-                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm"
-              />
-              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Time</label>
-              <input
-                type="time"
-                value={calendarDetailDraft.time ?? ''}
-                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, time: e.target.value } : d))}
-                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm"
-              />
-              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Confirmation #</label>
-              <input
-                value={calendarDetailDraft.confirmationRef ?? ''}
-                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, confirmationRef: e.target.value } : d))}
-                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm"
-              />
-              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Cost</label>
-              <input
-                value={calendarDetailDraft.cost ?? ''}
-                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, cost: e.target.value } : d))}
-                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm"
-              />
-              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Notes</label>
-              <textarea
-                value={calendarDetailDraft.notes ?? ''}
-                onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, notes: e.target.value } : d))}
-                rows={3}
-                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm resize-y"
-              />
-            </div>
-            <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-start justify-between gap-2">
+              <h2 id="share-modal-title" className="text-xl font-bold text-neutral-900 dark:text-neutral-100">
+                Shared itinerary
+              </h2>
               <button
                 type="button"
-                onClick={() => {
-                  removeStayActivity(calendarActivityDetail.stayId, calendarActivityDetail.activity.id)
-                  setCalendarActivityDetail(null)
-                }}
-                className="px-4 py-2 rounded-xl text-sm font-medium text-rose-700 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/50"
+                className="rounded-lg p-1 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                onClick={() => !shareModalBusy && setShareModalOpen(false)}
+                aria-label="Close"
               >
-                Delete
+                <X size={20} aria-hidden />
               </button>
-              <div className="flex gap-2">
+            </div>
+            {shareModalError ? <p className="mt-2 text-sm text-rose-600 dark:text-rose-400">{shareModalError}</p> : null}
+            {selectedTrip && !selectedTrip.sharing ? (
+              <div className="mt-3">
+                <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                  Enable sharing to invite others with a link. The itinerary syncs from the cloud for everyone with access.
+                </p>
+                <label className="mt-4 block text-xs font-medium text-neutral-600 dark:text-neutral-400">
+                  Default access for new people via link
+                </label>
+                <select
+                  value={shareModalDefaultPerm}
+                  onChange={(e) => setShareModalDefaultPerm(e.target.value === 'editor' ? 'editor' : 'viewer')}
+                  className="mt-1 w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm dark:border-neutral-600 dark:bg-neutral-800"
+                >
+                  <option value="viewer">View only</option>
+                  <option value="editor">Can edit</option>
+                </select>
                 <button
                   type="button"
-                  onClick={() => setCalendarActivityDetail(null)}
-                  className="px-4 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 text-sm hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                  disabled={shareModalBusy}
+                  onClick={() => void enableSharing()}
+                  className="mt-4 w-full rounded-xl bg-blue-600 py-3 text-sm font-semibold text-white disabled:opacity-50"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    updateStayActivity(calendarActivityDetail.stayId, calendarActivityDetail.activity.id, {
-                      name: (calendarDetailDraft.name ?? '').trim(),
-                      time: calendarDetailDraft.time ?? '',
-                      confirmationRef: (calendarDetailDraft.confirmationRef ?? '').trim(),
-                      cost: calendarDetailDraft.cost ?? '',
-                      notes: calendarDetailDraft.notes ?? '',
-                    })
-                    setCalendarActivityDetail(null)
-                  }}
-                  className="px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500"
-                >
-                  Save
+                  {shareModalBusy ? 'Working…' : 'Enable sharing'}
                 </button>
               </div>
-            </div>
+            ) : null}
+            {selectedTrip?.sharing?.role === 'owner' ? (
+              <div className="mt-3">
+                <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                  Share this link. New joiners get the default permission below.
+                </p>
+                {shareModalLinkToken ? (
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <input
+                      readOnly
+                      className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs dark:border-neutral-600 dark:bg-neutral-800"
+                      value={buildShareUrl(shareModalLinkToken, selectedTrip.sharing.sourceTripId)}
+                    />
+                    <button
+                      type="button"
+                      className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-neutral-50 dark:border-neutral-600 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+                      onClick={() => {
+                        void navigator.clipboard.writeText(
+                          buildShareUrl(shareModalLinkToken, selectedTrip.sharing!.sourceTripId),
+                        )
+                        setShareModalCopied(true)
+                        window.setTimeout(() => setShareModalCopied(false), 2000)
+                      }}
+                    >
+                      <Copy size={16} aria-hidden />
+                      Copy
+                    </button>
+                  </div>
+                ) : null}
+                {shareModalCopied ? <p className="mt-1 text-xs text-green-600 dark:text-green-400">Copied to clipboard.</p> : null}
+                <label className="mt-4 block text-xs font-medium text-neutral-600 dark:text-neutral-400">
+                  Default for new link joiners
+                </label>
+                <select
+                  value={shareModalDefaultPerm}
+                  onChange={(e) => {
+                    const v = e.target.value === 'editor' ? 'editor' : 'viewer'
+                    setShareModalDefaultPerm(v)
+                    void updateSharedItineraryDefaultPermission(selectedTrip.sharing!.sharedItineraryId, v)
+                  }}
+                  className="mt-1 w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm dark:border-neutral-600 dark:bg-neutral-800"
+                >
+                  <option value="viewer">View only</option>
+                  <option value="editor">Can edit</option>
+                </select>
+                <h3 className="mt-6 text-sm font-semibold text-neutral-900 dark:text-neutral-100">Members</h3>
+                {shareModalBusy ? <p className="mt-2 text-xs text-neutral-500">Loading…</p> : null}
+                <ul className="mt-2 space-y-2 text-sm">
+                  {shareModalMembers.map((m) => (
+                    <li
+                      key={m.userId}
+                      className="flex flex-col gap-2 rounded-lg border border-neutral-200 px-3 py-2 dark:border-neutral-600 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <span className="min-w-0 truncate text-neutral-800 dark:text-neutral-200">
+                        {m.displayName || `User ${m.userId.slice(0, 8)}…`}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={m.role}
+                          onChange={(e) => {
+                            const role = e.target.value === 'editor' ? 'editor' : 'viewer'
+                            void updateSharedMemberRole(selectedTrip.sharing!.sharedItineraryId, m.userId, role).then((r) => {
+                              if (r.ok) {
+                                setShareModalMembers((prev) =>
+                                  prev.map((x) => (x.userId === m.userId ? { ...x, role } : x)),
+                                )
+                              }
+                            })
+                          }}
+                          className="rounded-lg border border-neutral-200 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800"
+                        >
+                          <option value="viewer">Viewer</option>
+                          <option value="editor">Editor</option>
+                        </select>
+                        <button
+                          type="button"
+                          className="rounded-lg px-2 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                          onClick={() => {
+                            void revokeSharedItineraryMember(selectedTrip.sharing!.sharedItineraryId, m.userId).then((r) => {
+                              if (r.ok) {
+                                setShareModalMembers((prev) => prev.filter((x) => x.userId !== m.userId))
+                              }
+                            })
+                          }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  className="mt-6 text-sm font-semibold text-rose-600 hover:underline"
+                  onClick={() => {
+                    const sid = selectedTrip.sharing!.sharedItineraryId
+                    const tid = selectedTrip.id
+                    setConfirmDialog({
+                      title: 'Stop sharing for everyone?',
+                      description:
+                        'Collaborators will lose access. This trip stays on your account as a personal itinerary (no longer synced with others).',
+                      confirmLabel: 'Revoke share',
+                      cancelLabel: 'Cancel',
+                      variant: 'danger',
+                      onConfirm: () => {
+                        void revokeSharedItineraryEntire(sid).then((r) => {
+                          if (r.ok) {
+                            setState((prev) => ({
+                              ...prev,
+                              trips: prev.trips.map((t) => (t.id === tid ? stripSharingFromTrip(t) : t)),
+                            }))
+                            setShareModalOpen(false)
+                          }
+                        })
+                      },
+                    })
+                  }}
+                >
+                  Revoke entire share
+                </button>
+              </div>
+            ) : null}
+            {selectedTrip?.sharing && selectedTrip.sharing.role !== 'owner' ? (
+              <p className="mt-3 text-sm text-neutral-600 dark:text-neutral-400">
+                You can collaborate on this trip but only the owner can manage the invite link and members.
+              </p>
+            ) : null}
           </div>
         </div>
       ) : null}
+    <div className={`min-h-screen overflow-x-hidden bg-gradient-to-b from-sky-50 via-white to-neutral-100 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}>
 
-      {/* Hero */}
-      <div className="relative h-[35vh] w-full overflow-hidden">
-        <div
-          className={`absolute top-4 z-20 flex flex-wrap items-center gap-2 ${showSideGoalsRail ? 'left-4 lg:left-[336px]' : 'left-4'} max-w-[min(100%,calc(100%-2rem))]`}
-        >
-          <button
-            type="button"
-            onClick={() => setView('home')}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+      {calendarActivityDetail ? (() => {
+        const calPayload = calendarActivityDetail
+        const calModalAct = resolveActivityForCalendarModal(calPayload, selectedTrip)
+        const calModalDayItem = calendarPayloadToDayItem(calPayload)
+        const directionsDest = directionsDestinationForScheduleItem(calModalDayItem).trim()
+        const directionsHref = directionsDest
+          ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(directionsDest)}`
+          : ''
+        const sm = effectiveActivityStartMinutes(calModalAct, calModalAct.date)
+        const em = effectiveActivityEndMinutes(calModalAct, calModalAct.date)
+        const timeDisplay =
+          calModalAct.calendarTimeLabel?.trim() || `${formatMinutesToTime(sm)}–${formatMinutesToTime(em)}`
+        const calModalMeta = activityMetaById[calModalAct.id]
+        const photoUrl = calModalAct.photoUrl || calModalMeta?.photoUrl
+        const categoryLine = calModalAct.category || calModalMeta?.category
+        const googleUri = calModalAct.googleMapsUri || calModalMeta?.googleMapsUri
+        const calModalHostStay =
+          !calPayload.bookingRef && calPayload.stayId !== CAL_BOOKING_STAY_ID
+            ? selectedTrip?.stays.find((s) => s.id === calPayload.stayId)
+            : null
+        const kindLabel = calendarItemKindLabel(calPayload)
+        const isBookingRow = Boolean(calPayload.bookingRef)
+        const showActivityEdit =
+          calendarActivityDetailEditing && calendarDetailDraft && !isBookingRow
+
+        return (
+          <div
+            className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4"
+            role="presentation"
+            onClick={() => setCalendarActivityDetail(null)}
           >
-            Back to Home
-          </button>
-          {authSession ? (
-            <>
-              <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/25 bg-black/25 backdrop-blur-md text-white text-xs max-w-[160px] truncate">
-                <User size={14} className="shrink-0 opacity-90" aria-hidden />
-                {authSession.name}
-              </span>
+            <div
+              className="w-[min(100%,28rem)] max-h-[min(92vh,40rem)] flex flex-col bg-white dark:bg-neutral-900 rounded-2xl shadow-2xl border border-neutral-200 dark:border-neutral-700 overflow-hidden"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="cal-activity-modal-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-6 pb-0 shrink-0 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                    {showActivityEdit ? 'Edit activity' : `${kindLabel} details`}
+                  </p>
+                  <h3
+                    id="cal-activity-modal-title"
+                    className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mt-0.5 break-words"
+                  >
+                    {calModalAct.name}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCalendarActivityDetail(null)}
+                  className="shrink-0 p-2 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                  aria-label="Close"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="px-6 mt-4 flex-1 overflow-y-auto min-h-0 space-y-4 pb-2">
+                {showActivityEdit ? (
+                  <div className="space-y-3">
+                    <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Name</label>
+                    <input
+                      value={calendarDetailDraft?.name ?? ''}
+                      disabled={tripIsReadOnly}
+                      onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, name: e.target.value } : d))}
+                      className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm disabled:opacity-50"
+                    />
+                    <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Start time</label>
+                    <input
+                      type="time"
+                      value={calendarDetailDraft?.time ?? ''}
+                      disabled={tripIsReadOnly}
+                      onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, time: e.target.value } : d))}
+                      className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm disabled:opacity-50"
+                    />
+                    <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">End time</label>
+                    <input
+                      type="time"
+                      value={calendarDetailDraft?.endTime ?? ''}
+                      disabled={tripIsReadOnly}
+                      onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, endTime: e.target.value } : d))}
+                      className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm disabled:opacity-50"
+                    />
+                    <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Confirmation #</label>
+                    <input
+                      value={calendarDetailDraft?.confirmationRef ?? ''}
+                      disabled={tripIsReadOnly}
+                      onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, confirmationRef: e.target.value } : d))}
+                      className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm disabled:opacity-50"
+                    />
+                    <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Cost</label>
+                    <input
+                      value={calendarDetailDraft?.cost ?? ''}
+                      disabled={tripIsReadOnly}
+                      onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, cost: e.target.value } : d))}
+                      className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm disabled:opacity-50"
+                    />
+                    <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">Notes</label>
+                    <textarea
+                      value={calendarDetailDraft?.notes ?? ''}
+                      disabled={tripIsReadOnly}
+                      onChange={(e) => setCalendarDetailDraft((d) => (d ? { ...d, notes: e.target.value } : d))}
+                      rows={3}
+                      className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 text-sm resize-y disabled:opacity-50"
+                    />
+                  </div>
+                ) : (
+                  <>
+                    {photoUrl ? (
+                      <img
+                        src={photoUrl}
+                        alt=""
+                        className="w-full max-h-40 object-cover rounded-xl border border-neutral-200 dark:border-neutral-700"
+                      />
+                    ) : null}
+                    <div className="space-y-2 text-sm">
+                      <div>
+                        <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Date</p>
+                        <p className="text-neutral-900 dark:text-neutral-100">
+                          {formatSingleDateLabel(calModalAct.date) || '—'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Time</p>
+                        <p className="text-neutral-900 dark:text-neutral-100 tabular-nums">{timeDisplay}</p>
+                      </div>
+                      {calPayload.stayLocation?.trim() ? (
+                        <div>
+                          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Type</p>
+                          <p className="text-neutral-900 dark:text-neutral-100">{calPayload.stayLocation.trim()}</p>
+                        </div>
+                      ) : null}
+                      {calModalHostStay ? (
+                        <div>
+                          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Accommodation</p>
+                          <p className="text-neutral-900 dark:text-neutral-100 font-medium">{calModalHostStay.location}</p>
+                          {calModalHostStay.address?.trim() ? (
+                            <p className="text-neutral-600 dark:text-neutral-300 text-xs mt-0.5">
+                              {calModalHostStay.address.trim()}
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {categoryLine ? (
+                        <div>
+                          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Category</p>
+                          <p className="text-neutral-900 dark:text-neutral-100">{categoryLine}</p>
+                        </div>
+                      ) : null}
+                      {calModalAct.placeLabel?.trim() ? (
+                        <div>
+                          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Place</p>
+                          <p className="text-neutral-900 dark:text-neutral-100">{calModalAct.placeLabel.trim()}</p>
+                        </div>
+                      ) : null}
+                      {(directionsHref || googleUri) ? (
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          {directionsHref ? (
+                            <a
+                              href={directionsHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 dark:border-neutral-600 bg-neutral-50 dark:bg-neutral-800 px-3 py-2 text-xs font-semibold text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                            >
+                              <MapPin size={14} aria-hidden />
+                              Directions
+                            </a>
+                          ) : null}
+                          {googleUri ? (
+                            <a
+                              href={googleUri}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 dark:border-neutral-600 bg-neutral-50 dark:bg-neutral-800 px-3 py-2 text-xs font-semibold text-blue-700 dark:text-blue-400 hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                            >
+                              <ExternalLink size={14} aria-hidden />
+                              Google Maps
+                            </a>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                    {isBookingRow && calPayload.bookingRef && selectedTrip ? (
+                      <CalendarBookingDetailsReadonly
+                        tab={calPayload.bookingRef.tab}
+                        id={calPayload.bookingRef.id}
+                        bookings={selectedTrip.bookings}
+                      />
+                    ) : null}
+                    {!isBookingRow ? (
+                      <div className="space-y-3 border-t border-neutral-200 dark:border-neutral-700 pt-4">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                          Activity details
+                        </p>
+                        {calModalAct.confirmationRef?.trim() ? (
+                          <div>
+                            <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Confirmation #</p>
+                            <p className="text-sm text-neutral-900 dark:text-neutral-100">{calModalAct.confirmationRef.trim()}</p>
+                          </div>
+                        ) : null}
+                        {calModalAct.cost?.trim() ? (
+                          <div>
+                            <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Cost</p>
+                            <p className="text-sm text-neutral-900 dark:text-neutral-100">{calModalAct.cost.trim()}</p>
+                          </div>
+                        ) : null}
+                        {calModalAct.notes?.trim() ? (
+                          <div>
+                            <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Notes</p>
+                            <p className="text-sm text-neutral-900 dark:text-neutral-100 whitespace-pre-wrap break-words">
+                              {calModalAct.notes.trim()}
+                            </p>
+                          </div>
+                        ) : null}
+                        {!calModalAct.confirmationRef?.trim() && !calModalAct.cost?.trim() && !calModalAct.notes?.trim() ? (
+                          <p className="text-xs text-neutral-500 dark:text-neutral-400">No confirmation, cost, or notes on this activity.</p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </>
+                )}
+              </div>
+              <div className="p-6 pt-4 shrink-0 border-t border-neutral-200 dark:border-neutral-700 bg-neutral-50/80 dark:bg-neutral-950/40">
+                {showActivityEdit ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      disabled={tripIsReadOnly}
+                      onClick={() => {
+                        removeStayActivity(calPayload.stayId, calPayload.activity.id)
+                        setCalendarActivityDetail(null)
+                      }}
+                      className="px-4 py-2 rounded-xl text-sm font-medium text-rose-700 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/50 disabled:opacity-40"
+                    >
+                      Delete
+                    </button>
+                    <div className="flex flex-wrap gap-2 justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCalendarActivityDetailEditing(false)
+                          const a = resolveActivityForCalendarModal(calPayload, selectedTrip)
+                          const endT =
+                            (a.endTime ?? '').trim() || formatMinutesToTime(effectiveActivityEndMinutes(a, a.date))
+                          setCalendarDetailDraft({ ...a, endTime: endT })
+                        }}
+                        className="px-4 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={tripIsReadOnly || !calendarDetailDraft}
+                        onClick={() => {
+                          if (!calendarDetailDraft) return
+                          const timeNorm = normalizeHhMmTime((calendarDetailDraft.time ?? '').trim())
+                          let endNorm = normalizeHhMmTime((calendarDetailDraft.endTime ?? '').trim())
+                          const tsm = parseTimeToMinutes(timeNorm)
+                          const tem = parseTimeToMinutes(endNorm)
+                          if (tsm !== null && (tem === null || tem <= tsm)) {
+                            endNorm = formatMinutesToTime(Math.min(24 * 60, tsm + CAL_EVENT_DURATION_MIN))
+                          }
+                          updateStayActivity(calPayload.stayId, calPayload.activity.id, {
+                            name: (calendarDetailDraft.name ?? '').trim(),
+                            time: timeNorm,
+                            endTime: endNorm,
+                            confirmationRef: (calendarDetailDraft.confirmationRef ?? '').trim(),
+                            cost: calendarDetailDraft.cost ?? '',
+                            notes: calendarDetailDraft.notes ?? '',
+                          })
+                          setCalendarActivityDetail(null)
+                        }}
+                        className="px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500 disabled:opacity-40"
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setCalendarActivityDetail(null)}
+                      className="px-4 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                    >
+                      Close
+                    </button>
+                    {!tripIsReadOnly ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (calPayload.bookingRef) {
+                            const br = calPayload.bookingRef
+                            setCalendarActivityDetail(null)
+                            setActiveTab('planner')
+                            setBookingsTab(br.tab)
+                            setBookingFilter(br.tab)
+                            openEditBookingForm(br.tab, br.id)
+                          } else {
+                            setCalendarActivityDetailEditing(true)
+                          }
+                        }}
+                        className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500"
+                      >
+                        <Pencil size={16} aria-hidden />
+                        Edit
+                      </button>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })() : null}
+
+      {/* Hero — toolbar stays one row on mobile (wrap only if needed) */}
+      <div className="relative h-[min(42vh,520px)] min-h-[260px] max-sm:h-[min(36vh,420px)] max-sm:min-h-[220px] w-full overflow-hidden">
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-20 px-3 pt-3 sm:px-4 sm:pt-4">
+          <div
+            className={`pointer-events-auto flex flex-row flex-wrap items-center justify-between gap-x-2 gap-y-2 ${
+              showSideGoalsRail ? 'lg:pl-[calc(320px+1rem)] lg:pr-[calc(320px+1rem)]' : ''
+            }`}
+          >
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={handleLogout}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+                onClick={() => setView('home')}
+                className="inline-flex shrink-0 items-center gap-2 px-3 py-2 sm:px-4 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
               >
-                <LogOut size={16} aria-hidden />
-                Log out
+                Back to Home
               </button>
-            </>
-          ) : null}
-        </div>
-        <div
-          className={`absolute top-4 z-20 flex flex-wrap items-center gap-2 justify-end ${showSideGoalsRail ? 'right-4 lg:right-[336px]' : 'right-4'}`}
-        >
-          <CurrencySelect variant="onDark" value={displayCurrency} onChange={setDisplayCurrency} />
-          <button
-            type="button"
-            onClick={() => setIsDarkMode((v) => !v)}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
-            aria-label="Toggle dark mode"
-          >
-            {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
-            {isDarkMode ? 'Light' : 'Dark'}
-          </button>
+              {authSession ? (
+                <>
+                  <span className="hidden min-[380px]:inline-flex max-w-[140px] sm:max-w-[160px] items-center gap-1.5 truncate px-3 py-2 rounded-xl border border-white/25 bg-black/25 backdrop-blur-md text-white text-xs">
+                    <User size={14} className="shrink-0 opacity-90" aria-hidden />
+                    {authSession.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    aria-label="Log out"
+                    className="inline-flex shrink-0 items-center gap-1.5 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+                  >
+                    <LogOut size={16} aria-hidden />
+                    <span className="hidden sm:inline">Log out</span>
+                  </button>
+                </>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+              <CurrencySelect variant="onDark" value={displayCurrency} onChange={setDisplayCurrency} />
+              <button
+                type="button"
+                onClick={() => setIsDarkMode((v) => !v)}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+                aria-label="Toggle dark mode"
+              >
+                {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
+                <span className="hidden sm:inline">{isDarkMode ? 'Light' : 'Dark'}</span>
+              </button>
+            </div>
+          </div>
         </div>
         <img
           src={dashboardHeroUrl || DEFAULT_HERO_IMAGE}
           className="w-full h-full object-cover"
           alt="Hero"
         />
-        <div className={`absolute inset-y-0 ${showSideGoalsRail ? 'left-0 right-0 lg:left-[320px] lg:right-[320px]' : 'left-0 right-0'} bg-gradient-to-b from-black/50 via-black/35 to-black/60 flex flex-col items-center justify-start pt-20 text-white px-4 text-center`}>
-          <h1 className="text-4xl md:text-6xl font-serif font-bold mb-4 drop-shadow-md">
-            {selectedTrip ? `Trip to: ${selectedTrip.country}` : BRAND_NAME}
+        <div
+          className={`absolute inset-y-0 ${showSideGoalsRail ? 'left-0 right-0 lg:left-[320px] lg:right-[320px]' : 'left-0 right-0'} bg-gradient-to-b from-black/50 via-black/35 to-black/60 flex flex-col items-center justify-start gap-5 sm:gap-6 pt-20 sm:pt-[5.5rem] pb-6 max-sm:pb-14 text-white px-3 text-center sm:px-4 overflow-y-auto`}
+        >
+          <h1 className="text-3xl sm:text-4xl md:text-6xl font-serif font-bold drop-shadow-md px-1 flex flex-wrap items-center justify-center gap-3">
+            {selectedTrip?.sharing ? <Users className="shrink-0 text-white/90" size={44} aria-hidden /> : null}
+            <span>{selectedTrip ? `Trip to: ${selectedTrip.country}` : BRAND_NAME}</span>
           </h1>
-          <p className="text-lg md:text-xl max-w-2xl opacity-95">{BRAND_DASHBOARD_SUBTITLE}</p>
-          <div className="mt-6 flex gap-3 flex-wrap justify-center text-sm font-medium">
+          <p className="text-base sm:text-lg md:text-xl max-w-2xl opacity-95 px-1">{BRAND_DASHBOARD_SUBTITLE}</p>
+          {shareInviteBanner ? (
+            <p className="text-sm text-amber-200 max-w-xl rounded-lg bg-black/25 px-3 py-2 border border-amber-400/40">
+              {shareInviteBanner}
+            </p>
+          ) : null}
+          {tripIsReadOnly ? (
+            <p className="text-sm text-white/95 max-w-xl rounded-lg bg-black/35 px-3 py-2 border border-white/25">
+              View-only access: you can browse this shared itinerary but cannot edit it.
+            </p>
+          ) : null}
+          {isSupabaseConfigured() && !isDevAuthBypass() && authSession && selectedTrip && !tripIsReadOnly ? (
+            <div className="flex flex-wrap justify-center gap-2">
+              {selectedTrip.sharing?.role === 'owner' ? (
+                <button
+                  type="button"
+                  onClick={() => void openShareModal()}
+                  className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
+                >
+                  <Users size={16} aria-hidden />
+                  Manage sharing
+                </button>
+              ) : !selectedTrip.sharing ? (
+                <button
+                  type="button"
+                  onClick={() => void openShareModal()}
+                  className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
+                >
+                  <Link2 size={16} aria-hidden />
+                  Share trip
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="flex gap-3 flex-wrap justify-center text-sm font-medium">
             <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
               {selectedTrip ? `Current: ${selectedTrip.country}` : 'No trip selected'}
             </span>
@@ -5427,69 +7066,69 @@ export default function App() {
                 : `Side-Quests remaining: ${remaining}`}
             </span>
           </div>
-          <div className="flex-1 w-full min-h-0 flex items-center justify-center">
-            <div className="-translate-y-[25px] rounded-2xl border border-white/30 bg-black/25 backdrop-blur-md px-5 py-3 text-center shadow-lg">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-100">{sideQuestCountdown.title}</p>
-              <p className="mt-1 text-xl md:text-2xl font-bold leading-tight text-white">{sideQuestCountdown.subtitle}</p>
-            </div>
+          <div className="w-full max-w-md rounded-2xl border border-white/30 bg-black/25 backdrop-blur-md px-5 py-3 text-center shadow-lg">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-100">{sideQuestCountdown.title}</p>
+            <p className="mt-1 text-xl md:text-2xl font-bold leading-tight text-white">{sideQuestCountdown.subtitle}</p>
           </div>
         </div>
       </div>
 
       <div className={showSideGoalsRail ? 'lg:pl-[320px] lg:pr-[320px]' : ''}>
         {/* Tabs */}
-        <div className="max-w-5xl mx-auto px-4 -mt-10 relative z-10">
-          <div className="bg-white/95 backdrop-blur rounded-2xl shadow-2xl p-2.5 flex border border-white/70">
+        <div className="max-w-5xl mx-auto px-3 sm:px-4 -mt-10 relative z-10">
+          <div className="bg-white/95 backdrop-blur rounded-2xl shadow-2xl border border-white/70 p-1.5 sm:p-2.5 overflow-x-auto overscroll-x-contain [scrollbar-width:thin]">
+          <div className="flex w-max flex-nowrap gap-1 sm:w-full sm:flex-wrap sm:gap-1">
           <button
             onClick={() => setActiveTab('planner')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg transition-all ${
+            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
               activeTab === 'planner' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
             }`}
           >
-            <Calendar size={18} />
-            <span className="font-semibold text-xs sm:text-base">Planner</span>
+            <Calendar size={18} className="shrink-0" />
+            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Planner</span>
           </button>
           <button
             onClick={() => setActiveTab('itinerary')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg transition-all ${
+            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
               activeTab === 'itinerary' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
             }`}
           >
-            <Calendar size={18} />
-            <span className="font-semibold text-xs sm:text-base">Itinerary</span>
+            <Calendar size={18} className="shrink-0" />
+            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Itinerary</span>
           </button>
           <button
             onClick={() => setActiveTab('budget')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg transition-all ${
+            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
               activeTab === 'budget' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
             }`}
           >
-            <DollarSign size={18} />
-            <span className="font-semibold text-xs sm:text-base">Budget</span>
+            <DollarSign size={18} className="shrink-0" />
+            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Budget</span>
           </button>
           <button
             onClick={() => setActiveTab('tips')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg transition-all ${
+            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
               activeTab === 'tips' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
             }`}
           >
-            <Compass size={18} />
-            <span className="font-semibold text-xs sm:text-base">Tips</span>
+            <Compass size={18} className="shrink-0" />
+            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Tips</span>
           </button>
           <button
             onClick={() => setActiveTab('map')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg transition-all ${
+            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
               activeTab === 'map' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
             }`}
           >
-            <MapIcon size={18} />
-            <span className="font-semibold text-xs sm:text-base">Map</span>
+            <MapIcon size={18} className="shrink-0" />
+            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Map</span>
           </button>
         </div>
       </div>
+      </div>
 
         {showSideGoalsRail ? (
-        <aside className="hidden lg:block fixed left-0 top-0 h-full w-[320px] z-40 bg-white border-r border-neutral-200 shadow-2xl p-5 overflow-auto">
+        <aside className="hidden lg:block fixed left-0 top-0 h-full w-[320px] z-40 bg-white border-r border-neutral-200 shadow-2xl p-5 overflow-auto pt-[max(1.25rem,env(safe-area-inset-top))]">
           <div>
             <h3 className="text-xl font-serif font-bold">Overview</h3>
             <p className="text-xs text-neutral-500">Reserved space for trip overview details.</p>
@@ -5501,7 +7140,9 @@ export default function App() {
         ) : null}
 
         {showSideGoalsRail ? (
-        <aside className="hidden lg:block fixed right-0 top-0 h-full w-[320px] z-40 bg-white border-l border-neutral-200 shadow-2xl p-5 overflow-auto">
+        <aside
+          className={`hidden lg:block fixed right-0 top-0 h-full w-[320px] z-40 bg-white border-l border-neutral-200 shadow-2xl p-5 overflow-auto pt-[max(1.25rem,env(safe-area-inset-top))]${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
+        >
             <div>
               <h3 className="text-xl font-serif font-bold">Side-Quests</h3>
               <p className="text-xs text-neutral-500">Fun extras you would love to achieve.</p>
@@ -5593,15 +7234,17 @@ export default function App() {
         </aside>
         ) : null}
 
-        <main className="max-w-5xl mx-auto px-4 py-12">
+        <main className="max-w-5xl mx-auto px-3 sm:px-4 py-12 pb-12 max-sm:pb-[max(3rem,env(safe-area-inset-bottom,0px))]">
         {activeTab === 'planner' && (
-          <div className="space-y-8 animate-in fade-in duration-500">
+          <div
+            className={`space-y-8 animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
+          >
             {/* Bookings */}
             <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 overflow-hidden">
               <button
                 type="button"
                 onClick={() => setBookingManagementExpanded((v) => !v)}
-                className="w-full flex items-center justify-between gap-4 px-7 py-5 hover:bg-neutral-50 transition-colors text-left"
+                className="w-full flex items-center justify-between gap-4 px-4 py-4 sm:px-7 sm:py-5 hover:bg-neutral-50 transition-colors text-left"
                 aria-expanded={bookingManagementExpanded}
                 aria-controls="booking-management-panel"
               >
@@ -5630,12 +7273,12 @@ export default function App() {
               </button>
 
               {bookingManagementExpanded ? (
-              <div id="booking-management-panel" className="px-7 pb-7">
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              <div id="booking-management-panel" className="px-4 pb-6 sm:px-7 sm:pb-7">
+              <div className="flex flex-nowrap gap-2 overflow-x-auto overscroll-x-contain pb-1 -mx-1 px-1 sm:grid sm:grid-cols-5 sm:overflow-visible sm:pb-0 sm:px-0 sm:mx-0">
                 <button
                   type="button"
                   onClick={() => setBookingFilter('all')}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
                   All
                 </button>
@@ -5645,7 +7288,7 @@ export default function App() {
                     setBookingsTab('rentalCar')
                     setBookingFilter('rentalCar')
                   }}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'rentalCar' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'rentalCar' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
                   Rental Car
                 </button>
@@ -5655,7 +7298,7 @@ export default function App() {
                     setBookingsTab('flight')
                     setBookingFilter('flight')
                   }}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'flight' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'flight' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
                   Flight
                 </button>
@@ -5665,7 +7308,7 @@ export default function App() {
                     setBookingsTab('restaurant')
                     setBookingFilter('restaurant')
                   }}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'restaurant' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'restaurant' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
                   Dining & activities
                 </button>
@@ -5675,7 +7318,7 @@ export default function App() {
                     setBookingsTab('accommodation')
                     setBookingFilter('accommodation')
                   }}
-                  className={`px-3 py-2 rounded-xl text-sm font-medium ${bookingFilter === 'accommodation' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
+                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'accommodation' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
                 >
                   Accommodation
                 </button>
@@ -6267,7 +7910,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setExpandedTripPanel((v) => !v)}
-                className="w-full flex items-center justify-between px-7 py-5 hover:bg-neutral-50 transition-colors"
+                className="w-full flex items-center justify-between px-4 py-4 sm:px-7 sm:py-5 hover:bg-neutral-50 transition-colors"
               >
                 <div className="flex items-center gap-3">
                   <MapPin className="text-blue-600" size={18} />
@@ -6280,7 +7923,7 @@ export default function App() {
               </button>
 
               {expandedTripPanel && (
-                <div className="px-7 pb-7">
+                <div className="px-4 pb-6 sm:px-7 sm:pb-7">
                   <div className="flex flex-col sm:flex-row gap-3 mb-6 items-start sm:items-center">
                     <div className="flex-1 min-w-0 px-4 py-3 rounded-xl border border-neutral-200 bg-neutral-50 text-sm text-neutral-700 shadow-sm">
                       {selectedTrip ? `Current trip: ${selectedTrip.country}` : 'No trip selected'}
@@ -6474,45 +8117,83 @@ export default function App() {
                           const googleUrl =
                             rec.googleMapsUri || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(rec.label)}`
                           const imageUrl = rec.photoUrl || DEFAULT_HERO_IMAGE
+                          const primaryTitle = rec.label.split(',')[0]?.trim() || rec.label
+                          const addressTail = rec.label.split(',').slice(1).join(',').trim()
                           return (
                             <div
                               key={rec.key}
                               className="text-left px-3 py-3 rounded-xl border border-neutral-200 bg-white hover:bg-blue-50/50 transition-colors"
                             >
-                              <div className="flex gap-3 items-start">
+                              <div className="flex gap-3 items-start sm:items-center">
                                 <img
                                   src={imageUrl}
                                   alt=""
                                   loading="lazy"
                                   className="w-[92px] h-[58px] rounded-lg object-cover border border-neutral-200 shrink-0 bg-neutral-100"
                                 />
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-sm text-neutral-800 font-medium break-words">{rec.label}</div>
-                                  <div className="mt-2 flex items-center gap-2 flex-wrap">
-                                    <button
-                                      type="button"
-                                      onClick={() => addRecommendedActivity(rec)}
-                                      className="px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold text-xs hover:from-blue-500 hover:to-indigo-500 transition-colors shadow-sm"
-                                    >
-                                      Add
-                                    </button>
+                                <div className="min-w-0 flex-1 flex flex-col gap-2">
+                                  <p className="sm:hidden text-sm text-neutral-800 font-medium break-words w-full">{primaryTitle}</p>
+                                  <div className="sm:hidden flex w-full items-center justify-between gap-2 flex-wrap">
                                     <a
                                       href={googleUrl}
                                       target="_blank"
                                       rel="noopener noreferrer"
-                                      className="text-xs text-blue-700 hover:underline inline-flex items-center gap-1"
+                                      className="text-xs text-blue-700 hover:underline inline-flex items-center gap-1 shrink-0"
                                     >
                                       <ExternalLink size={12} />
                                       Google
                                     </a>
-                                    <button
-                                      type="button"
-                                      onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
-                                      className="p-1 rounded-md text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
-                                      aria-label={`Dismiss recommendation ${rec.label}`}
-                                    >
-                                      <X size={14} />
-                                    </button>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
+                                        className="p-1 rounded-md text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
+                                        aria-label={`Dismiss recommendation ${rec.label}`}
+                                      >
+                                        <X size={14} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => addRecommendedActivity(rec)}
+                                        className="px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold text-xs hover:from-blue-500 hover:to-indigo-500 transition-colors shadow-sm whitespace-nowrap"
+                                      >
+                                        Add
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <div className="hidden sm:flex sm:flex-row sm:items-center sm:gap-3 w-full min-w-0">
+                                    <div className="min-w-0 flex-1 flex flex-col gap-1">
+                                      <p className="text-sm text-neutral-800 font-medium break-words">{primaryTitle}</p>
+                                      {addressTail ? (
+                                        <p className="text-xs text-neutral-500 break-words">{addressTail}</p>
+                                      ) : null}
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <a
+                                        href={googleUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-xs text-blue-700 hover:underline inline-flex items-center gap-1"
+                                      >
+                                        <ExternalLink size={12} />
+                                        Google
+                                      </a>
+                                      <button
+                                        type="button"
+                                        onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
+                                        className="p-1 rounded-md text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
+                                        aria-label={`Dismiss recommendation ${rec.label}`}
+                                      >
+                                        <X size={14} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => addRecommendedActivity(rec)}
+                                        className="px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold text-xs hover:from-blue-500 hover:to-indigo-500 transition-colors shadow-sm whitespace-nowrap"
+                                      >
+                                        Add
+                                      </button>
+                                    </div>
                                   </div>
                                 </div>
                               </div>
@@ -6653,12 +8334,31 @@ export default function App() {
         )}
 
         {activeTab === 'itinerary' && (
-          <div className="animate-in fade-in duration-500">
-            <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 p-7">
-              <div className="flex items-center justify-between gap-4 flex-wrap">
-                <div>
+          <div
+            className={`animate-in fade-in duration-200${itineraryViewMode === 'timeline' ? ' max-sm:overflow-x-hidden' : ''}${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
+          >
+            <div
+              className={`bg-white rounded-3xl shadow-lg border border-neutral-100 p-4 sm:p-7${
+                itineraryViewMode === 'calendar' && isMobileCalNarrow
+                  ? ' max-sm:bg-transparent max-sm:shadow-none max-sm:border-0 max-sm:p-0 max-sm:rounded-none'
+                  : ''
+              }`}
+            >
+              <div
+                className={`flex items-center justify-between gap-4 flex-wrap${
+                  itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4 max-sm:pb-2' : ''
+                }`}
+              >
+                <div className="min-w-0">
                   <h2 className="text-2xl font-serif font-bold">Itinerary</h2>
-                  <p className="text-neutral-500 text-sm">Day-by-day planner with a visual timeline and quick context cards.</p>
+                  <p
+                    className={`text-neutral-500 text-sm${itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:hidden' : ''}`}
+                  >
+                    Day-by-day planner with a visual timeline and quick context cards.
+                  </p>
+                  {itineraryViewMode === 'calendar' && isMobileCalNarrow ? (
+                    <p className="text-neutral-500 text-xs mt-0.5 sm:hidden">Calendar — scroll hours; tap a day for tips below.</p>
+                  ) : null}
                 </div>
                 <button
                   type="button"
@@ -6671,7 +8371,11 @@ export default function App() {
               </div>
 
               {selectedTrip && timelineDays.length > 0 ? (
-                <div className="mt-5 space-y-5">
+                <div
+                  className={`mt-5 space-y-5${
+                    itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:mt-3 max-sm:space-y-4 max-sm:px-0' : ''
+                  }`}
+                >
                   {itineraryViewMode === 'timeline' ? (
                   <div className="itinerary-rail">
                     {timelineDays.map((day, index) => {
@@ -6696,6 +8400,7 @@ export default function App() {
                   ) : null}
 
                   {(() => {
+                    if (itineraryViewMode === 'calendar' && isMobileCalNarrow) return null
                     const activeStays = staysByDay.get(selectedTimelineDate) ?? []
                     const anchorStay = activeStays[0]
                     const selectedActivities = activitiesByDay.get(selectedTimelineDate) ?? []
@@ -6728,7 +8433,7 @@ export default function App() {
                         : 'https://www.google.com/maps/'
 
                     return (
-                      <div className="grid gap-4 md:grid-cols-2">
+                      <div className="grid grid-cols-1 gap-4">
                         <div className="itinerary-summary-card">
                           <div className="itinerary-summary-map">
                             <div className="itinerary-summary-pulse" />
@@ -6750,7 +8455,7 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="itinerary-highlight-card">
+                        <div className="itinerary-highlight-card md:hidden">
                           <span className="itinerary-highlight-pill">Active soon</span>
                           <h3 className="mt-3 text-2xl font-semibold">{titleName}</h3>
                           <p className="mt-1 text-sm text-neutral-500">{titleNotes}</p>
@@ -6774,7 +8479,13 @@ export default function App() {
                     )
                   })()}
 
-                  <div className="itinerary-timeline-shell">
+                  <div
+                    className={`itinerary-timeline-shell${
+                      itineraryViewMode === 'calendar' && isMobileCalNarrow
+                        ? ' itinerary-timeline-shell--calendar-mobile max-sm:border-0 max-sm:bg-transparent max-sm:shadow-none max-sm:p-0 max-sm:rounded-none'
+                        : ''
+                    }`}
+                  >
                     {itineraryViewMode === 'timeline' ? (
                       <>
                         <div className="flex items-center justify-between">
@@ -6799,11 +8510,11 @@ export default function App() {
                                       <Car size={20} strokeWidth={1.75} />
                                     </div>
                                     <div className="itinerary-activity-main">
-                                      <div className="flex items-start gap-2 flex-wrap">
-                                        <span className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-600 text-xs font-medium tabular-nums w-[92px] shrink-0 bg-neutral-50 dark:bg-neutral-800/80">
+                                      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-start">
+                                        <span className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-600 text-xs font-medium tabular-nums w-full sm:w-[92px] shrink-0 bg-neutral-50 dark:bg-neutral-800/80">
                                           {a.time}
                                         </span>
-                                        <span className="flex-1 min-w-[120px] px-2 py-1 text-xs font-medium text-neutral-800 dark:text-neutral-100">{a.name}</span>
+                                        <span className="flex-1 min-w-0 w-full sm:min-w-[120px] px-2 py-1 text-xs font-medium text-neutral-800 dark:text-neutral-100">{a.name}</span>
                                         <button
                                           type="button"
                                           onClick={() => {
@@ -6833,17 +8544,19 @@ export default function App() {
                                     <div className="itinerary-activity-photo-square itinerary-activity-photo-square--placeholder" />
                                   )}
                                   <div className="itinerary-activity-main">
-                                    <div className="flex items-start gap-2 flex-wrap">
-                                      <input type="time" value={a.time} onChange={(e) => updateStayActivity(stayId, a.id, { time: e.target.value })} className="px-2 py-1 rounded border border-neutral-200 text-xs w-[92px]" />
-                                      <input value={a.name} onChange={(e) => updateStayActivity(stayId, a.id, { name: e.target.value })} className="flex-1 min-w-[120px] px-2 py-1 rounded border border-neutral-200 text-xs" />
+                                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-start">
+                                      <input type="time" value={a.time} onChange={(e) => updateStayActivity(stayId, a.id, { time: e.target.value })} className="px-2 py-1 rounded border border-neutral-200 text-xs w-full sm:w-[92px]" />
+                                      <input value={a.name} onChange={(e) => updateStayActivity(stayId, a.id, { name: e.target.value })} className="flex-1 min-w-0 w-full sm:min-w-[120px] px-2 py-1 rounded border border-neutral-200 text-xs" />
                                       <input
                                         value={a.confirmationRef}
                                         onChange={(e) => updateStayActivity(stayId, a.id, { confirmationRef: e.target.value })}
                                         placeholder="Conf. #"
-                                        className="px-2 py-1 rounded border border-neutral-200 text-xs w-[100px]"
+                                        className="px-2 py-1 rounded border border-neutral-200 text-xs w-full sm:w-[100px]"
                                       />
-                                      <input value={a.cost} onChange={(e) => updateStayActivity(stayId, a.id, { cost: e.target.value })} placeholder="Cost" className="px-2 py-1 rounded border border-neutral-200 text-xs w-[88px]" />
-                                      <button type="button" onClick={() => removeStayActivity(stayId, a.id)} className="p-1 rounded text-neutral-500 hover:bg-neutral-100"><X size={14} /></button>
+                                      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                                        <input value={a.cost} onChange={(e) => updateStayActivity(stayId, a.id, { cost: e.target.value })} placeholder="Cost" className="flex-1 min-w-0 sm:flex-none px-2 py-1 rounded border border-neutral-200 text-xs sm:w-[88px]" />
+                                        <button type="button" onClick={() => removeStayActivity(stayId, a.id)} className="p-2 rounded text-neutral-500 hover:bg-neutral-100 shrink-0" aria-label="Remove activity"><X size={14} /></button>
+                                      </div>
                                     </div>
                                     <input value={a.notes} onChange={(e) => updateStayActivity(stayId, a.id, { notes: e.target.value })} placeholder="Notes" className="mt-1 w-full px-2 py-1 rounded border border-neutral-200 text-xs" />
                                     {(a.category || activityMetaById[a.id]?.category) ? (
@@ -6864,8 +8577,56 @@ export default function App() {
                         </div>
                       </>
                     ) : (
-                      <div className="itinerary-calendar-mode">
-                        {calendarDropError ? <p className="text-sm text-rose-600 mb-3">{calendarDropError}</p> : null}
+                      <div className={isMobileCalNarrow ? 'itinerary-calendar-viewport-breakout' : ''}>
+                        {calendarDropError ? (
+                          <p
+                            className={`text-sm text-rose-600 mb-2${isMobileCalNarrow ? ' max-sm:px-4' : ''}`}
+                          >
+                            {calendarDropError}
+                          </p>
+                        ) : null}
+                        {isMobileCalNarrow ? (
+                          <div className="max-sm:px-4 max-sm:pt-3 max-sm:mb-3 itinerary-cal-mobile-upcoming">
+                            <div className="rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 dark:border-neutral-700 dark:bg-neutral-800/60">
+                              <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                                Accommodation
+                              </p>
+                              {selectedDayPrimaryStay ? (
+                                <div className="mt-1.5 flex items-start justify-between gap-2">
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate flex items-center gap-1.5">
+                                      <BedDouble size={14} className="shrink-0 opacity-70" aria-hidden />
+                                      {selectedDayPrimaryStay.location || 'Stay'}
+                                    </p>
+                                    {selectedDayPrimaryStay.address?.trim() ? (
+                                      <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400 line-clamp-2">
+                                        {selectedDayPrimaryStay.address.trim()}
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                  {(selectedDayPrimaryStay.address || selectedDayPrimaryStay.location)?.trim() ? (
+                                    <a
+                                      href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
+                                        (selectedDayPrimaryStay.address || selectedDayPrimaryStay.location).trim(),
+                                      )}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-neutral-200 bg-white px-2 py-1 text-[11px] font-semibold text-neutral-700 hover:bg-neutral-100 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
+                                    >
+                                      <MapPin size={12} aria-hidden />
+                                      Map
+                                    </a>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+                                  Add accommodation in Planner to see where you&apos;re staying.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        ) : null}
+                        <div className="itinerary-calendar-mode itinerary-calendar-mobile-bleed">
                         <ItineraryCalendarGrid
                           visibleDays={visibleCalendarDays}
                           timelineDays={timelineDays}
@@ -6877,13 +8638,16 @@ export default function App() {
                           selectedTimelineDate={selectedTimelineDate}
                           onSelectDay={setSelectedTimelineDate}
                           onCalendarActivityDrop={applyCalendarDrop}
-                          onOpenActivityDetail={(stayId, activity) => setCalendarActivityDetail({ stayId, activity })}
-                          onOpenBookingFromCalendar={(tab, id) => {
-                            setActiveTab('planner')
-                            setBookingsTab(tab)
-                            setBookingFilter(tab)
-                            openEditBookingForm(tab, id)
-                          }}
+                          onCalendarActivityResize={applyCalendarActivityResize}
+                          calendarReadOnly={tripIsReadOnly}
+                          onSelectCalendarItem={(item) =>
+                            setCalendarActivityDetail({
+                              stayId: item.stayId,
+                              activity: item.activity,
+                              bookingRef: item.bookingRef,
+                              stayLocation: item.stayLocation,
+                            })
+                          }
                           weekStartIndex={calendarWeekStartIndex}
                           onPrevWeek={() => setCalendarWeekStartIndex((i) => Math.max(0, i - 7))}
                           onNextWeek={() => setCalendarWeekStartIndex((i) => Math.min(calendarMaxStart, i + 7))}
@@ -6894,12 +8658,18 @@ export default function App() {
                           }
                           canShiftCalendarPrev={calendarWeekStartIndex > 0}
                           canShiftCalendarNext={calendarWeekStartIndex < calendarMaxStart}
-                          formatDayLabel={formatCalendarDayHeaderLabel}
                         />
+                        </div>
                       </div>
                     )}
 
-                    <div className={`itinerary-day-recommendations ${itineraryViewMode === 'calendar' ? 'mt-8 pt-4 border-t border-neutral-200 dark:border-neutral-700' : ''}`}>
+                    <div
+                      className={`itinerary-day-recommendations ${
+                        itineraryViewMode === 'calendar'
+                          ? 'mt-8 pt-4 border-t border-neutral-200 dark:border-neutral-700 max-sm:mt-4 max-sm:px-4 max-sm:rounded-xl max-sm:bg-white max-sm:border max-sm:border-neutral-200 max-sm:pt-4 max-sm:shadow-sm dark:max-sm:bg-neutral-900 dark:max-sm:border-neutral-700'
+                          : ''
+                      }`}
+                    >
                       <div className="flex items-center justify-between gap-2 flex-wrap">
                         <p className="text-sm font-semibold">Recommended for this day</p>
                         <p className="text-xs text-neutral-500">
@@ -6923,33 +8693,88 @@ export default function App() {
                         <p className="mt-2 text-xs text-rose-700">{selectedDayRecommendations.error}</p>
                       ) : visibleSelectedDayRecommendations.length > 0 ? (
                         <ul className="mt-2 space-y-2">
-                          {visibleSelectedDayRecommendations.map((rec) => (
-                            <li key={`day-rec-${rec.key}`} className="itinerary-rec-row">
-                              {rec.photoUrl ? <img src={rec.photoUrl} alt={rec.label} className="itinerary-rec-photo" /> : <div className="itinerary-rec-photo itinerary-rec-photo--placeholder" />}
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2">
-                                  <p className="text-sm font-medium truncate">{rec.label.split(',')[0] || rec.label}</p>
-                                  <span className="itinerary-rec-category">{rec.category || 'Other'}</span>
+                          {visibleSelectedDayRecommendations.map((rec) => {
+                            const recTitle = rec.label.split(',')[0]?.trim() || rec.label
+                            const recAddress =
+                              rec.label.split(',').slice(1).join(',').trim() || rec.seedLabel || 'Nearby pick'
+                            return (
+                              <li key={`day-rec-${rec.key}`} className="itinerary-rec-row items-start sm:!items-center">
+                                {rec.photoUrl ? (
+                                  <img src={rec.photoUrl} alt="" className="itinerary-rec-photo" />
+                                ) : (
+                                  <div className="itinerary-rec-photo itinerary-rec-photo--placeholder" />
+                                )}
+                                <div className="min-w-0 flex-1 flex flex-col gap-1">
+                                  <p className="sm:hidden text-sm font-medium text-neutral-800 break-words w-full">{recTitle}</p>
+                                  <div className="sm:hidden flex w-full items-center justify-between gap-2 flex-wrap">
+                                    <a
+                                      href={placeGoogleUrl(rec)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="itinerary-google-link shrink-0"
+                                    >
+                                      <ExternalLink size={12} />
+                                      Google
+                                    </a>
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
+                                        className="itinerary-rec-dismiss"
+                                        aria-label={`Dismiss ${rec.label}`}
+                                        title="Dismiss recommendation"
+                                      >
+                                        <X size={12} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => addRecommendationToSelectedDay(rec)}
+                                        className="px-2.5 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold whitespace-nowrap"
+                                      >
+                                        Add to Day
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <div className="hidden sm:flex sm:flex-row sm:items-center sm:gap-3 w-full min-w-0">
+                                    <div className="min-w-0 flex-1 flex flex-col gap-1">
+                                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                        <p className="text-sm font-medium text-neutral-800 break-words">{recTitle}</p>
+                                        <span className="itinerary-rec-category">{rec.category || 'Other'}</span>
+                                      </div>
+                                      <p className="text-xs text-neutral-500 break-words">{recAddress}</p>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <a
+                                        href={placeGoogleUrl(rec)}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="itinerary-google-link inline-flex items-center"
+                                      >
+                                        <ExternalLink size={12} />
+                                        Google
+                                      </a>
+                                      <button
+                                        type="button"
+                                        onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
+                                        className="itinerary-rec-dismiss"
+                                        aria-label={`Dismiss ${rec.label}`}
+                                        title="Dismiss recommendation"
+                                      >
+                                        <X size={12} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => addRecommendationToSelectedDay(rec)}
+                                        className="px-2.5 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold whitespace-nowrap"
+                                      >
+                                        Add to Day
+                                      </button>
+                                    </div>
+                                  </div>
                                 </div>
-                                <p className="text-xs text-neutral-500 truncate">{rec.label.split(',').slice(1).join(',').trim() || rec.seedLabel || 'Nearby pick'}</p>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
-                                  className="itinerary-rec-dismiss"
-                                  aria-label={`Dismiss ${rec.label}`}
-                                  title="Dismiss recommendation"
-                                >
-                                  <X size={12} />
-                                </button>
-                                <a href={placeGoogleUrl(rec)} target="_blank" rel="noopener noreferrer" className="itinerary-google-link"><ExternalLink size={12} />Google</a>
-                                <button type="button" onClick={() => addRecommendationToSelectedDay(rec)} className="px-2.5 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold">
-                                  Add to Day
-                                </button>
-                              </div>
-                            </li>
-                          ))}
+                              </li>
+                            )
+                          })}
                         </ul>
                       ) : (
                         <p className="mt-2 text-xs text-neutral-500">No recommendations found for this day yet.</p>
@@ -6964,7 +8789,11 @@ export default function App() {
                       const draft = activityDrafts[draftKey] ?? { name: '', time: '', confirmationRef: '', cost: '', notes: '' }
                       if (!storageStayId) {
                         return (
-                          <p className="mt-4 text-xs text-neutral-500">
+                          <p
+                            className={`mt-4 text-xs text-neutral-500${
+                              itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4' : ''
+                            }`}
+                          >
                             Add at least one accommodation on this trip to save activities (they can be scheduled on any trip day).
                           </p>
                         )
@@ -6973,7 +8802,11 @@ export default function App() {
                         ? `Add activity for ${stayOnThisDay.location}`
                         : 'Add activity for this day'
                       return (
-                        <div className="mt-4">
+                        <div
+                          className={`mt-4${
+                            itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4' : ''
+                          }`}
+                        >
                           <div className="space-y-2">
                             <input
                               value={activityPlaceSearchInput}
@@ -7021,19 +8854,19 @@ export default function App() {
                             ) : null}
                           </div>
                         <div className="mt-2 grid grid-cols-1 md:grid-cols-[1fr_90px_100px_90px_auto] gap-2">
-                          <input value={draft.name} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, name: e.target.value } }))} placeholder={activityNamePlaceholder} className="px-2 py-1.5 rounded border border-neutral-200 text-xs" />
-                          <input type="time" value={draft.time} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, time: e.target.value } }))} className="px-2 py-1.5 rounded border border-neutral-200 text-xs" />
+                          <input value={draft.name} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, name: e.target.value } }))} placeholder={activityNamePlaceholder} className="px-2 py-1.5 rounded border border-neutral-200 text-xs w-full" />
+                          <input type="time" value={draft.time} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, time: e.target.value } }))} className="px-2 py-1.5 rounded border border-neutral-200 text-xs w-full md:w-auto" />
                           <input
                             value={draft.confirmationRef}
                             onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, confirmationRef: e.target.value } }))}
                             placeholder="Conf. #"
-                            className="px-2 py-1.5 rounded border border-neutral-200 text-xs"
+                            className="px-2 py-1.5 rounded border border-neutral-200 text-xs w-full md:w-auto"
                           />
-                          <input value={draft.cost} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, cost: e.target.value } }))} placeholder="Cost" className="px-2 py-1.5 rounded border border-neutral-200 text-xs" />
-                          <button type="button" onClick={() => addStayActivity(storageStayId, selectedTimelineDate)} className="px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-semibold">Add</button>
+                          <input value={draft.cost} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, cost: e.target.value } }))} placeholder="Cost" className="px-2 py-1.5 rounded border border-neutral-200 text-xs w-full md:w-auto" />
+                          <button type="button" onClick={() => addStayActivity(storageStayId, selectedTimelineDate)} className="px-3 py-2.5 rounded bg-blue-600 text-white text-xs font-semibold w-full md:w-auto min-h-10">Add</button>
                           <input value={draft.notes} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, notes: e.target.value } }))} placeholder="Notes" className="md:col-span-5 px-2 py-1.5 rounded border border-neutral-200 text-xs" />
                           {draftPlaceMeta[draftKey] ? (
-                            <div className="md:col-span-5 flex items-center gap-2 text-xs text-neutral-500">
+                            <div className="md:col-span-5 flex flex-col items-start gap-2 sm:flex-row sm:items-center text-xs text-neutral-500">
                               {draftPlaceMeta[draftKey].photoUrl ? <img src={draftPlaceMeta[draftKey].photoUrl} alt={draftPlaceMeta[draftKey].label} className="itinerary-inline-thumb" /> : null}
                               <span className="truncate">Selected place: {draftPlaceMeta[draftKey].label}</span>
                               <a href={placeGoogleUrl(draftPlaceMeta[draftKey])} target="_blank" rel="noopener noreferrer" className="itinerary-google-link"><ExternalLink size={12} />Google</a>
@@ -7045,7 +8878,15 @@ export default function App() {
                     })()}
                   </div>
 
-                  {stayError ? <p className="text-xs text-rose-700">{stayError}</p> : null}
+                  {stayError ? (
+                    <p
+                      className={`text-xs text-rose-700${
+                        itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4' : ''
+                      }`}
+                    >
+                      {stayError}
+                    </p>
+                  ) : null}
                 </div>
               ) : (
                 <p className="mt-6 text-sm text-neutral-500">
@@ -7057,10 +8898,10 @@ export default function App() {
         )}
 
         {activeTab === 'budget' && (
-          <div className="animate-in fade-in duration-500">
-            <div className="bg-white rounded-3xl shadow-lg p-8 border border-neutral-100">
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div>
+          <div className={`animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}>
+            <div className="bg-white rounded-3xl shadow-lg p-4 sm:p-8 border border-neutral-100">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                <div className="min-w-0">
                   <h2 className="text-3xl font-serif font-bold">Budget</h2>
                   <p className="text-neutral-500 mt-2">
                     {selectedTrip
@@ -7068,7 +8909,7 @@ export default function App() {
                       : 'Select a trip to view categorized budget totals.'}
                   </p>
                 </div>
-                <div className="rounded-2xl border border-indigo-200 bg-indigo-50 pl-4 pr-3 py-3 sm:min-w-[250px] w-fit">
+                <div className="rounded-2xl border border-indigo-200 bg-indigo-50 pl-4 pr-3 py-3 sm:min-w-[250px] w-full sm:w-fit">
                   <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Estimated Budget</p>
                   <p className="text-4xl font-bold text-indigo-900 mt-1 leading-none">{formatMoneyAmount(budgetTotals.total, displayCurrency)}</p>
                   <p className="mt-1 text-xs text-indigo-700/80">
@@ -7152,16 +8993,16 @@ export default function App() {
         )}
 
         {activeTab === 'map' && (
-          <div className="animate-in fade-in duration-500">
-            <div className="bg-white rounded-3xl shadow-lg p-7 border border-neutral-100">
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div>
+          <div className="animate-in fade-in duration-200">
+            <div className="bg-white rounded-3xl shadow-lg p-4 sm:p-7 border border-neutral-100">
+              <div className="flex flex-col gap-3 min-[480px]:flex-row min-[480px]:items-start min-[480px]:justify-between">
+                <div className="min-w-0">
                   <h2 className="text-2xl font-serif font-bold">Map</h2>
                   <p className="text-neutral-500 text-sm">
                     {selectedTrip ? 'Your trip on the map.' : 'Select a trip to see the map.'}
                   </p>
                 </div>
-                <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <span className="px-3 py-1 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-semibold">
                     Overall progress: {overallTripProgressPct !== null ? `${overallTripProgressPct}%` : 'N/A'}
                   </span>
@@ -7223,7 +9064,7 @@ export default function App() {
 
               {mapApiError ? <p className="mt-3 text-xs text-rose-700">{mapApiError}</p> : null}
 
-              <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 p-2 h-[430px]">
+              <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 p-2 h-[min(430px,calc(100dvh-14rem))] min-h-[220px] sm:h-[430px] sm:min-h-0">
                 {!selectedTrip ? (
                   <div className="h-full flex items-center justify-center text-sm text-neutral-500">Select a trip to load map locations.</div>
                 ) : (
@@ -7273,8 +9114,8 @@ export default function App() {
         )}
 
         {activeTab === 'tips' && (
-          <div className="animate-in fade-in duration-500">
-            <div className="bg-white rounded-3xl shadow-lg p-8 border border-neutral-100">
+          <div className="animate-in fade-in duration-200">
+            <div className="bg-white rounded-3xl shadow-lg p-4 sm:p-8 border border-neutral-100">
               <h2 className="text-3xl font-serif font-bold">Tips</h2>
               <p className="text-neutral-500 mt-2">Coming next. This area can host packing, timing, and safety notes.</p>
             </div>
@@ -7309,6 +9150,13 @@ export default function App() {
         <p>Local-first • Saved in your browser</p>
       </footer>
     </div>
+    <p
+      className="pointer-events-none fixed bottom-3 right-3 z-[200] max-w-[min(100vw-1.5rem,20rem)] select-text truncate rounded-md border border-white/15 bg-neutral-950/85 px-2 py-1 text-[10px] tabular-nums text-white shadow-lg backdrop-blur-sm dark:border-white/20"
+      aria-label="Application build"
+      title={APP_BUILD}
+    >
+      Build {APP_BUILD}
+    </p>
     </>
   )
 }

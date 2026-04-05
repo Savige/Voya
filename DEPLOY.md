@@ -65,13 +65,17 @@ Alternatively, paste `supabase/migrations/001_user_trips_and_profiles.sql` into 
 **Option A — Docker (recommended)**
 
 ```bash
-cp deploy/.env.production.example deploy/.env.production
+cp deploy/.env.production.example deploy/.env
 # Set VITE_SUPABASE_URL to your public API URL (e.g. https://api.ryansavige.com)
 # Set VITE_SUPABASE_ANON_KEY from ANON_KEY in Supabase docker/.env
 # Set Google Maps variables as in .env.example
 
-docker compose -f deploy/docker-compose.yml --env-file deploy/.env.production up -d --build
+docker compose -f deploy/docker-compose.yml up -d --build
 ```
+
+Compose loads **`deploy/.env`** automatically (next to `deploy/docker-compose.yml`). It does **not** load `deploy/.env.production` unless you add `--env-file deploy/.env.production`.
+
+Whenever you change `deploy/.env` or any `VITE_*` value, run that `docker compose ... up -d --build` again (or `build --no-cache` then `up -d` if the bundle still looks stale). The static bundle is produced at build time.
 
 The container serves the `dist` assets on **port 8081** on the host (see [`deploy/docker-compose.yml`](deploy/docker-compose.yml)). Put a reverse proxy in front for TLS and a public hostname.
 

@@ -7,9 +7,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-ENV_FILE="${ENV_FILE:-deploy/.env.production}"
+if [[ -z "${ENV_FILE:-}" ]]; then
+  if [[ -f "$ROOT/deploy/.env" ]]; then
+    ENV_FILE="deploy/.env"
+  else
+    ENV_FILE="deploy/.env.production"
+  fi
+fi
 if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Missing $ENV_FILE — copy deploy/.env.production.example and configure VITE_* keys." >&2
+  echo "Missing $ENV_FILE — copy deploy/.env.production.example to deploy/.env (or deploy/.env.production) and configure VITE_* keys." >&2
   exit 1
 fi
 

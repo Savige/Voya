@@ -38,11 +38,11 @@ Set for `ryansavige.com`:
 
 ## Waypoint build
 
-`deploy/.env.production` should contain `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` from this stack’s `.env`. Rebuild after changing keys:
+`deploy/.env` should contain `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` from this stack’s `.env` (Compose auto-loads `deploy/.env`; see [README](README.md)). Rebuild after changing keys:
 
 ```bash
 cd /home/ryan/Voya
-docker compose -f deploy/docker-compose.yml --env-file deploy/.env.production up -d --build
+docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 ## Production email

@@ -41,20 +41,22 @@ Waypoint sends users to a **“Confirm your email”** screen and uses `emailRed
 
 1. **SMTP** — Configure GoTrue mail settings in `docker/.env` (see [Auth emails](https://supabase.com/docs/guides/self-hosting/docker#configuring-auth-emails) / `GOTRUE_SMTP_*` in the official `.env.example`).
 2. **Do not auto-confirm** — Set **`ENABLE_EMAIL_AUTOCONFIRM=false`** (or `GOTRUE_MAILER_AUTOCONFIRM=false` depending on your stack version) so new users must click the link before they can sign in.
-3. **Redirect URLs** — In Studio **Authentication → URL Configuration**, add your app URL (e.g. `https://waypoint.ryansavige.com` and `https://waypoint.ryansavige.com/**`) to **Redirect URLs** so the confirmation link can return users to the app.
+3. **Redirect URLs** — In Studio **Authentication → URL Configuration**, add your app URL (e.g. `https://waypoint.ryansavige.com` and `https://waypoint.ryansavige.com/**`) to **Redirect URLs** so the confirmation link can return users to the app. The app sends `emailRedirectTo` as the site origin with a trailing slash (e.g. `https://waypoint.ryansavige.com/`); include that exact string in **Redirect URLs** or sign-up can fail with a redirect validation error.
 
 If email is not configured, sign-up may still create users (depending on settings) but no message will arrive until SMTP is set.
 
 ## 2. Apply Waypoint schema
 
-After Postgres is healthy, apply the migration that creates `user_trips` and `profiles`:
+After Postgres is healthy, apply migrations (creates `user_trips`, `profiles`, `shared_itineraries`, sharing RLS/RPC, etc.):
 
 ```bash
 export SUPABASE_DOCKER_DIR=/opt/supabase/docker   # adjust if different
 /path/to/Voya/deploy/apply-migration.sh
 ```
 
-Or run the SQL manually in Studio (**SQL** → new query) using the contents of `supabase/migrations/001_user_trips_and_profiles.sql`.
+The script runs every `supabase/migrations/*.sql` in order (`001_…`, `002_…`, …). You can also paste each file into Studio (**SQL** → new query).
+
+If the app errors with **“Could not find the table `public.shared_itineraries` in the schema cache”**, migration `002_shared_itineraries.sql` was not applied (or PostgREST was not reloaded). Re-run `002` (idempotent `IF NOT EXISTS` where possible), then either run `NOTIFY pgrst, 'reload schema';` in SQL or restart the **`rest`** container: `docker compose restart rest`.
 
 ## 3. Security
 

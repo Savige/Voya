@@ -42,6 +42,8 @@ export type StayActivity = {
   date: string
   name: string
   time: string
+  /** Optional end time (HH:mm). When omitted, calendar uses a default duration after `time`. */
+  endTime?: string
   calendarTimeLabel?: string
   confirmationRef: string
   cost: string
@@ -123,6 +125,12 @@ export const EMPTY_TRIP_BOOKINGS: TripBookings = {
   accommodations: [],
 }
 
+export type TripSharing = {
+  sharedItineraryId: string
+  role: 'owner' | 'editor' | 'viewer'
+  sourceTripId: string
+}
+
 export type Trip = {
   id: string
   country: string
@@ -135,6 +143,17 @@ export type Trip = {
   visitPlaces: VisitPlace[]
   stays: Stay[]
   bookings: TripBookings
+  /** Present when this trip is synced via a shared itinerary row (not stored in trip_json on the server). */
+  sharing?: TripSharing
+}
+
+export function isTripReadOnly(trip: Trip | null | undefined): boolean {
+  return trip?.sharing?.role === 'viewer'
+}
+
+export function stripSharingFromTrip(trip: Trip): Trip {
+  const { sharing: _removed, ...rest } = trip
+  return rest as Trip
 }
 
 export type TripsState = {

@@ -5,6 +5,7 @@ dist
 .env
 .env.*
 !.env.example
-deploy/.env.production
+# Allow deploy secrets file into build context when present (gitignored). Enables Docker build to match local `npm run build` + `.env.production`.
+!deploy/.env.production
 *.md
 .cursor
