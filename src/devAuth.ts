@@ -1,17 +1,17 @@
 import type { AuthSession } from './auth'
 
-/** Fixed session when bypassing Supabase login in dev (localStorage key for trips). */
+/** Fixed session when bypassing PocketBase login in dev (localStorage key for trips). */
 export const DEV_BYPASS_SESSION: AuthSession = {
   email: 'dev@local.waypoint',
   name: 'Dev',
 }
 
 /**
- * Skip Supabase login on the dev server and use local trip storage (same as no Supabase).
+ * Skip PocketBase login on the dev server and use local trip storage (same as no backend).
  *
  * - In production (`import.meta.env.DEV` false): never bypasses.
  * - On localhost / 127.0.0.1 in dev: bypasses by default so you do not need an env flag.
- * - Set `VITE_DEV_AUTH_BYPASS=0` (or `false`) to test real Supabase sign-in on localhost.
+ * - Set `VITE_DEV_AUTH_BYPASS=0` (or `false`) to test real PocketBase sign-in on localhost.
  * - Set `VITE_DEV_AUTH_BYPASS=1` to force bypass when not on localhost (e.g. LAN IP).
  */
 export function isDevAuthBypass(): boolean {

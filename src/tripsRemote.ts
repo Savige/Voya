@@ -1,35 +1,56 @@
 import { normalizeEmail } from './auth'
-import { getSupabase } from './supabaseClient'
+import { getPocketBase } from './pocketbaseClient'
 import type { Trip, TripsState } from './tripTypes'
 import { stripSharingFromTrip } from './tripTypes'
 import { parseSingleTripFromUnknown, parseTripsFromUnknown } from './tripStorage'
 
-export async function fetchUserTripsState(): Promise<TripsState> {
-  const supabase = getSupabase()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) return { trips: [], selectedTripId: null }
-
-  const { data, error } = await supabase.from('user_trips').select('payload').eq('user_id', user.id).maybeSingle()
-
-  if (error || data == null || data.payload == null) return { trips: [], selectedTripId: null }
-  return parseTripsFromUnknown(data.payload as unknown)
+type UserTripsRow = {
+  id: string
+  user: string
+  payload: unknown
 }
 
 type SharedItineraryRow = {
   id: string
   source_trip_id: string
   trip_json: unknown
-  owner_user_id: string
+  owner: string
   default_permission: string
+  share_token: string
   revoked_at?: string | null
 }
 
 type MemberRow = {
+  id: string
   role: string
-  shared_itinerary_id: string
-  shared_itineraries: SharedItineraryRow | SharedItineraryRow[] | null
+  user: string
+  shared_itinerary: string
+  joined_at?: string
+  revoked_at?: string | null
+  expand?: {
+    shared_itinerary?: SharedItineraryRow
+  }
+}
+
+function requireUserId(): string {
+  const pb = getPocketBase()
+  const id = pb.authStore.record?.id
+  if (!id) throw new Error('Not signed in.')
+  return id
+}
+
+export async function fetchUserTripsState(): Promise<TripsState> {
+  const pb = getPocketBase()
+  const userId = pb.authStore.record?.id
+  if (!userId) return { trips: [], selectedTripId: null }
+
+  try {
+    const row = await pb.collection('user_trips').getFirstListItem<UserTripsRow>(`user="${userId}"`)
+    if (row.payload == null) return { trips: [], selectedTripId: null }
+    return parseTripsFromUnknown(row.payload)
+  } catch {
+    return { trips: [], selectedTripId: null }
+  }
 }
 
 function mergePersonalAndShared(
@@ -57,9 +78,8 @@ function mergePersonalAndShared(
   }
 
   for (const row of memberRows) {
-    const si = row.shared_itineraries
-    const share = Array.isArray(si) ? si[0] : si
-    if (!share || share.owner_user_id == null) continue
+    const share = row.expand?.shared_itinerary
+    if (!share || share.owner == null) continue
     if (share.revoked_at != null) continue
     const r = row.role === 'viewer' || row.role === 'editor' ? row.role : 'viewer'
     const parsed = parseSingleTripFromUnknown(share.trip_json)
@@ -80,73 +100,65 @@ function mergePersonalAndShared(
       ? preferredSelectedId
       : personal.selectedTripId && trips.some((t) => t.id === personal.selectedTripId)
         ? personal.selectedTripId
-        : trips[0]?.id ?? null
+        : (trips[0]?.id ?? null)
 
   return { trips, selectedTripId: pick }
 }
 
-/** Load `user_trips` plus shared rows and merge (Supabase accounts). */
 export async function fetchMergedTripsState(): Promise<TripsState> {
-  const supabase = getSupabase()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) return { trips: [], selectedTripId: null }
+  const pb = getPocketBase()
+  const userId = pb.authStore.record?.id
+  if (!userId) return { trips: [], selectedTripId: null }
 
-  const [{ data: ut, error: utError }, { data: owned, error: ownedError }, { data: members, error: memError }] =
-    await Promise.all([
-      supabase.from('user_trips').select('payload').eq('user_id', user.id).maybeSingle(),
-      supabase
-        .from('shared_itineraries')
-        .select('id, source_trip_id, trip_json, owner_user_id, default_permission, revoked_at')
-        .eq('owner_user_id', user.id)
-        .is('revoked_at', null),
-      supabase
-        .from('shared_itinerary_members')
-        .select(
-          'role, shared_itinerary_id, shared_itineraries ( id, source_trip_id, trip_json, owner_user_id, revoked_at, default_permission )',
-        )
-        .eq('user_id', user.id)
-        .is('revoked_at', null),
-    ])
+  let personal: TripsState = { trips: [], selectedTripId: null }
+  let preferredSelectedId: string | null = null
+  try {
+    const ut = await pb.collection('user_trips').getFirstListItem<UserTripsRow>(`user="${userId}"`)
+    if (ut.payload != null) {
+      personal = parseTripsFromUnknown(ut.payload)
+      if (typeof ut.payload === 'object' && ut.payload !== null && 'selectedTripId' in ut.payload) {
+        const raw = (ut.payload as { selectedTripId?: unknown }).selectedTripId
+        preferredSelectedId = typeof raw === 'string' ? raw : null
+      }
+    }
+  } catch {
+    // no personal row yet
+  }
 
-  if (utError) console.warn('user_trips fetch', utError.message)
-  if (ownedError) console.warn('shared_itineraries owned fetch', ownedError.message)
-  if (memError) console.warn('shared_itinerary_members fetch', memError.message)
+  let ownedRows: SharedItineraryRow[] = []
+  try {
+    const owned = await pb.collection('shared_itineraries').getFullList<SharedItineraryRow>({
+      filter: `owner="${userId}" && revoked_at=""`,
+    })
+    ownedRows = owned.filter((r) => !r.revoked_at)
+  } catch (e) {
+    console.warn('shared_itineraries owned fetch', e)
+  }
 
-  const payload = ut?.payload
-  const personal =
-    payload == null ? { trips: [], selectedTripId: null } : parseTripsFromUnknown(payload as unknown)
-
-  const rawSel =
-    payload != null && typeof payload === 'object' && payload !== null && 'selectedTripId' in payload
-      ? (payload as { selectedTripId?: unknown }).selectedTripId
-      : null
-  const preferredSelectedId = typeof rawSel === 'string' ? rawSel : null
-
-  const ownedRows = (owned ?? []).filter((r) => r.revoked_at == null) as SharedItineraryRow[]
-  const memberRows = (members ?? []) as MemberRow[]
+  let memberRows: MemberRow[] = []
+  try {
+    const members = await pb.collection('shared_itinerary_members').getFullList<MemberRow>({
+      filter: `user="${userId}" && revoked_at=""`,
+      expand: 'shared_itinerary',
+    })
+    memberRows = members.filter((r) => !r.revoked_at)
+  } catch (e) {
+    console.warn('shared_itinerary_members fetch', e)
+  }
 
   return mergePersonalAndShared(personal, ownedRows, memberRows, preferredSelectedId)
 }
 
 export async function upsertUserTrips(payload: TripsState): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const supabase = getSupabase()
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    if (!user) return { ok: false, error: 'Not signed in.' }
-
-    const { error } = await supabase.from('user_trips').upsert(
-      {
-        user_id: user.id,
-        payload,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id' },
-    )
-    if (error) return { ok: false, error: error.message }
+    const pb = getPocketBase()
+    const userId = requireUserId()
+    try {
+      const existing = await pb.collection('user_trips').getFirstListItem<UserTripsRow>(`user="${userId}"`)
+      await pb.collection('user_trips').update(existing.id, { payload })
+    } catch {
+      await pb.collection('user_trips').create({ user: userId, payload })
+    }
     return { ok: true }
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Save failed.'
@@ -165,22 +177,10 @@ export async function upsertSharedItineraryTrip(
   trip: Trip,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const supabase = getSupabase()
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    if (!user) return { ok: false, error: 'Not signed in.' }
-
+    const pb = getPocketBase()
+    requireUserId()
     const bare = stripSharingFromTrip(trip)
-    const { error } = await supabase
-      .from('shared_itineraries')
-      .update({
-        trip_json: bare as unknown as Record<string, unknown>,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', sharedItineraryId)
-
-    if (error) return { ok: false, error: error.message }
+    await pb.collection('shared_itineraries').update(sharedItineraryId, { trip_json: bare })
     return { ok: true }
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Save failed.'
@@ -194,52 +194,31 @@ export async function createSharedItinerary(params: {
   defaultPermission: 'viewer' | 'editor'
 }): Promise<{ ok: true; shareToken: string; sharedItineraryId: string } | { ok: false; error: string }> {
   try {
-    const supabase = getSupabase()
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    if (!user) return { ok: false, error: 'Not signed in.' }
-
+    const pb = getPocketBase()
+    const userId = requireUserId()
     const bare = stripSharingFromTrip(params.trip)
     const token = generateShareToken()
 
-    const { data: existing, error: exErr } = await supabase
-      .from('shared_itineraries')
-      .select('id, share_token')
-      .eq('owner_user_id', user.id)
-      .eq('source_trip_id', params.sourceTripId)
-      .is('revoked_at', null)
-      .maybeSingle()
-
-    if (exErr) return { ok: false, error: exErr.message }
-
-    if (existing) {
-      const { error } = await supabase
-        .from('shared_itineraries')
-        .update({
-          trip_json: bare as unknown as Record<string, unknown>,
-          default_permission: params.defaultPermission,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', existing.id)
-      if (error) return { ok: false, error: error.message }
+    try {
+      const existing = await pb.collection('shared_itineraries').getFirstListItem<SharedItineraryRow>(
+        `owner="${userId}" && source_trip_id="${params.sourceTripId}" && revoked_at=""`,
+      )
+      await pb.collection('shared_itineraries').update(existing.id, {
+        trip_json: bare,
+        default_permission: params.defaultPermission,
+      })
       return { ok: true, shareToken: existing.share_token, sharedItineraryId: existing.id }
+    } catch {
+      // create new
     }
 
-    const { data: inserted, error } = await supabase
-      .from('shared_itineraries')
-      .insert({
-        share_token: token,
-        owner_user_id: user.id,
-        source_trip_id: params.sourceTripId,
-        trip_json: bare as unknown as Record<string, unknown>,
-        default_permission: params.defaultPermission,
-        updated_at: new Date().toISOString(),
-      })
-      .select('id, share_token')
-      .single()
-
-    if (error || !inserted) return { ok: false, error: error?.message ?? 'Insert failed.' }
+    const inserted = await pb.collection('shared_itineraries').create<SharedItineraryRow>({
+      share_token: token,
+      owner: userId,
+      source_trip_id: params.sourceTripId,
+      trip_json: bare,
+      default_permission: params.defaultPermission,
+    })
     return { ok: true, shareToken: inserted.share_token, sharedItineraryId: inserted.id }
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Save failed.'
@@ -251,13 +230,15 @@ export async function updateSharedItineraryDefaultPermission(
   sharedItineraryId: string,
   defaultPermission: 'viewer' | 'editor',
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = getSupabase()
-  const { error } = await supabase
-    .from('shared_itineraries')
-    .update({ default_permission: defaultPermission, updated_at: new Date().toISOString() })
-    .eq('id', sharedItineraryId)
-  if (error) return { ok: false, error: error.message }
-  return { ok: true }
+  try {
+    const pb = getPocketBase()
+    await pb.collection('shared_itineraries').update(sharedItineraryId, {
+      default_permission: defaultPermission,
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Update failed.' }
+  }
 }
 
 export async function updateSharedMemberRole(
@@ -265,40 +246,48 @@ export async function updateSharedMemberRole(
   memberUserId: string,
   role: 'viewer' | 'editor',
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = getSupabase()
-  const { error } = await supabase
-    .from('shared_itinerary_members')
-    .update({ role })
-    .eq('shared_itinerary_id', sharedItineraryId)
-    .eq('user_id', memberUserId)
-  if (error) return { ok: false, error: error.message }
-  return { ok: true }
+  try {
+    const pb = getPocketBase()
+    const row = await pb.collection('shared_itinerary_members').getFirstListItem<{ id: string }>(
+      `shared_itinerary="${sharedItineraryId}" && user="${memberUserId}" && revoked_at=""`,
+    )
+    await pb.collection('shared_itinerary_members').update(row.id, { role })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Update failed.' }
+  }
 }
 
 export async function revokeSharedItineraryMember(
   sharedItineraryId: string,
   memberUserId: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = getSupabase()
-  const { error } = await supabase
-    .from('shared_itinerary_members')
-    .update({ revoked_at: new Date().toISOString() })
-    .eq('shared_itinerary_id', sharedItineraryId)
-    .eq('user_id', memberUserId)
-  if (error) return { ok: false, error: error.message }
-  return { ok: true }
+  try {
+    const pb = getPocketBase()
+    const row = await pb.collection('shared_itinerary_members').getFirstListItem<{ id: string }>(
+      `shared_itinerary="${sharedItineraryId}" && user="${memberUserId}" && revoked_at=""`,
+    )
+    await pb.collection('shared_itinerary_members').update(row.id, {
+      revoked_at: new Date().toISOString(),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Revoke failed.' }
+  }
 }
 
 export async function revokeSharedItineraryEntire(
   sharedItineraryId: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = getSupabase()
-  const { error } = await supabase
-    .from('shared_itineraries')
-    .update({ revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-    .eq('id', sharedItineraryId)
-  if (error) return { ok: false, error: error.message }
-  return { ok: true }
+  try {
+    const pb = getPocketBase()
+    await pb.collection('shared_itineraries').update(sharedItineraryId, {
+      revoked_at: new Date().toISOString(),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Revoke failed.' }
+  }
 }
 
 export type SharedMemberListItem = {
@@ -314,50 +303,45 @@ export async function fetchSharedItineraryMeta(
   | { ok: true; defaultPermission: 'viewer' | 'editor'; shareToken: string; sourceTripId: string }
   | { ok: false; error: string }
 > {
-  const supabase = getSupabase()
-  const { data, error } = await supabase
-    .from('shared_itineraries')
-    .select('default_permission, share_token, source_trip_id')
-    .eq('id', sharedItineraryId)
-    .single()
-  if (error || !data) return { ok: false, error: error?.message ?? 'Not found.' }
-  const dp = data.default_permission === 'editor' ? 'editor' : 'viewer'
-  return {
-    ok: true,
-    defaultPermission: dp,
-    shareToken: data.share_token,
-    sourceTripId: data.source_trip_id,
+  try {
+    const pb = getPocketBase()
+    const data = await pb.collection('shared_itineraries').getOne<SharedItineraryRow>(sharedItineraryId)
+    const dp = data.default_permission === 'editor' ? 'editor' : 'viewer'
+    return {
+      ok: true,
+      defaultPermission: dp,
+      shareToken: data.share_token,
+      sourceTripId: data.source_trip_id,
+    }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Not found.' }
   }
 }
 
 export async function fetchSharedItineraryMembers(
   sharedItineraryId: string,
 ): Promise<{ ok: true; members: SharedMemberListItem[] } | { ok: false; error: string }> {
-  const supabase = getSupabase()
-  const { data: rows, error } = await supabase
-    .from('shared_itinerary_members')
-    .select('user_id, role, joined_at')
-    .eq('shared_itinerary_id', sharedItineraryId)
-    .is('revoked_at', null)
-
-  if (error) return { ok: false, error: error.message }
-  const ids = (rows ?? []).map((r) => r.user_id)
-  let names = new Map<string, string | null>()
-  if (ids.length > 0) {
-    const { data: profs } = await supabase.from('profiles').select('id, display_name').in('id', ids)
-    for (const p of profs ?? []) {
-      names.set(p.id, p.display_name ?? null)
-    }
+  try {
+    const pb = getPocketBase()
+    const rows = await pb.collection('shared_itinerary_members').getFullList<{
+      user: string
+      role: string
+      joined_at?: string
+      expand?: { user?: { name?: string; email?: string } }
+    }>({
+      filter: `shared_itinerary="${sharedItineraryId}" && revoked_at=""`,
+      expand: 'user',
+    })
+    const members: SharedMemberListItem[] = rows.map((r) => ({
+      userId: r.user,
+      role: r.role === 'editor' ? 'editor' : 'viewer',
+      joinedAt: r.joined_at ?? '',
+      displayName: r.expand?.user?.name?.trim() || r.expand?.user?.email || null,
+    }))
+    return { ok: true, members }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Load failed.' }
   }
-
-  const members: SharedMemberListItem[] = (rows ?? []).map((r) => ({
-    userId: r.user_id,
-    role: r.role === 'editor' ? 'editor' : 'viewer',
-    joinedAt: r.joined_at,
-    displayName: names.get(r.user_id) ?? null,
-  }))
-
-  return { ok: true, members }
 }
 
 export async function acceptSharedItinerary(
@@ -365,48 +349,85 @@ export async function acceptSharedItinerary(
 ): Promise<
   { ok: true; sharedItineraryId: string; sourceTripId: string } | { ok: false; error: string }
 > {
-  const supabase = getSupabase()
-  const { data, error } = await supabase.rpc('accept_shared_itinerary', { p_token: shareToken })
-  if (error) return { ok: false, error: error.message }
-  const row = data as { ok?: boolean; error?: string; shared_itinerary_id?: string; source_trip_id?: string }
-  if (!row || row.ok !== true) return { ok: false, error: typeof row?.error === 'string' ? row.error : 'Accept failed.' }
-  const sid = row.shared_itinerary_id
-  const src = row.source_trip_id
-  if (typeof sid !== 'string' || typeof src !== 'string') return { ok: false, error: 'Unexpected response.' }
-  return { ok: true, sharedItineraryId: sid, sourceTripId: src }
+  try {
+    const pb = getPocketBase()
+    const userId = requireUserId()
+    const token = shareToken.trim()
+    if (!token) return { ok: false, error: 'Missing share token.' }
+
+    const share = await pb.collection('shared_itineraries').getFirstListItem<SharedItineraryRow>(
+      `share_token="${token}" && revoked_at=""`,
+    )
+    if (share.owner === userId) {
+      return { ok: true, sharedItineraryId: share.id, sourceTripId: share.source_trip_id }
+    }
+
+    try {
+      const existing = await pb.collection('shared_itinerary_members').getFirstListItem<{ id: string; revoked_at?: string }>(
+        `shared_itinerary="${share.id}" && user="${userId}"`,
+      )
+      if (existing.revoked_at) {
+        await pb.collection('shared_itinerary_members').update(existing.id, {
+          revoked_at: null,
+          role: share.default_permission === 'editor' ? 'editor' : 'viewer',
+          joined_at: new Date().toISOString(),
+        })
+      }
+    } catch {
+      await pb.collection('shared_itinerary_members').create({
+        shared_itinerary: share.id,
+        user: userId,
+        role: share.default_permission === 'editor' ? 'editor' : 'viewer',
+        joined_at: new Date().toISOString(),
+      })
+    }
+
+    return { ok: true, sharedItineraryId: share.id, sourceTripId: share.source_trip_id }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Accept failed.' }
+  }
 }
 
-/** Insert or update profile display name (optional). */
 export async function upsertProfileDisplayName(displayName: string): Promise<void> {
-  const supabase = getSupabase()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) return
-  await supabase.from('profiles').upsert(
-    { id: user.id, display_name: displayName.trim() || null, updated_at: new Date().toISOString() },
-    { onConflict: 'id' },
-  )
+  try {
+    const pb = getPocketBase()
+    const userId = pb.authStore.record?.id
+    if (!userId) return
+    await pb.collection('users').update(userId, { name: displayName.trim() || '' })
+  } catch {
+    // optional
+  }
 }
 
+export function authSessionFromPocketBaseUser(user: {
+  id: string
+  email?: string | null
+  name?: string | null
+} | null): { email: string; name: string } | null {
+  if (!user) return null
+  const email = normalizeEmail(user.email ?? '')
+  if (!email) return null
+  const name = (user.name ?? '').trim() || email.split('@')[0] || 'Traveler'
+  return { email, name }
+}
+
+/** @deprecated Use authSessionFromPocketBaseUser */
 export function authSessionFromSupabaseUser(user: {
   id: string
   email?: string | null
   user_metadata?: Record<string, unknown>
 } | null): { email: string; name: string } | null {
   if (!user) return null
-  const emailRaw = user.email ?? ''
-  const email = normalizeEmail(emailRaw)
-  if (!email) return null
   const meta = user.user_metadata ?? {}
   const fromMeta =
     typeof meta.display_name === 'string'
       ? meta.display_name.trim()
-      : typeof meta.full_name === 'string'
-        ? meta.full_name.trim()
-        : typeof meta.name === 'string'
-          ? meta.name.trim()
-          : ''
-  const name = fromMeta || email.split('@')[0] || 'Traveler'
-  return { email, name }
+      : typeof meta.name === 'string'
+        ? meta.name.trim()
+        : ''
+  return authSessionFromPocketBaseUser({
+    id: user.id,
+    email: user.email,
+    name: fromMeta,
+  })
 }

@@ -5,7 +5,7 @@
  * Prefer `code` from the Auth API when present — many failures use generic messages.
  */
 
-export function mapSupabaseAuthError(message: string, code?: string | null): string {
+export function mapAuthError(message: string, code?: string | null): string {
   const c = (code ?? '').trim().toLowerCase()
   if (c) {
     switch (c) {
@@ -88,8 +88,11 @@ export function mapSupabaseAuthError(message: string, code?: string | null): str
   }
 
   if (import.meta.env.DEV && (message || code)) {
-    console.warn('[Supabase auth]', code ?? '(no code)', message || '(empty message)')
+    console.warn('[auth]', code ?? '(no code)', message || '(empty message)')
   }
 
   return 'Something went wrong. Please try again.'
 }
+
+/** @deprecated Use mapAuthError */
+export const mapSupabaseAuthError = mapAuthError

@@ -109,11 +109,15 @@ export function parseTripsFromUnknown(parsed: unknown): TripsState {
                             category: String(a.category ?? '').trim() || undefined,
                             primaryType: String(a.primaryType ?? '').trim() || undefined,
                             types: Array.isArray(a.types) ? a.types.map((y: any) => String(y)).filter(Boolean) : undefined,
+                            lat: typeof a.lat === 'number' ? a.lat : undefined,
+                            lon: typeof a.lon === 'number' ? a.lon : undefined,
                             createdAt: Number(a.createdAt ?? Date.now()),
                           }))
                           .filter((a: StayActivity) => a.id && a.name && a.date)
                       : [],
                     createdAt: Number(x.createdAt ?? Date.now()),
+                    lat: typeof x.lat === 'number' ? x.lat : undefined,
+                    lon: typeof x.lon === 'number' ? x.lon : undefined,
                   }))
                   .filter((x: Stay) => x.id && x.location.length > 0 && x.startDate && x.endDate && x.confirmationRef.length > 0)
               : [],

@@ -135,6 +135,8 @@ export function buildMapPointsFromTrip(
       addressHint: s.address || s.location,
       startDate: s.startDate,
       endDate: s.endDate,
+      lat: s.lat,
+      lon: s.lon,
     })
   }
 
@@ -160,6 +162,8 @@ export function buildMapPointsFromTrip(
         markerKind: 'flight',
         category: 'flight',
         addressHint: `${fromA.name} ${fromA.city} ${fromA.country}`,
+        lat: fromA.lat,
+        lon: fromA.lon,
       })
     }
     if (toA) {
@@ -169,6 +173,8 @@ export function buildMapPointsFromTrip(
         markerKind: 'flight',
         category: 'flight',
         addressHint: `${toA.name} ${toA.city} ${toA.country}`,
+        lat: toA.lat,
+        lon: toA.lon,
       })
     }
   }
@@ -183,6 +189,8 @@ export function buildMapPointsFromTrip(
         markerKind: 'rental',
         category: 'rental',
         addressHint: cc ? `${pick} ${cc}` : pick,
+        lat: c.pickupLat,
+        lon: c.pickupLon,
       })
     }
     const drop = (c.dropoffLocation ?? '').trim()
@@ -193,6 +201,8 @@ export function buildMapPointsFromTrip(
         markerKind: 'rental',
         category: 'rental',
         addressHint: cc ? `${drop} ${cc}` : drop,
+        lat: c.dropoffLat,
+        lon: c.dropoffLon,
       })
     }
   }
@@ -207,6 +217,8 @@ export function buildMapPointsFromTrip(
       markerKind: 'restaurant',
       category: 'dining',
       addressHint: cc ? `${name} ${cc}` : name,
+      lat: r.lat,
+      lon: r.lon,
     })
   }
 
@@ -220,6 +232,8 @@ export function buildMapPointsFromTrip(
         markerKind: 'activity',
         category: 'activity',
         addressHint: cc ? `${q} ${cc}` : q,
+        lat: a.lat,
+        lon: a.lon,
       })
     }
   }

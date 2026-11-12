@@ -42,12 +42,19 @@ for await (const line of rl) {
   const name = (cols[3] || '').trim()
   const city = (cols[10] || '').trim()
   const country = (cols[8] || '').trim()
-  rows.push({ iata, name, city, country })
+  const lat = Number(cols[4])
+  const lon = Number(cols[5])
+  const row = { iata, name, city, country }
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    row.lat = lat
+    row.lon = lon
+  }
+  rows.push(row)
 }
 
 rows.sort((a, b) => a.iata.localeCompare(b.iata))
 
-const body = `export type AirportRecord = { iata: string; name: string; city: string; country: string }
+const body = `export type AirportRecord = { iata: string; name: string; city: string; country: string; lat?: number; lon?: number }
 
 /** Filtered from OurAirports (large + medium, valid IATA). Do not edit by hand — regenerate with \`node scripts/build-airports.mjs\`. */
 export const AIRPORTS: AirportRecord[] = ${JSON.stringify(rows)}

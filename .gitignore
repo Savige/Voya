@@ -12,8 +12,11 @@ dist
 dist-ssr
 *.local
 .env
+.env.local
+.env.*.local
 deploy/.env
 deploy/.env.production
+pocketbase/pb_data/
 
 # Editor directories and files
 *.swp

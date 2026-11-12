@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type ChangeEvent,
   type CSSProperties,
   type FormEvent,
   type ReactNode,
@@ -72,8 +71,7 @@ import 'react-day-picker/style.css'
 import { AirportCombobox } from './AirportCombobox'
 import type { AirportRecord } from './data/airports'
 import { formatAirportOptionLabel, getAirportByIata } from './data/airportLookup'
-import { getAuthEmailRedirectTo } from './authRedirects'
-import { mapSupabaseAuthError } from './authErrors'
+import { mapAuthError } from './authErrors'
 import {
   clearAuthSession,
   loadAuthSession,
@@ -86,10 +84,10 @@ import {
 } from './auth'
 import { PASSWORD_RULES_SUMMARY, validateRegistrationPassword } from './passwordPolicy'
 import { DEV_BYPASS_SESSION, isDevAuthBypass } from './devAuth'
-import { getSupabase, isSupabaseConfigured } from './supabaseClient'
+import { getPocketBase, isSupabaseConfigured } from './pocketbaseClient'
 import {
   acceptSharedItinerary,
-  authSessionFromSupabaseUser,
+  authSessionFromPocketBaseUser,
   createSharedItinerary,
   fetchMergedTripsState,
   fetchSharedItineraryMembers,
@@ -103,6 +101,10 @@ import {
   upsertSharedItineraryTrip,
   upsertUserTrips,
 } from './tripsRemote'
+import { geocodeQuery } from './placesApi'
+import { useCachedRecommendations, useDestinationSuggestions, usePlaceSuggestions } from './placesHooks'
+import type { PlaceSuggestion } from './placesTypes'
+import { TripMap } from './TripMap'
 import {
   buildFlightRouteDisplay,
   loadTripsState,
@@ -114,7 +116,6 @@ import {
   EMPTY_TRIP_BOOKINGS,
   type CarBooking,
   type FlightBooking,
-  type MustDo,
   type PackListItem,
   type RestaurantBooking,
   type Stay,
@@ -135,23 +136,17 @@ import {
   BRAND_NAME,
   formatDocumentTitle,
 } from './brand'
+import { BrandLogo } from './BrandLogo'
 import { ConfirmDialog } from './ConfirmDialog'
-import { CurrencySelect } from './CurrencySelect'
-import { formatMoneyAmount, loadDisplayCurrency, saveDisplayCurrency } from './currency'
-import { createMapMarkerContent } from './mapMarkers'
+import { formatMoneyAmount, loadDisplayCurrency } from './currency'
 import {
   buildMapPointsFromTrip,
-  buildRouteEvents,
-  buildRoutePointsWithTs,
   defaultMapCategoryVisibility,
   MAP_CATEGORY_LABELS,
   MAP_CATEGORIES,
   MAP_LEGEND_LABELS,
-  resolveReturnThresholdTs,
-  splitOutboundReturnPath,
   type MapCategory,
   type MapMarkerKind,
-  type MapPoint,
 } from './mapItinerary'
 
 const MAP_LEGEND_ICON: Record<MapCategory, typeof BedDouble> = {
@@ -165,358 +160,10 @@ const MAP_LEGEND_ICON: Record<MapCategory, typeof BedDouble> = {
 
 const THEME_KEY = 'itinerary:theme'
 const PACK_LIST_CATEGORIES = ['Clothes', 'Documents', 'Tech', 'Toiletries', 'Other'] as const
-const FALLBACK_DESTINATIONS = ['New York', 'New Orleans', 'New Zealand', 'Nepal', 'Netherlands', 'Nairobi', 'London', 'Tokyo', 'Sydney']
 const DEFAULT_HERO_IMAGE = 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=1200&auto=format&fit=crop'
 /** Pick randomly from this many top-scored Commons results so the hero varies each load. */
 const HERO_RANDOM_POOL = 12
-const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY?.trim() ?? ''
-const GOOGLE_MAPS_MAP_ID = import.meta.env.VITE_GOOGLE_MAPS_MAP_ID?.trim() ?? ''
 const APP_BUILD = import.meta.env.VITE_APP_BUILD ?? '—'
-const MAPS_MAP_ID_ERROR =
-  'Google Maps Map ID missing (set VITE_GOOGLE_MAPS_MAP_ID). With Docker, use deploy/.env so Compose loads it, or pass --env-file deploy/.env.production, then rebuild — Vite inlines env at build time.'
-
-function getCountrySuggestionsFromIntl(): string[] {
-  try {
-    const supportedValuesOf = (Intl as any).supportedValuesOf as ((type: string) => string[]) | undefined
-    if (!supportedValuesOf) return []
-
-    const regionCodes = supportedValuesOf('region')
-    const display = new Intl.DisplayNames(undefined, { type: 'region' })
-
-    return regionCodes
-      .map((code) => display.of(code))
-      .filter((name): name is string => typeof name === 'string' && name.length > 0 && !/^[A-Z]{2}$/.test(name))
-  } catch {
-    return []
-  }
-}
-
-function useDestinationSuggestions(query: string) {
-  const [remoteSuggestions, setRemoteSuggestions] = useState<string[]>([])
-  const [autocompleteError, setAutocompleteError] = useState<string | null>(null)
-
-  const allFallbackSuggestions = useMemo(() => {
-    const countries = getCountrySuggestionsFromIntl()
-    return Array.from(new Set([...FALLBACK_DESTINATIONS, ...countries]))
-  }, [])
-
-  useEffect(() => {
-    const q = query.trim()
-    if (!q || q.length < 2) {
-      setRemoteSuggestions([])
-      setAutocompleteError(null)
-      return
-    }
-    if (!GOOGLE_MAPS_API_KEY) {
-      setRemoteSuggestions([])
-      setAutocompleteError('Google Maps API key missing (set VITE_GOOGLE_MAPS_API_KEY).')
-      return
-    }
-
-    const controller = new AbortController()
-    const timer = window.setTimeout(async () => {
-      try {
-        setAutocompleteError(null)
-        const res = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
-          method: 'POST',
-          signal: controller.signal,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-            'X-Goog-FieldMask': 'suggestions.placePrediction.text.text',
-          },
-          body: JSON.stringify({
-            input: q,
-            languageCode: 'en',
-          }),
-        })
-        if (!res.ok) throw new Error(`Autocomplete request failed (${res.status})`)
-        const data = (await res.json()) as any
-        const suggestions = Array.from(
-          new Set(
-            (Array.isArray(data?.suggestions) ? data.suggestions : [])
-              .map((s: any) => String(s?.placePrediction?.text?.text ?? '').trim())
-              .filter(Boolean),
-          ),
-        ).slice(0, 9) as string[]
-        setRemoteSuggestions(suggestions)
-      } catch (err) {
-        if ((err as any)?.name === 'AbortError') return
-        setRemoteSuggestions([])
-        setAutocompleteError(err instanceof Error ? err.message : 'Autocomplete unavailable')
-      }
-    }, 220)
-
-    return () => {
-      controller.abort()
-      window.clearTimeout(timer)
-    }
-  }, [query])
-
-  const suggestions = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return []
-    const source = remoteSuggestions.length > 0 ? remoteSuggestions : allFallbackSuggestions
-    return source
-      .filter((name) => {
-        const lower = name.toLowerCase()
-        if (lower.startsWith(q)) return true
-        return lower.split(/\s+/).some((part) => part.startsWith(q))
-      })
-      .slice(0, 9)
-  }, [query, remoteSuggestions, allFallbackSuggestions])
-
-  return { suggestions, autocompleteError }
-}
-
-type PlaceSuggestion = {
-  key: string
-  label: string
-  lat?: number
-  lon?: number
-  googleMapsUri?: string
-  photoUrl?: string
-  seedLabel?: string
-  category?: string
-  primaryType?: string
-  types?: string[]
-}
-
-const googlePlacePhotoUrl = (name?: string) => {
-  if (!name) return ''
-  return `https://places.googleapis.com/v1/${name}/media?maxHeightPx=240&maxWidthPx=360&key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}`
-}
-
-function usePlaceSuggestions(query: string) {
-  const [remoteSuggestions, setRemoteSuggestions] = useState<PlaceSuggestion[]>([])
-  const [autocompleteError, setAutocompleteError] = useState<string | null>(null)
-
-  useEffect(() => {
-    const q = query.trim()
-    if (!q || q.length < 2) {
-      setRemoteSuggestions([])
-      setAutocompleteError(null)
-      return
-    }
-    if (!GOOGLE_MAPS_API_KEY) {
-      setRemoteSuggestions([])
-      setAutocompleteError('Google Maps API key missing (set VITE_GOOGLE_MAPS_API_KEY).')
-      return
-    }
-    const controller = new AbortController()
-    const timer = window.setTimeout(async () => {
-      try {
-        setAutocompleteError(null)
-        const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
-          method: 'POST',
-          signal: controller.signal,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-            'X-Goog-FieldMask':
-              'places.id,places.displayName,places.formattedAddress,places.location,places.googleMapsUri,places.photos,places.primaryType,places.types',
-          },
-          body: JSON.stringify({
-            textQuery: q,
-            languageCode: 'en',
-            maxResultCount: 9,
-          }),
-        })
-        if (!res.ok) throw new Error(`Place search failed (${res.status})`)
-        const data = (await res.json()) as any
-        const places = (Array.isArray(data?.places) ? data.places : []).map((p: any) => {
-          const label = [String(p?.displayName?.text ?? '').trim(), String(p?.formattedAddress ?? '').trim()].filter(Boolean).join(', ')
-          return {
-            key: String(p?.id ?? label),
-            label,
-            lat: Number(p?.location?.latitude),
-            lon: Number(p?.location?.longitude),
-            googleMapsUri: String(p?.googleMapsUri ?? ''),
-            photoUrl: googlePlacePhotoUrl(p?.photos?.[0]?.name),
-            primaryType: String(p?.primaryType ?? '').trim() || undefined,
-            types: Array.isArray(p?.types) ? p.types.map((x: any) => String(x)).filter(Boolean) : undefined,
-          } satisfies PlaceSuggestion
-        })
-        setRemoteSuggestions(places.filter((x: PlaceSuggestion) => x.label).slice(0, 9))
-      } catch (err) {
-        if ((err as any)?.name === 'AbortError') return
-        setRemoteSuggestions([])
-        setAutocompleteError(err instanceof Error ? err.message : 'Search unavailable')
-      }
-    }, 220)
-
-    return () => {
-      controller.abort()
-      window.clearTimeout(timer)
-    }
-  }, [query])
-
-  return { suggestions: remoteSuggestions, autocompleteError }
-}
-
-function useRecommendedPlaces(seedLocations: string[], countryHint?: string) {
-  const [recommendations, setRecommendations] = useState<PlaceSuggestion[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    const normalizeSeedForQuery = (raw: string) => {
-      const t = raw.trim().replace(/\s+/g, ' ')
-      if (!t) return ''
-      const parts = t.split(',').map((p) => p.trim()).filter(Boolean)
-      return parts.length >= 2 ? parts.slice(-2).join(', ') : t
-    }
-    const normalizedSeeds = Array.from(new Set(seedLocations.map(normalizeSeedForQuery).filter(Boolean)))
-    const countryNorm = (countryHint ?? '').trim().toLowerCase()
-    const countryAbbrev = countryNorm === 'new zealand' ? 'nz' : ''
-    const isCountryMatch = (label: string) => {
-      if (!countryNorm) return true
-      const lower = label.toLowerCase()
-      return lower.includes(countryNorm) || (countryAbbrev ? lower.includes(`, ${countryAbbrev}`) : false)
-    }
-    if (normalizedSeeds.length === 0) {
-      setRecommendations([])
-      setLoading(false)
-      setError(null)
-      return
-    }
-    if (!GOOGLE_MAPS_API_KEY) {
-      setRecommendations([])
-      setLoading(false)
-      setError('Google Maps API key missing (set VITE_GOOGLE_MAPS_API_KEY).')
-      return
-    }
-
-    const controller = new AbortController()
-    const queryTemplates = [
-      (seed: string) => `best hikes in ${seed}`,
-      (seed: string) => `walking tours in ${seed}`,
-      (seed: string) => `restaurants in ${seed}`,
-      (seed: string) => `best experiences in ${seed}`,
-      (seed: string) => `top tourist activities in ${seed}`,
-      (seed: string) => `spa and wellness in ${seed}`,
-      (seed: string) => `quiet relaxation spots in ${seed}`,
-      (seed: string) => `onsen and hot springs in ${seed}`,
-      (seed: string) => `tea houses and calm cafes in ${seed}`,
-    ]
-    const seeds = normalizedSeeds.slice(0, 6)
-    const queryPlans = seeds.flatMap((seed, seedIndex) =>
-      queryTemplates.map((template, templateIndex) => ({
-        seed,
-        seedIndex,
-        templateIndex,
-        query: template(seed),
-      })),
-    )
-
-    const run = async () => {
-      try {
-        setLoading(true)
-        setError(null)
-        const settled = await Promise.allSettled(
-          queryPlans.map(async (plan) => {
-            const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
-              method: 'POST',
-              signal: controller.signal,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-                'X-Goog-FieldMask':
-                  'places.id,places.displayName,places.formattedAddress,places.location,places.googleMapsUri,places.photos,places.primaryType,places.types',
-              },
-              body: JSON.stringify({
-                textQuery: countryHint ? `${plan.query} in ${countryHint}` : plan.query,
-                languageCode: 'en',
-                maxResultCount: 4,
-              }),
-            })
-            if (!res.ok) throw new Error(`Recommendations failed (${res.status})`)
-            const data = (await res.json()) as any
-            const items = (Array.isArray(data?.places) ? data.places : []).map((p: any) => {
-              const label = [String(p?.displayName?.text ?? '').trim(), String(p?.formattedAddress ?? '').trim()].filter(Boolean).join(', ')
-              return {
-                key: String(p?.id ?? label),
-                label,
-                lat: Number(p?.location?.latitude),
-                lon: Number(p?.location?.longitude),
-                googleMapsUri: String(p?.googleMapsUri ?? ''),
-                photoUrl: googlePlacePhotoUrl(p?.photos?.[0]?.name),
-                seedLabel: plan.seed,
-                primaryType: String(p?.primaryType ?? '').trim() || undefined,
-                types: Array.isArray(p?.types) ? p.types.map((x: any) => String(x)).filter(Boolean) : undefined,
-              } satisfies PlaceSuggestion
-            })
-            return { ...plan, items }
-          }),
-        )
-
-        const bySeed = new Map<number, PlaceSuggestion[]>()
-        const seen = new Set<string>()
-        for (const result of settled) {
-          if (result.status !== 'fulfilled') continue
-          const { seedIndex, items } = result.value
-          const bucket = bySeed.get(seedIndex) ?? []
-          for (const item of items) {
-            const key = item.label.toLowerCase()
-            if (!item.label || seen.has(key) || !isCountryMatch(item.label)) continue
-            seen.add(key)
-            bucket.push(item)
-          }
-          bySeed.set(seedIndex, bucket)
-        }
-
-        // Interleave per-seed results so all itinerary areas are represented.
-        const balanced: PlaceSuggestion[] = []
-        const perSeedCap = 3
-        let round = 0
-        while (balanced.length < 20) {
-          let addedThisRound = false
-          for (let seedIndex = 0; seedIndex < seeds.length; seedIndex++) {
-            const bucket = bySeed.get(seedIndex) ?? []
-            if (round >= bucket.length) continue
-            const alreadyFromSeed = balanced.filter((x) => bucket.some((b) => b.key === x.key)).length
-            if (alreadyFromSeed >= perSeedCap) continue
-            balanced.push(bucket[round])
-            addedThisRound = true
-            if (balanced.length >= 20) break
-          }
-          if (!addedThisRound) break
-          round += 1
-        }
-
-        if (balanced.length > 0) {
-          setRecommendations(balanced)
-          return
-        }
-
-        const seenFallback = new Set<string>()
-        const all: PlaceSuggestion[] = []
-        for (const result of settled) {
-          if (result.status !== 'fulfilled') continue
-          for (const item of result.value.items) {
-            const key = item.label.toLowerCase()
-            if (!item.label || seenFallback.has(key) || !isCountryMatch(item.label)) continue
-            seenFallback.add(key)
-            all.push(item)
-            if (all.length >= 20) break
-          }
-          if (all.length >= 20) break
-        }
-        setRecommendations(all)
-      } catch (err) {
-        if ((err as any)?.name === 'AbortError') return
-        setRecommendations([])
-        setError(err instanceof Error ? err.message : 'Recommendations unavailable')
-      } finally {
-        setLoading(false)
-      }
-    }
-    run()
-    return () => controller.abort()
-  }, [countryHint, seedLocations.join('|')])
-
-  return { recommendations, loading, error }
-}
 
 const uid = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : String(Date.now()))
 
@@ -2969,7 +2616,7 @@ export default function App() {
     if (saved === 'light') return false
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
   })
-  const [displayCurrency, setDisplayCurrency] = useState(() => loadDisplayCurrency())
+  const [displayCurrency] = useState(() => loadDisplayCurrency())
   const initialAppUrl = useMemo(() => readInitialAppUrl(), [])
   const [view, setView] = useState<View>(() => {
     if (isSupabaseConfigured() && !isDevAuthBypass() && initialAppUrl.shareToken) return 'dashboard'
@@ -2998,7 +2645,7 @@ export default function App() {
   const [itineraryClock, setItineraryClock] = useState(() => Date.now())
 
   const [authReady, setAuthReady] = useState(() => !isSupabaseConfigured() || isDevAuthBypass())
-  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null)
+  const [backendUserId, setBackendUserId] = useState<string | null>(null)
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
     if (isDevAuthBypass()) return DEV_BYPASS_SESSION
     if (isSupabaseConfigured()) return null
@@ -3011,7 +2658,7 @@ export default function App() {
   const [authNameInput, setAuthNameInput] = useState('')
   const [authFormError, setAuthFormError] = useState<string | null>(null)
   const [authBusy, setAuthBusy] = useState(false)
-  /** Set after Supabase signUp when email confirmation is required (no session yet). */
+  /** Set when email confirmation is required (usually unused on personal PocketBase). */
   const [authPendingVerificationEmail, setAuthPendingVerificationEmail] = useState<string | null>(null)
   const [verificationResendMessage, setVerificationResendMessage] = useState<string | null>(null)
   const [localImportDismissed, setLocalImportDismissed] = useState(false)
@@ -3031,7 +2678,6 @@ export default function App() {
   const [placeSearchInput, setPlaceSearchInput] = useState('')
   const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false)
   const [placeSuggestionIndex, setPlaceSuggestionIndex] = useState(-1)
-  const [mustDoInput, setMustDoInput] = useState('')
   const [packListTextInput, setPackListTextInput] = useState('')
   const [packListCategoryInput, setPackListCategoryInput] = useState<string>(PACK_LIST_CATEGORIES[0])
   const [showHomeSuggestions, setShowHomeSuggestions] = useState(false)
@@ -3100,19 +2746,8 @@ export default function App() {
   const [selectedDayRadiusPartial, setSelectedDayRadiusPartial] = useState(false)
   const [bookingError, setBookingError] = useState<string | null>(null)
   const [isBookingFormOpen, setIsBookingFormOpen] = useState(false)
-  const [confettiBursts, setConfettiBursts] = useState<Array<{ id: string; x: number; y: number }>>([])
-  const audioCtxRef = useRef<AudioContext | null>(null)
-  const [mapApiLoaded, setMapApiLoaded] = useState(false)
-  const [mapApiError, setMapApiError] = useState<string | null>(null)
   const [resolvedPointCoords, setResolvedPointCoords] = useState<Record<string, { lat: number; lon: number }>>({})
   const [mapCategoryVisible, setMapCategoryVisible] = useState<Record<MapCategory, boolean>>(defaultMapCategoryVisibility)
-  const mapContainerRef = useRef<HTMLDivElement | null>(null)
-  const mapInstanceRef = useRef<any>(null)
-  const mapMarkersRef = useRef<any[]>([])
-  const mapPolylineOutboundRef = useRef<any>(null)
-  const mapPolylineReturnRef = useRef<any>(null)
-  /** When unchanged, map effect skips fitBounds/center (visibility-only toggles). Reset when leaving Map tab. */
-  const mapCameraFingerprintAppliedRef = useRef<string | null>(null)
   /** Session-only hero; refetched when opening the dashboard so places are not stuck on one saved photo. */
   const [dashboardHeroUrl, setDashboardHeroUrl] = useState<string | null>(null)
   const [peakSeasonInfo, setPeakSeasonInfo] = useState<PeakSeasonInfo | null>(null)
@@ -3142,21 +2777,23 @@ export default function App() {
   useEffect(() => {
     if (isDevAuthBypass()) return
     if (!isSupabaseConfigured()) return
-    const supabase = getSupabase()
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      const u = session?.user
-      setSupabaseUserId(u?.id ?? null)
-      setAuthSession(u ? authSessionFromSupabaseUser(u) : null)
+    const pb = getPocketBase()
+    const apply = () => {
+      const u = pb.authStore.record
+      setBackendUserId(u?.id ?? null)
+      setAuthSession(
+        u
+          ? authSessionFromPocketBaseUser({
+              id: u.id,
+              email: typeof u.email === 'string' ? u.email : null,
+              name: typeof u.name === 'string' ? u.name : null,
+            })
+          : null,
+      )
       setAuthReady(true)
-    })
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      const u = session?.user
-      setSupabaseUserId(u?.id ?? null)
-      setAuthSession(u ? authSessionFromSupabaseUser(u) : null)
-    })
-    return () => subscription.unsubscribe()
+    }
+    apply()
+    return pb.authStore.onChange(() => apply())
   }, [])
 
   useEffect(() => {
@@ -3176,7 +2813,7 @@ export default function App() {
       skipRemoteSaveRef.current = false
       return
     }
-    if (!authSession || !supabaseUserId) {
+    if (!authSession || !backendUserId) {
       setState({ trips: [], selectedTripId: null })
       skipRemoteSaveRef.current = true
       return
@@ -3190,7 +2827,7 @@ export default function App() {
         skipRemoteSaveRef.current = false
       })
     })
-  }, [authReady, supabaseUserId])
+  }, [authReady, backendUserId])
 
   useEffect(() => {
     if (!isSupabaseConfigured() || isDevAuthBypass()) return
@@ -3322,9 +2959,6 @@ export default function App() {
     localStorage.setItem(THEME_KEY, isDarkMode ? 'dark' : 'light')
   }, [isDarkMode])
   useEffect(() => {
-    saveDisplayCurrency(displayCurrency)
-  }, [displayCurrency])
-  useEffect(() => {
     const id = window.setInterval(() => setItineraryClock(Date.now()), 30000)
     return () => window.clearInterval(id)
   }, [])
@@ -3350,35 +2984,38 @@ export default function App() {
 
   useEffect(() => {
     if (!isSupabaseConfigured() || isDevAuthBypass()) return
-    if (!authSession || !supabaseUserId) return
+    if (!authSession || !backendUserId) return
     const sid = selectedTrip?.sharing?.sharedItineraryId
     if (!sid) return
-    const supabase = getSupabase()
-    const channel = supabase
-      .channel(`shared-itinerary-${sid}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'shared_itineraries', filter: `id=eq.${sid}` },
-        (payload) => {
-          const row = payload.new as { trip_json?: unknown }
-          if (row?.trip_json == null) return
-          const parsed = parseSingleTripFromUnknown(row.trip_json)
-          if (!parsed) return
-          setState((prev) => ({
-            ...prev,
-            trips: prev.trips.map((t) =>
-              t.sharing?.sharedItineraryId === sid
-                ? { ...parsed, sharing: t.sharing }
-                : t,
-            ),
-          }))
-        },
-      )
-      .subscribe()
+    const pb = getPocketBase()
+    let unsub: (() => void) | undefined
+    void pb
+      .collection('shared_itineraries')
+      .subscribe(sid, (e) => {
+        const row = e.record as { trip_json?: unknown }
+        if (row?.trip_json == null) return
+        const parsed = parseSingleTripFromUnknown(row.trip_json)
+        if (!parsed) return
+        setState((prev) => ({
+          ...prev,
+          trips: prev.trips.map((t) =>
+            t.sharing?.sharedItineraryId === sid ? { ...parsed, sharing: t.sharing } : t,
+          ),
+        }))
+      })
+      .then((u) => {
+        unsub = u
+      })
+      .catch(() => {})
     return () => {
-      void supabase.removeChannel(channel)
+      try {
+        unsub?.()
+        void pb.collection('shared_itineraries').unsubscribe(sid)
+      } catch {
+        // ignore
+      }
     }
-  }, [authSession, supabaseUserId, selectedTrip?.sharing?.sharedItineraryId])
+  }, [authSession, backendUserId, selectedTrip?.sharing?.sharedItineraryId])
 
   const mustDos = selectedTrip?.mustDos ?? []
   const packList = selectedTrip?.packList ?? []
@@ -3881,7 +3518,11 @@ export default function App() {
     }
     return seedList.length > 0 ? seedList : [selectedTrip.country]
   }, [selectedTrip, stays])
-  const recommendedPlaces = useRecommendedPlaces(recommendationSeeds, selectedTrip?.country)
+  const recommendedPlaces = useCachedRecommendations(
+    selectedTrip?.id,
+    recommendationSeeds,
+    selectedTrip?.country ?? '',
+  )
   const visibleRecommendations = useMemo(() => {
     return recommendedPlaces.recommendations
       .filter((r) => !dismissedRecommendationKeys.includes(r.key))
@@ -3901,35 +3542,8 @@ export default function App() {
     () => activitiesByDay.get(selectedTimelineDate) ?? EMPTY_CALENDAR_DAY_ITEMS,
     [activitiesByDay, selectedTimelineDate],
   )
-  const selectedDayRecommendationSeeds = useMemo(() => {
-    if (!selectedTrip || !selectedTimelineDate) return []
-    const staySeeds: string[] = []
-    const activitySeeds: string[] = []
-    const stay = selectedDayPrimaryStay
-    if (stay?.address?.trim()) staySeeds.push(stay.address.trim())
-    if (stay?.location?.trim()) staySeeds.push(stay.location.trim())
-    for (const item of selectedDayActivities.slice(0, 4)) {
-      const t = item.activity.name.trim()
-      if (!t) continue
-      activitySeeds.push(t)
-      activitySeeds.push(`${t} near ${stay?.location || selectedTrip.country}`)
-    }
-    if (staySeeds.length === 0 && activitySeeds.length === 0) staySeeds.push(selectedTrip.country)
-
-    // Interleave stay and activity sources so recommendation queries are mixed.
-    const mixed: string[] = []
-    const stayUnique = Array.from(new Set(staySeeds)).slice(0, 4)
-    const activityUnique = Array.from(new Set(activitySeeds)).slice(0, 6)
-    const rounds = Math.max(stayUnique.length, activityUnique.length)
-    for (let i = 0; i < rounds; i++) {
-      if (stayUnique[i]) mixed.push(stayUnique[i])
-      if (activityUnique[i]) mixed.push(activityUnique[i])
-    }
-    return mixed.slice(0, 8)
-  }, [selectedDayActivities, selectedDayPrimaryStay, selectedTimelineDate, selectedTrip])
-  const selectedDayRecommendations = useRecommendedPlaces(selectedDayRecommendationSeeds, selectedTrip?.country)
   const dayRecommendationRadius = useMemo(() => {
-    const base = selectedDayRecommendations.recommendations
+    const base = recommendedPlaces.recommendations
       .filter((rec) => !dismissedRecommendationKeys.includes(rec.key))
       .filter((rec) => !plannedActivityNames.has(normalizeRecommendationLabel(rec.label)))
 
@@ -3951,7 +3565,7 @@ export default function App() {
       .map((rec) => ({ ...rec, category: resolveRecommendationCategory(rec.category, rec.label, rec.primaryType, rec.types) }))
 
     return { selected, isUsing20kmFallback, within10Count: within10km.length }
-  }, [dismissedRecommendationKeys, plannedActivityNames, selectedDayAnchorCoords, selectedDayRadiusPartial, selectedDayRecommendations.recommendations])
+  }, [dismissedRecommendationKeys, plannedActivityNames, selectedDayAnchorCoords, selectedDayRadiusPartial, recommendedPlaces.recommendations])
   const visibleSelectedDayRecommendations = dayRecommendationRadius.selected
   const activityPlaceSearch = usePlaceSuggestions(activityPlaceSearchInput)
   const homeSearch = useDestinationSuggestions(newTripDestination)
@@ -4042,8 +3656,6 @@ export default function App() {
       subtitle: formatSingleDateLabel(selectedTrip?.endDate || ''),
     }
   }, [itineraryClock, selectedTrip?.startDate, selectedTrip?.endDate])
-  const showSideGoalsRail = activeTab === 'planner'
-
   useEffect(() => {
     setPlaceSuggestionIndex(-1)
   }, [placeSearchInput, showPlaceSuggestions])
@@ -4112,75 +3724,28 @@ export default function App() {
 
   useEffect(() => {
     const stay = selectedDayPrimaryStay
-    const country = selectedTrip?.country?.trim()
     if (!selectedTimelineDate || (!stay && selectedDayActivities.length === 0)) {
       setSelectedDayAnchorCoords([])
       setSelectedDayRadiusPartial(false)
       return
     }
-    if (!GOOGLE_MAPS_API_KEY) {
-      setSelectedDayAnchorCoords([])
-      setSelectedDayRadiusPartial(true)
-      return
+    const coords: Array<{ lat: number; lon: number }> = []
+    let unresolved = 0
+    if (typeof stay?.lat === 'number' && typeof stay?.lon === 'number') {
+      coords.push({ lat: stay.lat, lon: stay.lon })
     }
-
-    const queries: string[] = []
-    if (stay?.address?.trim()) queries.push(stay.address.trim())
-    if (stay?.location?.trim()) queries.push(stay.location.trim())
     for (const a of selectedDayActivities.slice(0, 5)) {
-      const label = (a.activity.placeLabel || a.activity.name || '').trim()
-      if (label) queries.push(label)
+      if (typeof a.activity.lat === 'number' && typeof a.activity.lon === 'number') {
+        coords.push({ lat: a.activity.lat, lon: a.activity.lon })
+      } else {
+        unresolved += 1
+      }
     }
-    const uniqueQueries = Array.from(new Set(queries.filter(Boolean)))
-    if (uniqueQueries.length === 0) {
-      setSelectedDayAnchorCoords([])
-      setSelectedDayRadiusPartial(false)
-      return
-    }
+    const dedup = Array.from(new Map(coords.map((c) => [`${c.lat.toFixed(5)}:${c.lon.toFixed(5)}`, c])).values())
+    setSelectedDayAnchorCoords(dedup)
+    setSelectedDayRadiusPartial(unresolved > 0 || dedup.length === 0)
+  }, [selectedDayActivities, selectedDayPrimaryStay, selectedTimelineDate])
 
-    const controller = new AbortController()
-    const run = async () => {
-      let unresolved = 0
-      const coords: Array<{ lat: number; lon: number }> = []
-      await Promise.all(
-        uniqueQueries.map(async (q) => {
-          try {
-            const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
-              method: 'POST',
-              signal: controller.signal,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-                'X-Goog-FieldMask': 'places.location',
-              },
-              body: JSON.stringify({
-                textQuery: country ? `${q} ${country}` : q,
-                languageCode: 'en',
-                maxResultCount: 1,
-              }),
-            })
-            if (!res.ok) throw new Error(`Anchor resolve failed (${res.status})`)
-            const data = (await res.json()) as any
-            const loc = data?.places?.[0]?.location
-            if (typeof loc?.latitude === 'number' && typeof loc?.longitude === 'number') {
-              coords.push({ lat: loc.latitude, lon: loc.longitude })
-            } else {
-              unresolved += 1
-            }
-          } catch {
-            unresolved += 1
-          }
-        }),
-      )
-
-      if (controller.signal.aborted) return
-      const dedup = Array.from(new Map(coords.map((c) => [`${c.lat.toFixed(5)}:${c.lon.toFixed(5)}`, c])).values())
-      setSelectedDayAnchorCoords(dedup)
-      setSelectedDayRadiusPartial(unresolved > 0 || dedup.length === 0)
-    }
-    run()
-    return () => controller.abort()
-  }, [selectedDayActivities, selectedDayPrimaryStay, selectedTimelineDate, selectedTrip?.country])
 
   useEffect(() => {
     const destination = newTripDestination.trim()
@@ -4193,44 +3758,11 @@ export default function App() {
   }, [newTripDestination, newTripRange?.from, newTripStartDate])
 
   useEffect(() => {
-    if (activeTab !== 'map') return
-    if (!GOOGLE_MAPS_API_KEY) {
-      setMapApiError('Google Maps API key missing (set VITE_GOOGLE_MAPS_API_KEY).')
-      return
-    }
-    if (!GOOGLE_MAPS_MAP_ID) {
-      setMapApiError(MAPS_MAP_ID_ERROR)
-      return
-    }
-    const w = window as any
-    if (w.google?.maps) {
-      setMapApiLoaded(true)
-      setMapApiError(null)
-      return
-    }
-    const existing = document.getElementById('google-maps-js-sdk') as HTMLScriptElement | null
-    if (existing) {
-      const onLoad = () => setMapApiLoaded(true)
-      existing.addEventListener('load', onLoad, { once: true })
-      return () => existing.removeEventListener('load', onLoad)
-    }
-    const script = document.createElement('script')
-    script.id = 'google-maps-js-sdk'
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&libraries=marker&loading=async`
-    script.async = true
-    script.defer = true
-    script.onload = () => {
-      setMapApiLoaded(true)
-      setMapApiError(null)
-    }
-    script.onerror = () => setMapApiError('Unable to load Google Maps JS SDK.')
-    document.head.appendChild(script)
-  }, [activeTab])
-
-  useEffect(() => {
     if (activeTab !== 'map' || !selectedTrip) return
-    if (!GOOGLE_MAPS_API_KEY) return
-    const unresolved = mapPoints.filter((p) => !(typeof p.lat === 'number' && typeof p.lon === 'number') && !resolvedPointCoords[p.key])
+    if (!isSupabaseConfigured()) return
+    const unresolved = mapPoints.filter(
+      (p) => !(typeof p.lat === 'number' && typeof p.lon === 'number') && !resolvedPointCoords[p.key],
+    )
     if (unresolved.length === 0) return
     let cancelled = false
     const resolveMissing = async () => {
@@ -4238,27 +3770,10 @@ export default function App() {
       for (const p of unresolved) {
         const query = [p.label, p.addressHint, selectedTrip.country].filter(Boolean).join(', ')
         try {
-          const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-              'X-Goog-FieldMask': 'places.location',
-            },
-            body: JSON.stringify({
-              textQuery: query,
-              languageCode: 'en',
-              maxResultCount: 1,
-            }),
-          })
-          if (!res.ok) continue
-          const data = (await res.json()) as any
-          const loc = data?.places?.[0]?.location
-          if (typeof loc?.latitude === 'number' && typeof loc?.longitude === 'number') {
-            updates[p.key] = { lat: loc.latitude, lon: loc.longitude }
-          }
+          const hit = await geocodeQuery(query)
+          if (hit) updates[p.key] = { lat: hit.lat, lon: hit.lon }
         } catch {
-          // Ignore individual geocode failures; map still renders available points.
+          // ignore individual failures
         }
       }
       if (cancelled || Object.keys(updates).length === 0) return
@@ -4270,191 +3785,6 @@ export default function App() {
     }
   }, [activeTab, mapPoints, resolvedPointCoords, selectedTrip])
 
-  /** Map tab unmounts the container when switching tabs; the old Map must be dropped or it stays bound to a detached DOM node and the map appears blank when returning. */
-  useEffect(() => {
-    if (activeTab === 'map') return
-    for (const m of mapMarkersRef.current) {
-      if (m && 'map' in m) (m as any).map = null
-      else if (m && typeof (m as any).setMap === 'function') (m as any).setMap(null)
-    }
-    mapMarkersRef.current = []
-    if (mapPolylineOutboundRef.current) {
-      mapPolylineOutboundRef.current.setMap(null)
-      mapPolylineOutboundRef.current = null
-    }
-    if (mapPolylineReturnRef.current) {
-      mapPolylineReturnRef.current.setMap(null)
-      mapPolylineReturnRef.current = null
-    }
-    mapInstanceRef.current = null
-  }, [activeTab])
-
-  useEffect(() => {
-    if (activeTab !== 'map') {
-      mapCameraFingerprintAppliedRef.current = null
-    }
-  }, [activeTab])
-
-  useEffect(() => {
-    if (activeTab !== 'map' || !mapApiLoaded || !mapContainerRef.current) return
-    const w = window as any
-    const g = w.google
-    if (!g?.maps) return
-    if (!GOOGLE_MAPS_MAP_ID) {
-      setMapApiError(MAPS_MAP_ID_ERROR)
-      return
-    }
-    const AdvancedMarker = g.maps?.marker?.AdvancedMarkerElement as
-      | (new (opts: any) => any)
-      | undefined
-    if (!AdvancedMarker) {
-      setMapApiError('Google Maps marker library not available yet. Please refresh the page.')
-      return
-    }
-
-    const resolved = mapPoints
-      .map((p) => {
-        if (typeof p.lat === 'number' && typeof p.lon === 'number') return { ...p, lat: p.lat, lon: p.lon }
-        const fallback = resolvedPointCoords[p.key]
-        if (fallback) return { ...p, lat: fallback.lat, lon: fallback.lon }
-        return null
-      })
-      .filter((p): p is MapPoint & { lat: number; lon: number } => Boolean(p))
-
-    const visibleResolved = resolved.filter((p) => mapCategoryVisible[p.category])
-
-    const coordByKey = new Map(resolved.map((p) => [p.key, { lat: p.lat, lng: p.lon }] as const))
-    const routeEvents = buildRouteEvents(
-      stays,
-      visitPlaces,
-      bookings.flights,
-      bookings.rentalCars,
-      bookings.restaurants,
-      selectedTrip?.country ?? '',
-      { ...mapCategoryVisible, accommodation: true, flight: true },
-    )
-    const routePointsWithTs = buildRoutePointsWithTs(
-      routeEvents.map((e) => ({ ts: e.ts, key: e.key })),
-      coordByKey,
-    )
-    const returnThreshold = resolveReturnThresholdTs(bookings.flights, selectedTrip?.endDate)
-    const { outbound: outboundPath, ret: returnPath } = splitOutboundReturnPath(routePointsWithTs, returnThreshold)
-    const routePointsFlat = [...outboundPath, ...returnPath]
-    const centerPoint =
-      visibleResolved[0] != null
-        ? { lat: visibleResolved[0].lat, lng: visibleResolved[0].lon }
-        : routePointsFlat[0] ?? (resolved[0] ? { lat: resolved[0].lat, lng: resolved[0].lon } : null)
-
-    if (!mapInstanceRef.current) {
-      mapInstanceRef.current = new g.maps.Map(mapContainerRef.current, {
-        center: centerPoint ?? { lat: 0, lng: 0 },
-        zoom: routePointsFlat.length > 0 || resolved.length > 0 ? 6 : 2,
-        mapId: GOOGLE_MAPS_MAP_ID,
-        mapTypeControl: false,
-        streetViewControl: false,
-      })
-    }
-    const map = mapInstanceRef.current
-
-    for (const m of mapMarkersRef.current) {
-      if (m && 'map' in m) (m as any).map = null
-      else if (m && typeof (m as any).setMap === 'function') (m as any).setMap(null)
-    }
-    mapMarkersRef.current = []
-
-    const markerBounds = new g.maps.LatLngBounds()
-    for (const p of visibleResolved) {
-      const markerContent = createMapMarkerContent(p.markerKind)
-      const marker = new AdvancedMarker({
-        map,
-        position: { lat: p.lat, lng: p.lon } as any,
-        title: p.label,
-        content: markerContent,
-        // Default anchor is bottom-center (-100% top); use center so markers sit on the route line.
-        anchorLeft: '-50%',
-        anchorTop: '-50%',
-      })
-      mapMarkersRef.current.push(marker)
-      markerBounds.extend({ lat: p.lat, lng: p.lon })
-    }
-
-    if (mapPolylineOutboundRef.current) {
-      mapPolylineOutboundRef.current.setMap(null)
-      mapPolylineOutboundRef.current = null
-    }
-    if (mapPolylineReturnRef.current) {
-      mapPolylineReturnRef.current.setMap(null)
-      mapPolylineReturnRef.current = null
-    }
-
-    if (outboundPath.length >= 2) {
-      mapPolylineOutboundRef.current = new g.maps.Polyline({
-        map,
-        path: outboundPath,
-        geodesic: true,
-        strokeColor: '#2563eb',
-        strokeOpacity: 0.85,
-        strokeWeight: 4,
-      })
-    }
-    if (returnPath.length >= 2) {
-      mapPolylineReturnRef.current = new g.maps.Polyline({
-        map,
-        path: returnPath,
-        geodesic: true,
-        strokeOpacity: 0,
-        icons: [
-          {
-            icon: {
-              path: 'M 0,-1 0,1',
-              strokeOpacity: 1,
-              scale: 3,
-              strokeColor: '#78716c',
-            },
-            offset: '0',
-            repeat: '14px',
-          },
-        ],
-      })
-    }
-
-    const routeBounds = new g.maps.LatLngBounds()
-    for (const pt of routePointsFlat) routeBounds.extend(pt)
-    const uniqueRoutePts = Array.from(
-      new Map(routePointsFlat.map((p) => [`${p.lat.toFixed(5)}:${p.lng.toFixed(5)}`, p])).values(),
-    )
-    if (mapCameraFingerprint !== mapCameraFingerprintAppliedRef.current) {
-      mapCameraFingerprintAppliedRef.current = mapCameraFingerprint
-      if (visibleResolved.length > 1) {
-        map.fitBounds(markerBounds, 50)
-      } else if (visibleResolved.length === 1) {
-        map.setCenter({ lat: visibleResolved[0].lat, lng: visibleResolved[0].lon })
-        map.setZoom(10)
-      } else if (uniqueRoutePts.length > 1) {
-        map.fitBounds(routeBounds, 50)
-      } else if (uniqueRoutePts.length === 1) {
-        map.setCenter(uniqueRoutePts[0])
-        map.setZoom(10)
-      } else if (resolved[0]) {
-        map.setCenter({ lat: resolved[0].lat, lng: resolved[0].lon })
-        map.setZoom(4)
-      }
-    }
-  }, [
-    activeTab,
-    mapApiLoaded,
-    mapCameraFingerprint,
-    mapPoints,
-    resolvedPointCoords,
-    stays,
-    visitPlaces,
-    bookings.flights,
-    bookings.rentalCars,
-    bookings.restaurants,
-    selectedTrip?.country,
-    selectedTrip?.endDate,
-    mapCategoryVisible,
-  ])
 
   const createTrip = (country: string, startDate = '', endDate = '') => {
     const c = country.trim()
@@ -4473,7 +3803,6 @@ export default function App() {
       bookings: { rentalCars: [], flights: [], restaurants: [], accommodations: [] },
     }
     setState((prev) => ({ trips: [trip, ...prev.trips], selectedTripId: trip.id }))
-    setMustDoInput('')
   }
 
   const addPackListItem = () => {
@@ -5199,53 +4528,6 @@ export default function App() {
     }))
   }
 
-  const launchConfetti = (event?: ChangeEvent<HTMLInputElement>) => {
-    const mouse = event?.nativeEvent instanceof MouseEvent ? event.nativeEvent : null
-    const x = mouse?.clientX ?? 160
-    const y = mouse?.clientY ?? 140
-    const id = uid()
-    setConfettiBursts((prev) => [...prev, { id, x, y }])
-    window.setTimeout(() => {
-      setConfettiBursts((prev) => prev.filter((b) => b.id !== id))
-    }, 1200)
-  }
-
-  const playSideGoalChime = () => {
-    try {
-      const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext
-      if (!AudioContextCtor) return
-      if (!audioCtxRef.current) audioCtxRef.current = new AudioContextCtor()
-      const ctx = audioCtxRef.current
-      if (!ctx) return
-      if (ctx.state === 'suspended') void ctx.resume()
-
-      const t0 = ctx.currentTime
-      const notes = [523.25, 659.25] // C5 then E5
-      const durations = [0.11, 0.14]
-
-      // Shared envelope so it doesn't click.
-      for (let i = 0; i < notes.length; i++) {
-        const osc = ctx.createOscillator()
-        const gain = ctx.createGain()
-        osc.type = 'sine'
-        osc.frequency.setValueAtTime(notes[i], t0 + i * 0.12)
-        const start = t0 + i * 0.12
-        const stop = start + durations[i]
-
-        gain.gain.setValueAtTime(0.0001, start)
-        gain.gain.exponentialRampToValueAtTime(0.05, start + 0.02)
-        gain.gain.exponentialRampToValueAtTime(0.0001, stop)
-
-        osc.connect(gain)
-        gain.connect(ctx.destination)
-        osc.start(start)
-        osc.stop(stop)
-      }
-    } catch {
-      // Ignore audio failures (e.g. browser policy).
-    }
-  }
-
   const saveTripDates = () => {
     if (!selectedTrip || !state.selectedTripId) return
     if (tripIsReadOnly) return
@@ -5301,6 +4583,9 @@ export default function App() {
       return false
     }
 
+    const stayId = uid()
+    const address = stayAddressInput.trim()
+    const country = selectedTrip.country
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) =>
@@ -5310,9 +4595,9 @@ export default function App() {
               stays: [
                 ...trip.stays,
                 {
-                  id: uid(),
+                  id: stayId,
                   location,
-                  address: stayAddressInput.trim(),
+                  address,
                   startDate: stayStartDate,
                   endDate: stayEndDate,
                   checkInTime: stayCheckInTimeInput.trim(),
@@ -5338,6 +4623,27 @@ export default function App() {
     setStayPriceInput('')
     setStayBookingUrlInput('')
     setStayConfirmationRefInput('')
+
+    // Geocode once and persist (Nominatim via PocketBase cache) — never on every map open.
+    if (isSupabaseConfigured() && !isDevAuthBypass()) {
+      const q = [address || location, country].filter(Boolean).join(', ')
+      void geocodeQuery(q).then((hit) => {
+        if (!hit) return
+        setState((prev) => ({
+          ...prev,
+          trips: prev.trips.map((trip) =>
+            trip.id !== prev.selectedTripId
+              ? trip
+              : {
+                  ...trip,
+                  stays: trip.stays.map((s) =>
+                    s.id === stayId ? { ...s, lat: hit.lat, lon: hit.lon } : s,
+                  ),
+                },
+          ),
+        }))
+      })
+    }
     return true
   }
 
@@ -5375,6 +4681,8 @@ export default function App() {
                       placeLabel: selectedMeta?.label,
                       category: selectedMeta ? resolveRecommendationCategory(selectedMeta.category, selectedMeta.label, selectedMeta.primaryType, selectedMeta.types) : undefined,
                       primaryType: selectedMeta?.primaryType,
+                      lat: typeof selectedMeta?.lat === 'number' ? selectedMeta.lat : undefined,
+                      lon: typeof selectedMeta?.lon === 'number' ? selectedMeta.lon : undefined,
                       types: selectedMeta?.types,
                       createdAt: Date.now(),
                     },
@@ -5544,21 +4852,6 @@ export default function App() {
     }
   }, [view, selectedTrip?.id, selectedTrip?.country])
 
-  const addMustDo = (text: string) => {
-    const t = text.trim()
-    if (!t) return
-    if (!state.selectedTripId) return
-    if (tripIsReadOnly) return
-    setState((prev) => ({
-      ...prev,
-      trips: prev.trips.map((trip) => {
-        if (trip.id !== prev.selectedTripId) return trip
-        return { ...trip, mustDos: [{ id: uid(), text: t, done: false, createdAt: Date.now() }, ...trip.mustDos] }
-      }),
-    }))
-    setMustDoInput('')
-  }
-
   const setTripCancelledFlag = (tripId: string, cancelled: boolean) => {
     const tr = state.trips.find((x) => x.id === tripId)
     if (tr && isTripReadOnly(tr)) return
@@ -5610,7 +4903,7 @@ export default function App() {
       skipRemoteSaveRef.current = true
       remoteFetchGenRef.current += 1
       setAuthSession(null)
-      setSupabaseUserId(null)
+      setBackendUserId(null)
       setState({ trips: [], selectedTripId: null })
       setView('home')
       setAuthFormError(null)
@@ -5623,12 +4916,12 @@ export default function App() {
     if (isSupabaseConfigured()) {
       skipRemoteSaveRef.current = true
       remoteFetchGenRef.current += 1
-      await getSupabase().auth.signOut()
+      getPocketBase().authStore.clear()
     } else {
       clearAuthSession()
     }
     setAuthSession(null)
-    setSupabaseUserId(null)
+    setBackendUserId(null)
     setState({ trips: [], selectedTripId: null })
     setView('home')
     setAuthFormError(null)
@@ -5639,24 +4932,7 @@ export default function App() {
   }
 
   const handleResendVerificationEmail = async () => {
-    if (!authPendingVerificationEmail || !isSupabaseConfigured()) return
-    setAuthBusy(true)
-    setVerificationResendMessage(null)
-    setAuthFormError(null)
-    try {
-      const { error } = await getSupabase().auth.resend({
-        type: 'signup',
-        email: authPendingVerificationEmail,
-        options: { emailRedirectTo: getAuthEmailRedirectTo() },
-      })
-      if (error) {
-        setAuthFormError(mapSupabaseAuthError(error.message, error.code))
-      } else {
-        setVerificationResendMessage('Another confirmation email has been sent.')
-      }
-    } finally {
-      setAuthBusy(false)
-    }
+    setVerificationResendMessage('Ask your admin to confirm the account in PocketBase, or disable email verification for personal use.')
   }
 
   const handleDismissEmailVerification = () => {
@@ -5698,7 +4974,7 @@ export default function App() {
     const password = authPasswordInput
     try {
       if (isSupabaseConfigured()) {
-        const supabase = getSupabase()
+        const pb = getPocketBase()
         const normalized = normalizeEmail(email)
         if (authMode === 'register') {
           const pwCheck = validateRegistrationPassword(password)
@@ -5710,37 +4986,32 @@ export default function App() {
             setAuthFormError('Passwords do not match.')
             return
           }
-          const { data, error } = await supabase.auth.signUp({
-            email: normalized,
-            password,
-            options: {
-              data: { display_name: authNameInput.trim() },
-              emailRedirectTo: getAuthEmailRedirectTo(),
-            },
-          })
-          if (error) {
-            setAuthFormError(mapSupabaseAuthError(error.message, error.code))
-            return
-          }
-          if (data.user && data.session) {
+          try {
+            await pb.collection('users').create({
+              email: normalized,
+              password,
+              passwordConfirm: password,
+              name: authNameInput.trim(),
+            })
+            await pb.collection('users').authWithPassword(normalized, password)
             await upsertProfileDisplayName(authNameInput.trim())
             setAuthPendingVerificationEmail(null)
             setVerificationResendMessage(null)
-          } else if (data.user && !data.session) {
-            setAuthPendingVerificationEmail(normalized)
-            setVerificationResendMessage(null)
+          } catch (err: any) {
+            const msg = err?.message || err?.data?.message || 'Sign up failed.'
+            setAuthFormError(mapAuthError(String(msg), err?.data?.code || err?.status))
+            return
           }
           setAuthPasswordInput('')
           setAuthPasswordConfirmInput('')
           setAuthNameInput('')
           return
         }
-        const { error } = await supabase.auth.signInWithPassword({
-          email: normalized,
-          password,
-        })
-        if (error) {
-          setAuthFormError(mapSupabaseAuthError(error.message, error.code))
+        try {
+          await pb.collection('users').authWithPassword(normalized, password)
+        } catch (err: any) {
+          const msg = err?.message || err?.data?.message || 'Sign in failed.'
+          setAuthFormError(mapAuthError(String(msg), err?.data?.code || err?.status))
           return
         }
         setAuthPasswordInput('')
@@ -5980,9 +5251,11 @@ export default function App() {
         >
         <div className="sticky top-0 z-40 border-b border-white/40 dark:border-neutral-800/80 bg-white/75 dark:bg-neutral-950/80 backdrop-blur-md">
           <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3 min-w-0">
-            <span className="min-w-0 shrink text-lg font-serif font-semibold tracking-tight text-neutral-900 dark:text-white truncate">{BRAND_NAME}</span>
+            <a href="/" className="min-w-0 shrink inline-flex items-center gap-2.5 text-neutral-900 dark:text-white no-underline">
+              <BrandLogo className="h-8 w-8 shrink-0" />
+              <span className="text-lg font-serif font-semibold tracking-tight truncate">{BRAND_NAME}</span>
+            </a>
             <div className="flex min-w-0 items-center gap-2 flex-wrap justify-end">
-              <CurrencySelect value={displayCurrency} onChange={setDisplayCurrency} />
               {authSession ? (
                 <>
                   <span className="hidden sm:inline-flex items-center gap-1.5 text-sm text-neutral-600 dark:text-neutral-300 max-w-[200px] truncate">
@@ -6642,7 +5915,7 @@ export default function App() {
           </div>
         </div>
       ) : null}
-    <div className={`min-h-screen overflow-x-hidden bg-gradient-to-b from-sky-50 via-white to-neutral-100 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}>
+    <div className={`min-h-screen bg-gradient-to-b from-sky-50 via-white to-neutral-100 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}>
 
       {calendarActivityDetail ? (() => {
         const calPayload = calendarActivityDetail
@@ -6962,126 +6235,126 @@ export default function App() {
         )
       })() : null}
 
-      {/* Hero — toolbar stays one row on mobile (wrap only if needed) */}
-      <div className="relative h-[min(42vh,520px)] min-h-[260px] max-sm:h-[min(36vh,420px)] max-sm:min-h-[220px] w-full overflow-hidden">
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-20 px-3 pt-3 sm:px-4 sm:pt-4">
+      {/* Hero stays put; planner content below scrolls up over it */}
+      <div className="sticky top-0 z-0 w-full">
+        <div className="relative h-[min(48vh,560px)] min-h-[300px] max-sm:h-[min(44vh,480px)] max-sm:min-h-[280px] w-full overflow-hidden">
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-20 px-3 pt-3 sm:px-4 sm:pt-4">
+            <div
+              className="pointer-events-auto flex flex-row flex-wrap items-center justify-between gap-x-2 gap-y-2"
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setView('home')}
+                  className="inline-flex shrink-0 items-center gap-2 px-3 py-2 sm:px-4 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+                >
+                  Back to Home
+                </button>
+                {authSession ? (
+                  <>
+                    <span className="hidden min-[380px]:inline-flex max-w-[140px] sm:max-w-[160px] items-center gap-1.5 truncate px-3 py-2 rounded-xl border border-white/25 bg-black/25 backdrop-blur-md text-white text-xs">
+                      <User size={14} className="shrink-0 opacity-90" aria-hidden />
+                      {authSession.name}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      aria-label="Log out"
+                      className="inline-flex shrink-0 items-center gap-1.5 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+                    >
+                      <LogOut size={16} aria-hidden />
+                      <span className="hidden sm:inline">Log out</span>
+                    </button>
+                  </>
+                ) : null}
+              </div>
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsDarkMode((v) => !v)}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+                  aria-label="Toggle dark mode"
+                >
+                  {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
+                  <span className="hidden sm:inline">{isDarkMode ? 'Light' : 'Dark'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <img
+            src={dashboardHeroUrl || DEFAULT_HERO_IMAGE}
+            className="absolute inset-0 h-full w-full object-cover"
+            alt="Hero"
+          />
           <div
-            className={`pointer-events-auto flex flex-row flex-wrap items-center justify-between gap-x-2 gap-y-2 ${
-              showSideGoalsRail ? 'lg:pl-[calc(320px+1rem)] lg:pr-[calc(320px+1rem)]' : ''
-            }`}
+            className="absolute inset-0 bg-gradient-to-b from-black/50 via-black/35 to-black/60 flex flex-col items-center justify-center gap-2.5 sm:gap-3.5 pt-[4.5rem] sm:pt-20 pb-12 max-sm:pb-14 text-white px-3 text-center sm:px-4 overflow-hidden"
           >
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setView('home')}
-                className="inline-flex shrink-0 items-center gap-2 px-3 py-2 sm:px-4 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
-              >
-                Back to Home
-              </button>
-              {authSession ? (
-                <>
-                  <span className="hidden min-[380px]:inline-flex max-w-[140px] sm:max-w-[160px] items-center gap-1.5 truncate px-3 py-2 rounded-xl border border-white/25 bg-black/25 backdrop-blur-md text-white text-xs">
-                    <User size={14} className="shrink-0 opacity-90" aria-hidden />
-                    {authSession.name}
-                  </span>
+            <h1 className="text-3xl sm:text-4xl md:text-5xl font-serif font-bold drop-shadow-md px-1 flex flex-wrap items-center justify-center gap-3">
+              {selectedTrip?.sharing ? <Users className="shrink-0 text-white/90" size={40} aria-hidden /> : null}
+              {!selectedTrip ? <BrandLogo className="h-10 w-10 sm:h-12 sm:w-12 shrink-0 drop-shadow-md" /> : null}
+              <span>{selectedTrip ? `Trip to: ${selectedTrip.country}` : BRAND_NAME}</span>
+            </h1>
+            <p className="text-sm sm:text-base md:text-lg max-w-2xl opacity-95 px-1">{BRAND_DASHBOARD_SUBTITLE}</p>
+            {shareInviteBanner ? (
+              <p className="text-sm text-amber-200 max-w-xl rounded-lg bg-black/25 px-3 py-2 border border-amber-400/40">
+                {shareInviteBanner}
+              </p>
+            ) : null}
+            {tripIsReadOnly ? (
+              <p className="text-sm text-white/95 max-w-xl rounded-lg bg-black/35 px-3 py-2 border border-white/25">
+                View-only access: you can browse this shared itinerary but cannot edit it.
+              </p>
+            ) : null}
+            {isSupabaseConfigured() && !isDevAuthBypass() && authSession && selectedTrip && !tripIsReadOnly ? (
+              <div className="flex flex-wrap justify-center gap-2">
+                {selectedTrip.sharing?.role === 'owner' ? (
                   <button
                     type="button"
-                    onClick={handleLogout}
-                    aria-label="Log out"
-                    className="inline-flex shrink-0 items-center gap-1.5 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
+                    onClick={() => void openShareModal()}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
                   >
-                    <LogOut size={16} aria-hidden />
-                    <span className="hidden sm:inline">Log out</span>
+                    <Users size={16} aria-hidden />
+                    Manage sharing
                   </button>
-                </>
-              ) : null}
+                ) : !selectedTrip.sharing ? (
+                  <button
+                    type="button"
+                    onClick={() => void openShareModal()}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
+                  >
+                    <Link2 size={16} aria-hidden />
+                    Share trip
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="flex gap-3 flex-wrap justify-center text-sm font-medium">
+              <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
+                {selectedTrip ? `Current: ${selectedTrip.country}` : 'No trip selected'}
+              </span>
+              <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
+                {selectedTrip?.startDate || selectedTrip?.endDate
+                  ? formatDateRangeWithYear(selectedTrip?.startDate, selectedTrip?.endDate)
+                  : `Side-Quests remaining: ${remaining}`}
+              </span>
             </div>
-            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-              <CurrencySelect variant="onDark" value={displayCurrency} onChange={setDisplayCurrency} />
-              <button
-                type="button"
-                onClick={() => setIsDarkMode((v) => !v)}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
-                aria-label="Toggle dark mode"
-              >
-                {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
-                <span className="hidden sm:inline">{isDarkMode ? 'Light' : 'Dark'}</span>
-              </button>
+            <div className="w-full max-w-md rounded-2xl border border-white/30 bg-black/25 backdrop-blur-md px-5 py-2.5 text-center shadow-lg">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-100">{sideQuestCountdown.title}</p>
+              <p className="mt-0.5 text-lg md:text-xl font-bold leading-tight text-white">{sideQuestCountdown.subtitle}</p>
             </div>
-          </div>
-        </div>
-        <img
-          src={dashboardHeroUrl || DEFAULT_HERO_IMAGE}
-          className="w-full h-full object-cover"
-          alt="Hero"
-        />
-        <div
-          className={`absolute inset-y-0 ${showSideGoalsRail ? 'left-0 right-0 lg:left-[320px] lg:right-[320px]' : 'left-0 right-0'} bg-gradient-to-b from-black/50 via-black/35 to-black/60 flex flex-col items-center justify-start gap-5 sm:gap-6 pt-20 sm:pt-[5.5rem] pb-6 max-sm:pb-14 text-white px-3 text-center sm:px-4 overflow-y-auto`}
-        >
-          <h1 className="text-3xl sm:text-4xl md:text-6xl font-serif font-bold drop-shadow-md px-1 flex flex-wrap items-center justify-center gap-3">
-            {selectedTrip?.sharing ? <Users className="shrink-0 text-white/90" size={44} aria-hidden /> : null}
-            <span>{selectedTrip ? `Trip to: ${selectedTrip.country}` : BRAND_NAME}</span>
-          </h1>
-          <p className="text-base sm:text-lg md:text-xl max-w-2xl opacity-95 px-1">{BRAND_DASHBOARD_SUBTITLE}</p>
-          {shareInviteBanner ? (
-            <p className="text-sm text-amber-200 max-w-xl rounded-lg bg-black/25 px-3 py-2 border border-amber-400/40">
-              {shareInviteBanner}
-            </p>
-          ) : null}
-          {tripIsReadOnly ? (
-            <p className="text-sm text-white/95 max-w-xl rounded-lg bg-black/35 px-3 py-2 border border-white/25">
-              View-only access: you can browse this shared itinerary but cannot edit it.
-            </p>
-          ) : null}
-          {isSupabaseConfigured() && !isDevAuthBypass() && authSession && selectedTrip && !tripIsReadOnly ? (
-            <div className="flex flex-wrap justify-center gap-2">
-              {selectedTrip.sharing?.role === 'owner' ? (
-                <button
-                  type="button"
-                  onClick={() => void openShareModal()}
-                  className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
-                >
-                  <Users size={16} aria-hidden />
-                  Manage sharing
-                </button>
-              ) : !selectedTrip.sharing ? (
-                <button
-                  type="button"
-                  onClick={() => void openShareModal()}
-                  className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
-                >
-                  <Link2 size={16} aria-hidden />
-                  Share trip
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          <div className="flex gap-3 flex-wrap justify-center text-sm font-medium">
-            <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
-              {selectedTrip ? `Current: ${selectedTrip.country}` : 'No trip selected'}
-            </span>
-            <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
-              {selectedTrip?.startDate || selectedTrip?.endDate
-                ? formatDateRangeWithYear(selectedTrip?.startDate, selectedTrip?.endDate)
-                : `Side-Quests remaining: ${remaining}`}
-            </span>
-          </div>
-          <div className="w-full max-w-md rounded-2xl border border-white/30 bg-black/25 backdrop-blur-md px-5 py-3 text-center shadow-lg">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-100">{sideQuestCountdown.title}</p>
-            <p className="mt-1 text-xl md:text-2xl font-bold leading-tight text-white">{sideQuestCountdown.subtitle}</p>
           </div>
         </div>
       </div>
 
-      <div className={showSideGoalsRail ? 'lg:pl-[320px] lg:pr-[320px]' : ''}>
-        {/* Tabs */}
-        <div className="max-w-5xl mx-auto px-3 sm:px-4 -mt-10 relative z-10">
-          <div className="bg-white/95 backdrop-blur rounded-2xl shadow-2xl border border-white/70 p-1.5 sm:p-2.5 overflow-x-auto overscroll-x-contain [scrollbar-width:thin]">
+      {/* Tabs + main scroll over the sticky hero; hero peeks behind the upper half of the tab bar */}
+      <div className="relative z-10">
+        <div className="relative z-20 mx-auto max-w-5xl px-3 sm:px-4 -mt-9">
+          <div className="overflow-x-auto overscroll-x-contain rounded-2xl border border-white/70 bg-white/90 p-1.5 shadow-2xl backdrop-blur-md dark:border-neutral-700/80 dark:bg-neutral-900/90 sm:p-2.5 [scrollbar-width:thin]">
           <div className="flex w-max flex-nowrap gap-1 sm:w-full sm:flex-wrap sm:gap-1">
           <button
             onClick={() => setActiveTab('planner')}
             className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'planner' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
+              activeTab === 'planner' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
             }`}
           >
             <Calendar size={18} className="shrink-0" />
@@ -7090,7 +6363,7 @@ export default function App() {
           <button
             onClick={() => setActiveTab('itinerary')}
             className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'itinerary' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
+              activeTab === 'itinerary' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
             }`}
           >
             <Calendar size={18} className="shrink-0" />
@@ -7099,7 +6372,7 @@ export default function App() {
           <button
             onClick={() => setActiveTab('budget')}
             className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'budget' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
+              activeTab === 'budget' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
             }`}
           >
             <DollarSign size={18} className="shrink-0" />
@@ -7108,7 +6381,7 @@ export default function App() {
           <button
             onClick={() => setActiveTab('tips')}
             className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'tips' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
+              activeTab === 'tips' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
             }`}
           >
             <Compass size={18} className="shrink-0" />
@@ -7117,7 +6390,7 @@ export default function App() {
           <button
             onClick={() => setActiveTab('map')}
             className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'map' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'
+              activeTab === 'map' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
             }`}
           >
             <MapIcon size={18} className="shrink-0" />
@@ -7127,114 +6400,9 @@ export default function App() {
       </div>
       </div>
 
-        {showSideGoalsRail ? (
-        <aside className="hidden lg:block fixed left-0 top-0 h-full w-[320px] z-40 bg-white border-r border-neutral-200 shadow-2xl p-5 overflow-auto pt-[max(1.25rem,env(safe-area-inset-top))]">
-          <div>
-            <h3 className="text-xl font-serif font-bold">Overview</h3>
-            <p className="text-xs text-neutral-500">Reserved space for trip overview details.</p>
-          </div>
-          <div className="mt-4 rounded-2xl border border-dashed border-neutral-300 bg-neutral-50 px-3 py-4 text-sm text-neutral-500">
-            This sidebar is intentionally left as a placeholder for now.
-          </div>
-        </aside>
-        ) : null}
-
-        {showSideGoalsRail ? (
-        <aside
-          className={`hidden lg:block fixed right-0 top-0 h-full w-[320px] z-40 bg-white border-l border-neutral-200 shadow-2xl p-5 overflow-auto pt-[max(1.25rem,env(safe-area-inset-top))]${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
-        >
-            <div>
-              <h3 className="text-xl font-serif font-bold">Side-Quests</h3>
-              <p className="text-xs text-neutral-500">Fun extras you would love to achieve.</p>
-            </div>
-            <form
-              className="mt-4 flex gap-2"
-              onSubmit={(e) => {
-                e.preventDefault()
-                addMustDo(mustDoInput)
-              }}
-            >
-              <input
-                value={mustDoInput}
-                onChange={(e) => setMustDoInput(e.target.value)}
-                disabled={!selectedTrip}
-                placeholder={selectedTrip ? `Cool goal for ${selectedTrip.country}...` : 'Select a trip first...'}
-                className="flex-1 px-3 py-2 rounded-xl border border-neutral-200 text-sm"
-              />
-              <button type="submit" disabled={!selectedTrip} className="px-3 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold disabled:opacity-50">
-                Add
-              </button>
-            </form>
-            <div className="mt-3 flex items-center justify-between">
-              <p className="text-xs text-neutral-500">{remaining} remaining</p>
-              <button
-                type="button"
-                disabled={!selectedTrip || mustDos.length === 0}
-                onClick={() => {
-                  if (!selectedTrip) return
-                  const sid = selectedTrip.id
-                  const label = selectedTrip.country
-                  setConfirmDialog({
-                    title: 'Clear side-quests?',
-                    description: `Clear all side-quests for "${label}"?`,
-                    confirmLabel: 'Clear',
-                    cancelLabel: 'Cancel',
-                    variant: 'danger',
-                    onConfirm: () => {
-                      setState((prev) => ({
-                        ...prev,
-                        trips: prev.trips.map((t) => (t.id === sid ? { ...t, mustDos: [] } : t)),
-                      }))
-                    },
-                  })
-                }}
-                className="text-xs px-2 py-1 rounded-lg border border-neutral-200 disabled:opacity-50"
-              >
-                Clear
-              </button>
-            </div>
-            <div className="mt-3 space-y-2">
-              {mustDos.length === 0 ? (
-                <p className="text-sm text-neutral-500">{selectedTrip ? 'No side-quests yet.' : 'Select a trip first.'}</p>
-              ) : (
-                mustDos.map((m) => (
-                  <MustDoRow
-                    key={m.id}
-                    item={m}
-                    onToggle={(event) => {
-                      const completing = !m.done
-                      if (!state.selectedTripId) return
-                      setState((prev) => ({
-                        ...prev,
-                        trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.map((x) => (x.id === m.id ? { ...x, done: !x.done } : x)) })),
-                      }))
-                      if (completing) {
-                        playSideGoalChime()
-                        launchConfetti(event)
-                      }
-                    }}
-                    onDelete={() => {
-                      if (!state.selectedTripId) return
-                      setState((prev) => ({
-                        ...prev,
-                        trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.filter((x) => x.id !== m.id) })),
-                      }))
-                    }}
-                    onEdit={(nextText) => {
-                      if (!state.selectedTripId) return
-                      setState((prev) => ({
-                        ...prev,
-                        trips: prev.trips.map((t) => (t.id !== prev.selectedTripId ? t : { ...t, mustDos: t.mustDos.map((x) => (x.id === m.id ? { ...x, text: nextText } : x)) })),
-                      }))
-                    }}
-                  />
-                ))
-              )}
-            </div>
-        </aside>
-        ) : null}
-
-        <main className="max-w-5xl mx-auto px-3 sm:px-4 py-12 pb-12 max-sm:pb-[max(3rem,env(safe-area-inset-bottom,0px))]">
+        {/* Sheet starts mid-tab so the hero shows behind the upper half of the tab bar */}
+        <div className="relative z-10 -mt-[2.25rem] bg-gradient-to-b from-sky-50 via-white to-neutral-100 pt-[3.75rem] dark:from-neutral-950 dark:via-neutral-900 dark:to-sky-950/40">
+        <main className="max-w-5xl mx-auto px-3 sm:px-4 pb-12 max-sm:pb-[max(3rem,env(safe-area-inset-bottom,0px))]">
         {activeTab === 'planner' && (
           <div
             className={`space-y-8 animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
@@ -8099,16 +7267,36 @@ export default function App() {
                   ) : null}
 
                   <div className="mt-5">
-                    <h3 className="text-sm font-semibold text-neutral-800">Recommended places</h3>
-                    <p className="text-xs text-neutral-500 mb-3">
-                      {selectedTrip
-                        ? stays.length > 0 || allStayActivities.length > 0
-                          ? `Based on accommodation and ${allStayActivities.length > 0 ? 'planned activities' : 'trip context'}.`
-                          : 'Based on your trip destination.'
-                        : 'Select a trip to see recommendations.'}
-                    </p>
+                    <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-semibold text-neutral-800">Recommended places</h3>
+                        <p className="text-xs text-neutral-500">
+                          {selectedTrip
+                            ? 'Cached on your NAS. Refresh only when you want new ideas (free Overpass/OSM — no Google).'
+                            : 'Select a trip to see recommendations.'}
+                        </p>
+                        {recommendedPlaces.fetchedAt ? (
+                          <p className="text-[11px] text-neutral-400 mt-1">
+                            Last refreshed {new Date(recommendedPlaces.fetchedAt).toLocaleString()}
+                            {recommendedPlaces.source ? ` · ${recommendedPlaces.source}` : ''}
+                          </p>
+                        ) : selectedTrip ? (
+                          <p className="text-[11px] text-neutral-400 mt-1">No cached recommendations yet.</p>
+                        ) : null}
+                      </div>
+                      {selectedTrip && isSupabaseConfigured() && !isDevAuthBypass() ? (
+                        <button
+                          type="button"
+                          disabled={recommendedPlaces.refreshing || recommendedPlaces.loading}
+                          onClick={() => void recommendedPlaces.refresh()}
+                          className="shrink-0 px-3 py-1.5 rounded-lg border border-neutral-200 bg-white text-xs font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
+                        >
+                          {recommendedPlaces.refreshing ? 'Refreshing…' : 'Refresh recommendations'}
+                        </button>
+                      ) : null}
+                    </div>
                     {!selectedTrip ? null : recommendedPlaces.loading ? (
-                      <p className="text-sm text-neutral-500">Loading recommendations...</p>
+                      <p className="text-sm text-neutral-500">Loading cached recommendations...</p>
                     ) : recommendedPlaces.error ? (
                       <p className="text-xs text-rose-700">{recommendedPlaces.error}</p>
                     ) : visibleRecommendations.length > 0 ? (
@@ -8687,10 +7875,10 @@ export default function App() {
                       ) : null}
                       {!selectedDayPrimaryStay ? (
                         <p className="mt-2 text-xs text-neutral-500">Add accommodation for this day to get stronger recommendations.</p>
-                      ) : selectedDayRecommendations.loading ? (
+                      ) : recommendedPlaces.loading ? (
                         <p className="mt-2 text-xs text-neutral-500">Loading recommendations...</p>
-                      ) : selectedDayRecommendations.error ? (
-                        <p className="mt-2 text-xs text-rose-700">{selectedDayRecommendations.error}</p>
+                      ) : recommendedPlaces.error ? (
+                        <p className="mt-2 text-xs text-rose-700">{recommendedPlaces.error}</p>
                       ) : visibleSelectedDayRecommendations.length > 0 ? (
                         <ul className="mt-2 space-y-2">
                           {visibleSelectedDayRecommendations.map((rec) => {
@@ -8999,7 +8187,7 @@ export default function App() {
                 <div className="min-w-0">
                   <h2 className="text-2xl font-serif font-bold">Map</h2>
                   <p className="text-neutral-500 text-sm">
-                    {selectedTrip ? 'Your trip on the map.' : 'Select a trip to see the map.'}
+                    {selectedTrip ? 'Polarsteps-style route on free OpenStreetMap tiles.' : 'Select a trip to see the map.'}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -9062,13 +8250,24 @@ export default function App() {
                 </ul>
               ) : null}
 
-              {mapApiError ? <p className="mt-3 text-xs text-rose-700">{mapApiError}</p> : null}
-
-              <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 p-2 h-[min(430px,calc(100dvh-14rem))] min-h-[220px] sm:h-[430px] sm:min-h-0">
+              <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 p-2 h-[min(520px,calc(100dvh-12rem))] min-h-[280px] sm:h-[520px] sm:min-h-0">
                 {!selectedTrip ? (
                   <div className="h-full flex items-center justify-center text-sm text-neutral-500">Select a trip to load map locations.</div>
                 ) : (
-                  <div ref={mapContainerRef} className="h-full w-full rounded-xl overflow-hidden" />
+                  <TripMap
+                    active={activeTab === 'map'}
+                    mapPoints={mapPoints}
+                    mapCategoryVisible={mapCategoryVisible}
+                    stays={stays}
+                    visitPlaces={visitPlaces}
+                    flights={bookings.flights}
+                    rentalCars={bookings.rentalCars}
+                    restaurants={bookings.restaurants}
+                    country={selectedTrip.country}
+                    tripEndDate={selectedTrip.endDate}
+                    resolvedPointCoords={resolvedPointCoords}
+                    cameraFingerprint={mapCameraFingerprint}
+                  />
                 )}
               </div>
 
@@ -9122,30 +8321,10 @@ export default function App() {
           </div>
         )}
         </main>
+        </div>
       </div>
 
-      <div className="pointer-events-none fixed inset-0 z-[120]">
-        {confettiBursts.map((burst) => (
-          <div key={burst.id} className="confetti-burst" style={{ left: `${burst.x}px`, top: `${burst.y}px` }}>
-            {Array.from({ length: 20 }).map((_, idx) => {
-              const angle = (Math.PI * 2 * idx) / 20
-              const distance = 40 + (idx % 5) * 14
-              const dx = Math.cos(angle) * distance
-              const dy = Math.sin(angle) * distance - 48
-              const hue = (idx * 37) % 360
-              const style = {
-                '--dx': `${dx}px`,
-                '--dy': `${dy}px`,
-                '--hue': `${hue}`,
-                '--delay': `${(idx % 6) * 0.02}s`,
-              } as CSSProperties
-              return <span key={idx} className="confetti-piece" style={style} />
-            })}
-          </div>
-        ))}
-      </div>
-
-      <footer className="bg-neutral-900 text-white/50 py-10 px-4 text-center text-sm mt-10">
+      <footer className="relative z-10 bg-neutral-900 text-white/50 py-10 px-4 text-center text-sm">
         <p className="mb-2">{BRAND_FOOTER_TAGLINE}</p>
         <p>Local-first • Saved in your browser</p>
       </footer>
@@ -9161,72 +8340,3 @@ export default function App() {
   )
 }
 
-function MustDoRow({
-  item,
-  onToggle,
-  onDelete,
-  onEdit,
-}: {
-  item: MustDo
-  onToggle: (event: ChangeEvent<HTMLInputElement>) => void
-  onDelete: () => void
-  onEdit: (text: string) => void
-}) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(item.text)
-  useEffect(() => setDraft(item.text), [item.text])
-
-  return (
-    <div className="flex items-start justify-between gap-4 p-4 rounded-2xl border border-neutral-100 hover:bg-gradient-to-r hover:from-blue-50/70 hover:to-indigo-50/60 transition-colors shadow-sm">
-      <div className="flex items-start gap-3 flex-1">
-        <input type="checkbox" checked={item.done} onChange={onToggle} className="mt-1 h-4 w-4" />
-        <div className="flex-1">
-          {editing ? (
-            <form
-              className="flex gap-2"
-              onSubmit={(e) => {
-                e.preventDefault()
-                const t = draft.trim()
-                if (!t) return
-                onEdit(t)
-                setEditing(false)
-              }}
-            >
-              <input
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                className="flex-1 px-3 py-2 rounded-lg border border-neutral-200 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-              />
-              <button type="submit" className="px-3 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold hover:from-blue-500 hover:to-indigo-500">
-                Save
-              </button>
-              <button
-                type="button"
-                className="px-3 py-2 rounded-lg border border-neutral-200 hover:bg-neutral-50"
-                onClick={() => {
-                  setDraft(item.text)
-                  setEditing(false)
-                }}
-              >
-                Cancel
-              </button>
-            </form>
-          ) : (
-            <div className={`text-sm leading-relaxed ${item.done ? 'line-through text-neutral-400' : 'text-neutral-800'}`}>{item.text}</div>
-          )}
-        </div>
-      </div>
-
-      {!editing ? (
-        <div className="flex gap-2">
-          <button type="button" onClick={() => setEditing(true)} className="px-3 py-2 rounded-lg border border-neutral-200 hover:bg-neutral-50 text-sm shadow-sm">
-            Edit
-          </button>
-          <button type="button" onClick={onDelete} className="px-3 py-2 rounded-lg border border-neutral-200 hover:bg-rose-50 text-sm shadow-sm">
-            Delete
-          </button>
-        </div>
-      ) : null}
-    </div>
-  )
-}

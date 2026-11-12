@@ -35,6 +35,8 @@ export type Stay = {
   confirmationRef: string
   activities: StayActivity[]
   createdAt: number
+  lat?: number
+  lon?: number
 }
 
 export type StayActivity = {
@@ -55,6 +57,8 @@ export type StayActivity = {
   primaryType?: string
   types?: string[]
   createdAt: number
+  lat?: number
+  lon?: number
 }
 
 export type CarBooking = {
@@ -69,6 +73,10 @@ export type CarBooking = {
   confirmation: string
   price: string
   createdAt: number
+  pickupLat?: number
+  pickupLon?: number
+  dropoffLat?: number
+  dropoffLon?: number
 }
 
 export type FlightBooking = {
@@ -100,6 +108,8 @@ export type RestaurantBooking = {
   cost: string
   notes: string
   createdAt: number
+  lat?: number
+  lon?: number
 }
 
 export type AccommodationBooking = {

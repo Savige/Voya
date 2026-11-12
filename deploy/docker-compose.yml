@@ -1,23 +1,36 @@
-# Waypoint static site. Run from repo root:
-#   docker compose -f deploy/docker-compose.yml up -d --build
-# Compose loads deploy/.env (same directory as this file). deploy/.env is a symlink to .env.production — edit deploy/.env.production.
-# If you use --env-file: from repo root use deploy/.env.production; from inside deploy/ use .env.production (not deploy/.env.production or the path doubles).
-# Supabase runs separately (official docker stack); see deploy/SUPABASE.md
+# Waypoint on Synology (or any Docker host). From repo root:
+#   docker-compose -f deploy/docker-compose.yml up -d --build
+#
+# Compose loads env from deploy/.env (symlink to .env.production) when present.
+# Production: https://waypoint.ryansavige.com  +  https://pocketbase.ryansavige.com
 
 services:
+  pocketbase:
+    build:
+      context: ../pocketbase
+      dockerfile: Dockerfile
+    # If recreate fails with btrfs "device busy", run as waypoint-pb2 instead:
+    #   docker run -d --name waypoint-pb2 --restart unless-stopped -p 8090:8090 \
+    #     -v .../pb_data:/pb/pb_data -v .../pb_hooks:/pb/pb_hooks waypoint_pocketbase:latest
+    container_name: waypoint-pocketbase
+    volumes:
+      - ../pocketbase/pb_data:/pb/pb_data
+      - ../pocketbase/pb_hooks:/pb/pb_hooks
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+
   waypoint:
     build:
       context: ..
       dockerfile: Dockerfile
       args:
-        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
-        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
-        VITE_GOOGLE_MAPS_API_KEY: ${VITE_GOOGLE_MAPS_API_KEY}
-        VITE_GOOGLE_MAPS_MAP_ID: ${VITE_GOOGLE_MAPS_MAP_ID}
-        VITE_APP_BUILD: ${VITE_APP_BUILD:-}
+        VITE_POCKETBASE_URL: ${VITE_POCKETBASE_URL:-https://pocketbase.ryansavige.com}
+        VITE_APP_BUILD: ${VITE_APP_BUILD:-synology}
         BUILD_NUMBER: ${BUILD_NUMBER:-}
+    container_name: waypoint
     ports:
-      # Publish on all interfaces so Nginx Proxy Manager (Docker) can reach the host via 172.17.0.1:8081.
-      # Block 8081 from the WAN in your firewall if this host is public.
       - "8081:80"
+    depends_on:
+      - pocketbase
     restart: unless-stopped
