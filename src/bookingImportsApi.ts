@@ -52,6 +52,127 @@ export async function listPendingBookingImports(): Promise<BookingImportRecord[]
   return rows.map((r) => asImportRecord(r as unknown as Record<string, unknown>))
 }
 
+/** Applied imports still keep `parsed` — used to backfill trip lodging/money. */
+export async function listAppliedBookingImports(): Promise<BookingImportRecord[]> {
+  if (!isSupabaseConfigured()) return []
+  const pb = getPocketBase()
+  if (!pb.authStore.isValid) return []
+  const rows = await pb.collection('booking_imports').getFullList({
+    filter: 'status = "applied"',
+    sort: '-id',
+    requestKey: null,
+  })
+  return rows.map((r) => asImportRecord(r as unknown as Record<string, unknown>))
+}
+
+/**
+ * Copy parsed fields from booking_imports onto the trip without wiping known values.
+ * Fixes the gap where Budget reads trip lodgings but money only lived on the import row.
+ */
+export function enrichTripFromImportParses(trip: Trip, parses: ParsedBookingFields[]): Trip {
+  let next = trip
+  let dirty = false
+  for (const parsed of parses) {
+    const confirmation = (parsed.confirmation || '').trim()
+    if (!confirmation) continue
+    if (parsed.kind === 'accommodation') {
+      if (!tripHasConfirmation(next, confirmation)) {
+        try {
+          next = applyParsedBookingToTrip(next, parsed)
+          dirty = true
+        } catch {
+          // Stay dates may not match yet — leave for manual Apply.
+        }
+        continue
+      }
+      const key = confKey(confirmation)
+      const prevBooking = next.bookings.accommodations.find((x) => confKey(x.confirmation) === key)
+      let prevLodging: StopAccommodation | null = null
+      for (const s of next.stays || []) {
+        const hit = stayAccommodations(s).find((a) => confKey(a.confirmationRef) === key)
+        if (hit) {
+          prevLodging = hit
+          break
+        }
+      }
+      const lodging = mergeLodgingFromParsed(parsed, confirmation, prevLodging, prevBooking)
+      const before = JSON.stringify({
+        lodging: prevLodging,
+        booking: prevBooking
+          ? {
+              price: prevBooking.price,
+              amountPaid: prevBooking.amountPaid,
+              amountOwing: prevBooking.amountOwing,
+              photoUrl: prevBooking.photoUrl,
+            }
+          : null,
+      })
+      const after = JSON.stringify({
+        lodging,
+        booking: {
+          price: lodging.price,
+          amountPaid: lodging.amountPaid,
+          amountOwing: lodging.amountOwing,
+          photoUrl: lodging.photoUrl,
+        },
+      })
+      if (before === after) continue
+      dirty = true
+      next = {
+        ...next,
+        stays: next.stays.map((s) => {
+          const list = stayAccommodations(s)
+          if (!list.some((a) => confKey(a.confirmationRef) === key)) return s
+          return {
+            ...s,
+            accommodations: list.map((a) => (confKey(a.confirmationRef) === key ? lodging : a)),
+          }
+        }),
+        bookings: {
+          ...next.bookings,
+          accommodations: upsertByConfirmation(next.bookings.accommodations, {
+            id: prevBooking?.id || lodging.id,
+            name: lodging.name,
+            checkIn: lodging.checkIn,
+            checkOut: lodging.checkOut,
+            confirmation,
+            address: lodging.address,
+            price: lodging.price,
+            ...(lodging.amountPaid ? { amountPaid: lodging.amountPaid } : {}),
+            ...(lodging.amountOwing ? { amountOwing: lodging.amountOwing } : {}),
+            ...(lodging.priceOriginal ? { priceOriginal: lodging.priceOriginal } : {}),
+            ...(lodging.amountPaidOriginal
+              ? { amountPaidOriginal: lodging.amountPaidOriginal }
+              : {}),
+            ...(lodging.amountOwingOriginal
+              ? { amountOwingOriginal: lodging.amountOwingOriginal }
+              : {}),
+            ...(lodging.currency ? { currency: lodging.currency } : {}),
+            bookingUrl: lodging.bookingUrl,
+            ...(lodging.photoUrl ? { photoUrl: lodging.photoUrl } : {}),
+            checkInTime: lodging.checkInTime,
+            checkOutTime: lodging.checkOutTime,
+            createdAt: prevBooking?.createdAt || Date.now(),
+          }),
+        },
+      }
+      continue
+    }
+    // Flights / cars / restaurants: only fill if the confirmation already exists.
+    if (!tripHasConfirmation(next, confirmation)) continue
+    try {
+      const updated = applyParsedBookingToTrip(next, parsed)
+      if (updated !== next) {
+        next = updated
+        dirty = true
+      }
+    } catch {
+      /* ignore partial parses */
+    }
+  }
+  return dirty ? enrichTripLodgingDates(next) : trip
+}
+
 export async function updateBookingImportStatus(
   id: string,
   status: BookingImportStatus,
@@ -121,25 +242,67 @@ export async function withDisplayCurrency(
   }
 }
 
-function stopAccommodationFromParsed(parsed: ParsedBookingFields, confirmation: string): StopAccommodation {
+/** Prefer the first non-empty trimmed string (re-forwards must not wipe known fields). */
+function pickStr(...vals: Array<string | undefined | null>): string {
+  for (const v of vals) {
+    const t = String(v ?? '').trim()
+    if (t) return t
+  }
+  return ''
+}
+
+function optionalStr(...vals: Array<string | undefined | null>): string | undefined {
+  const t = pickStr(...vals)
+  return t || undefined
+}
+
+/**
+ * Build lodging from a parse, filling blanks from the existing stay lodging /
+ * bookings mirror so a thinner re-forward never erases money, dates, photo, etc.
+ */
+function mergeLodgingFromParsed(
+  parsed: ParsedBookingFields,
+  confirmation: string,
+  prevLodging: StopAccommodation | null,
+  prevBooking: AccommodationBooking | undefined,
+): StopAccommodation {
+  const amountPaid = optionalStr(parsed.amountPaid, prevLodging?.amountPaid, prevBooking?.amountPaid)
+  const amountOwing = optionalStr(parsed.amountOwing, prevLodging?.amountOwing, prevBooking?.amountOwing)
+  const priceOriginal = optionalStr(
+    parsed.priceOriginal,
+    prevLodging?.priceOriginal,
+    prevBooking?.priceOriginal,
+  )
+  const amountPaidOriginal = optionalStr(
+    parsed.amountPaidOriginal,
+    prevLodging?.amountPaidOriginal,
+    prevBooking?.amountPaidOriginal,
+  )
+  const amountOwingOriginal = optionalStr(
+    parsed.amountOwingOriginal,
+    prevLodging?.amountOwingOriginal,
+    prevBooking?.amountOwingOriginal,
+  )
+  const currency = optionalStr(parsed.currency, prevLodging?.currency, prevBooking?.currency)
+  const photoUrl = optionalStr(parsed.photoUrl, prevLodging?.photoUrl, prevBooking?.photoUrl)
   return {
-    id: uid(),
-    name: (parsed.name || 'Accommodation').trim(),
-    address: (parsed.address || '').trim(),
-    checkIn: (parsed.checkIn || '').trim(),
-    checkOut: (parsed.checkOut || '').trim(),
-    checkInTime: (parsed.checkInTime || '').trim(),
-    checkOutTime: (parsed.checkOutTime || '').trim(),
-    price: (parsed.price || '').trim(),
-    ...(parsed.amountPaid ? { amountPaid: parsed.amountPaid.trim() } : {}),
-    ...(parsed.amountOwing ? { amountOwing: parsed.amountOwing.trim() } : {}),
-    ...(parsed.priceOriginal ? { priceOriginal: parsed.priceOriginal.trim() } : {}),
-    ...(parsed.amountPaidOriginal ? { amountPaidOriginal: parsed.amountPaidOriginal.trim() } : {}),
-    ...(parsed.amountOwingOriginal ? { amountOwingOriginal: parsed.amountOwingOriginal.trim() } : {}),
-    ...(parsed.currency ? { currency: parsed.currency.trim() } : {}),
-    bookingUrl: (parsed.bookingUrl || '').trim(),
+    id: prevLodging?.id || uid(),
+    name: pickStr(parsed.name, prevLodging?.name, prevBooking?.name, 'Accommodation'),
+    address: pickStr(parsed.address, prevLodging?.address, prevBooking?.address),
+    checkIn: pickStr(parsed.checkIn, prevLodging?.checkIn, prevBooking?.checkIn),
+    checkOut: pickStr(parsed.checkOut, prevLodging?.checkOut, prevBooking?.checkOut),
+    checkInTime: pickStr(parsed.checkInTime, prevLodging?.checkInTime, prevBooking?.checkInTime),
+    checkOutTime: pickStr(parsed.checkOutTime, prevLodging?.checkOutTime, prevBooking?.checkOutTime),
+    price: pickStr(parsed.price, prevLodging?.price, prevBooking?.price),
+    ...(amountPaid ? { amountPaid } : {}),
+    ...(amountOwing ? { amountOwing } : {}),
+    ...(priceOriginal ? { priceOriginal } : {}),
+    ...(amountPaidOriginal ? { amountPaidOriginal } : {}),
+    ...(amountOwingOriginal ? { amountOwingOriginal } : {}),
+    ...(currency ? { currency } : {}),
+    bookingUrl: pickStr(parsed.bookingUrl, prevLodging?.bookingUrl, prevBooking?.bookingUrl),
     confirmationRef: confirmation,
-    ...(parsed.photoUrl ? { photoUrl: parsed.photoUrl.trim() } : {}),
+    ...(photoUrl ? { photoUrl } : {}),
   }
 }
 
@@ -190,27 +353,30 @@ export function applyParsedBookingToTrip(trip: Trip, parsed: ParsedBookingFields
     const prev = bookings.flights.find((x) => confKey(x.confirmation) === key)
     const flight: FlightBooking = {
       id: prev?.id || uid(),
-      route: fromIata && toIata ? `${fromIata} → ${toIata}` : prev?.route || 'Flight',
-      fromIata: fromIata || prev?.fromIata || '',
-      toIata: toIata || prev?.toIata || '',
-      fromLabel: parsed.fromLabel || fromIata || prev?.fromLabel || '',
-      toLabel: parsed.toLabel || toIata || prev?.toLabel || '',
-      airline: parsed.airline || prev?.airline || '',
-      flightNumber: prev?.flightNumber || '',
-      bookingStatus: prev?.bookingStatus || 'Booked',
-      departTerminal: prev?.departTerminal || '',
-      seat: prev?.seat || '',
-      notes: prev?.notes || '',
-      departDate: parsed.departDate || prev?.departDate || '',
-      departTime: parsed.departTime || prev?.departTime || '',
-      arriveDate: parsed.arriveDate || parsed.departDate || prev?.arriveDate || '',
-      arriveTime: parsed.arriveTime || prev?.arriveTime || '',
-      returnDate: prev?.returnDate || '',
+      route:
+        fromIata && toIata
+          ? `${fromIata} → ${toIata}`
+          : pickStr(prev?.route, 'Flight'),
+      fromIata: pickStr(fromIata, prev?.fromIata),
+      toIata: pickStr(toIata, prev?.toIata),
+      fromLabel: pickStr(parsed.fromLabel, fromIata, prev?.fromLabel),
+      toLabel: pickStr(parsed.toLabel, toIata, prev?.toLabel),
+      airline: pickStr(parsed.airline, prev?.airline),
+      flightNumber: pickStr(prev?.flightNumber),
+      bookingStatus: pickStr(prev?.bookingStatus, 'Booked'),
+      departTerminal: pickStr(prev?.departTerminal),
+      seat: pickStr(prev?.seat),
+      notes: pickStr(prev?.notes),
+      departDate: pickStr(parsed.departDate, prev?.departDate),
+      departTime: pickStr(parsed.departTime, prev?.departTime),
+      arriveDate: pickStr(parsed.arriveDate, parsed.departDate, prev?.arriveDate),
+      arriveTime: pickStr(parsed.arriveTime, prev?.arriveTime),
+      returnDate: pickStr(prev?.returnDate),
       checkedBags: prev?.checkedBags ?? 1,
       carryOnBags: prev?.carryOnBags ?? 1,
       personalItem: prev?.personalItem ?? true,
       confirmation,
-      price: parsed.price || prev?.price || '',
+      price: pickStr(parsed.price, prev?.price),
       createdAt: prev?.createdAt || createdAt,
     }
     bookings.flights = upsertByConfirmation(bookings.flights, flight)
@@ -218,41 +384,37 @@ export function applyParsedBookingToTrip(trip: Trip, parsed: ParsedBookingFields
     const prev = bookings.rentalCars.find((x) => confKey(x.confirmation) === key)
     const car: CarBooking = {
       id: prev?.id || uid(),
-      company: parsed.company || prev?.company || 'Rental car',
-      pickupLocation: parsed.pickupLocation || prev?.pickupLocation || '',
-      dropoffLocation:
-        parsed.dropoffLocation || parsed.pickupLocation || prev?.dropoffLocation || prev?.pickupLocation || '',
-      pickupDate: parsed.pickupDate || prev?.pickupDate || '',
-      pickupTime: parsed.pickupTime || prev?.pickupTime || '',
-      dropoffDate: parsed.dropoffDate || prev?.dropoffDate || '',
-      dropoffTime: parsed.dropoffTime || prev?.dropoffTime || '',
+      company: pickStr(parsed.company, prev?.company, 'Rental car'),
+      pickupLocation: pickStr(parsed.pickupLocation, prev?.pickupLocation),
+      dropoffLocation: pickStr(
+        parsed.dropoffLocation,
+        parsed.pickupLocation,
+        prev?.dropoffLocation,
+        prev?.pickupLocation,
+      ),
+      pickupDate: pickStr(parsed.pickupDate, prev?.pickupDate),
+      pickupTime: pickStr(parsed.pickupTime, prev?.pickupTime),
+      dropoffDate: pickStr(parsed.dropoffDate, prev?.dropoffDate),
+      dropoffTime: pickStr(parsed.dropoffTime, prev?.dropoffTime),
       confirmation,
-      price: parsed.price || prev?.price || '',
+      price: pickStr(parsed.price, prev?.price),
       createdAt: prev?.createdAt || createdAt,
     }
     bookings.rentalCars = upsertByConfirmation(bookings.rentalCars, car)
   } else if (parsed.kind === 'restaurant') {
     const prev = bookings.restaurants.find((x) => confKey(x.confirmation) === key)
+    const noteBits = [parsed.reservationTime, parsed.location, parsed.notes].filter(Boolean)
     const row: RestaurantBooking = {
       id: prev?.id || uid(),
-      name: parsed.name || prev?.name || 'Reservation',
-      reservationDate: parsed.reservationDate || prev?.reservationDate || '',
+      name: pickStr(parsed.name, prev?.name, 'Reservation'),
+      reservationDate: pickStr(parsed.reservationDate, prev?.reservationDate),
       confirmation,
-      cost: parsed.price || prev?.cost || '',
-      notes:
-        [parsed.reservationTime, parsed.location, parsed.notes].filter(Boolean).join(' · ') ||
-        prev?.notes ||
-        '',
+      cost: pickStr(parsed.price, prev?.cost),
+      notes: noteBits.length ? noteBits.join(' · ') : pickStr(prev?.notes),
       createdAt: prev?.createdAt || createdAt,
     }
     bookings.restaurants = upsertByConfirmation(bookings.restaurants, row)
   } else if (parsed.kind === 'accommodation') {
-    const address = (parsed.address || '').trim()
-    if (!address) {
-      throw new Error(
-        'Parsed email is missing a property address — add it before applying, or re-forward a fuller confirmation',
-      )
-    }
     const prevBooking = bookings.accommodations.find((x) => confKey(x.confirmation) === key)
     let prevLodging: StopAccommodation | null = null
     for (const s of trip.stays || []) {
@@ -262,17 +424,23 @@ export function applyParsedBookingToTrip(trip: Trip, parsed: ParsedBookingFields
         break
       }
     }
-    const lodging = stopAccommodationFromParsed(parsed, confirmation)
-    // Keep a good prior photo when the new parse has none / a bad chrome URL.
-    if (!lodging.photoUrl && (prevLodging?.photoUrl || prevBooking?.photoUrl)) {
-      lodging.photoUrl = prevLodging?.photoUrl || prevBooking?.photoUrl
+    const lodging = mergeLodgingFromParsed(parsed, confirmation, prevLodging, prevBooking)
+    if (!lodging.address) {
+      throw new Error(
+        'Parsed email is missing a property address — add it before applying, or re-forward a fuller confirmation',
+      )
     }
-    if (prevLodging?.id) lodging.id = prevLodging.id
 
-    const match = findStayForAccommodation(trip, parsed)
+    const match = findStayForAccommodation(trip, {
+      ...parsed,
+      checkIn: lodging.checkIn || parsed.checkIn,
+      checkOut: lodging.checkOut || parsed.checkOut,
+      name: lodging.name || parsed.name,
+      address: lodging.address || parsed.address,
+    })
     if (!match) {
       throw new Error(
-        `No place stop matches ${parsed.checkIn || 'these dates'} — add the town/dates on Planner first, then apply`,
+        `No place stop matches ${lodging.checkIn || parsed.checkIn || 'these dates'} — add the town/dates on Planner first, then apply`,
       )
     }
 
@@ -294,22 +462,22 @@ export function applyParsedBookingToTrip(trip: Trip, parsed: ParsedBookingFields
 
     const row: AccommodationBooking = {
       id: prevBooking?.id || uid(),
-      name: lodging.name || prevBooking?.name || 'Accommodation',
-      checkIn: parsed.checkIn || prevBooking?.checkIn || '',
-      checkOut: parsed.checkOut || prevBooking?.checkOut || '',
+      name: lodging.name,
+      checkIn: lodging.checkIn,
+      checkOut: lodging.checkOut,
       confirmation,
-      address: address || prevBooking?.address,
-      price: lodging.price || prevBooking?.price,
-      amountPaid: lodging.amountPaid || prevBooking?.amountPaid,
-      amountOwing: lodging.amountOwing || prevBooking?.amountOwing,
-      priceOriginal: lodging.priceOriginal || prevBooking?.priceOriginal,
-      amountPaidOriginal: lodging.amountPaidOriginal || prevBooking?.amountPaidOriginal,
-      amountOwingOriginal: lodging.amountOwingOriginal || prevBooking?.amountOwingOriginal,
-      currency: lodging.currency || prevBooking?.currency,
-      bookingUrl: lodging.bookingUrl || prevBooking?.bookingUrl,
-      photoUrl: lodging.photoUrl || prevBooking?.photoUrl,
-      checkInTime: lodging.checkInTime || prevBooking?.checkInTime,
-      checkOutTime: lodging.checkOutTime || prevBooking?.checkOutTime,
+      address: lodging.address,
+      price: lodging.price,
+      ...(lodging.amountPaid ? { amountPaid: lodging.amountPaid } : {}),
+      ...(lodging.amountOwing ? { amountOwing: lodging.amountOwing } : {}),
+      ...(lodging.priceOriginal ? { priceOriginal: lodging.priceOriginal } : {}),
+      ...(lodging.amountPaidOriginal ? { amountPaidOriginal: lodging.amountPaidOriginal } : {}),
+      ...(lodging.amountOwingOriginal ? { amountOwingOriginal: lodging.amountOwingOriginal } : {}),
+      ...(lodging.currency ? { currency: lodging.currency } : {}),
+      bookingUrl: lodging.bookingUrl,
+      ...(lodging.photoUrl ? { photoUrl: lodging.photoUrl } : {}),
+      checkInTime: lodging.checkInTime,
+      checkOutTime: lodging.checkOutTime,
       createdAt: prevBooking?.createdAt || createdAt,
     }
     bookings.accommodations = upsertByConfirmation(bookings.accommodations, row)

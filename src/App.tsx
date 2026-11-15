@@ -142,6 +142,8 @@ import type { BookingImportRecord } from './bookingEmailTypes'
 import { suggestTripIdForParsed } from './bookingEmailParse'
 import {
   applyParsedBookingToTrip,
+  enrichTripFromImportParses,
+  listAppliedBookingImports,
   withDisplayCurrency,
   listPendingBookingImports,
   pasteBookingEmail,
@@ -2708,6 +2710,7 @@ export default function App() {
    */
   const dashboardToolbarRef = useRef<HTMLElement | null>(null)
   const dashboardTripToRef = useRef<HTMLElement | null>(null)
+  const navStuckHeroRef = useRef<HTMLDivElement | null>(null)
   const [dashboardToolbarHeight, setDashboardToolbarHeight] = useState(64)
   const [dashboardTripToHeight, setDashboardTripToHeight] = useState(320)
   const [dashboardNavHeight, setDashboardNavHeight] = useState(102)
@@ -2742,6 +2745,28 @@ export default function App() {
   // Pull nav up so its clear top half overlaps the real hero (nav used to start
   // exactly where the hero band ended, so “transparent” only ever showed black).
   const dashboardNavHeroOverlap = Math.round(dashboardNavHeight * 0.5)
+
+  // When the trip nav is stuck under the toolbar, show a toolbar-aligned hero
+  // mask on the clear top half so scrolling cards can’t paint through it.
+  // No content clip-path — that lagged on scroll and opened a hero gap.
+  useEffect(() => {
+    if (view !== 'dashboard') return
+    const syncNavChrome = () => {
+      const nav = tripNavRef.current
+      const underlay = navStuckHeroRef.current
+      if (!nav || !underlay) return
+      const stuck = nav.getBoundingClientRect().top <= dashboardToolbarHeight + 0.5
+      const mapChrome = activeTab === 'map' && mapGlobeChrome
+      underlay.hidden = !stuck || mapChrome
+    }
+    syncNavChrome()
+    window.addEventListener('scroll', syncNavChrome, { passive: true })
+    window.addEventListener('resize', syncNavChrome)
+    return () => {
+      window.removeEventListener('scroll', syncNavChrome)
+      window.removeEventListener('resize', syncNavChrome)
+    }
+  }, [view, activeTab, mapGlobeChrome, dashboardToolbarHeight])
 
   const handleConfirmDialogAction = () => {
     if (!confirmDialog) return
@@ -3076,8 +3101,27 @@ export default function App() {
       return
     }
     try {
-      const rows = await listPendingBookingImports()
-      setPendingBookingImports(rows)
+      const [pending, applied] = await Promise.all([
+        listPendingBookingImports(),
+        listAppliedBookingImports(),
+      ])
+      setPendingBookingImports(pending)
+      // booking_imports.parsed holds money/dates even when the trip lodging row
+      // was saved without them — copy blanks onto the trip for Budget / Planner.
+      if (applied.length && !tripIsReadOnly) {
+        const parses = await Promise.all(
+          applied.map((row) => withDisplayCurrency(row.parsed, displayCurrency)),
+        )
+        setState((prev) => {
+          let changed = false
+          const trips = prev.trips.map((t) => {
+            const next = enrichTripFromImportParses(t, parses)
+            if (next !== t) changed = true
+            return next
+          })
+          return changed ? { ...prev, trips } : prev
+        })
+      }
     } catch (err) {
       console.warn('booking_imports list:', err)
     }
@@ -6656,10 +6700,10 @@ export default function App() {
       />
 
       {/*
-        Sticky trip tabs — pins under toolbar. No hero “snapshot” crops in the nav:
-        top half stays truly transparent so the real fixed hero shows through.
-        Map: bottom half also clear (stars start at mid-nav).
-        Other tabs: solid black bottom half only.
+        Sticky trip tabs — pins under toolbar.
+        Top half: clear over the real hero when free; when stuck, a toolbar-aligned
+        mask (same crop as the header) so cards can’t show through.
+        Bottom half: solid sheet (Map leaves this clear for stars).
       */}
       <nav
         ref={tripNavRef}
@@ -6667,15 +6711,42 @@ export default function App() {
         style={{ top: dashboardToolbarHeight }}
         aria-label="Trip sections"
       >
-        {!(activeTab === 'map' && mapGlobeChrome) ? (
+        {/*
+          Stuck mask covers the full nav band so cards never peek through (no
+          scroll-synced clip-path). Top half keeps the toolbar-aligned hero;
+          bottom half is solid sheet. Hidden until the nav sticks.
+        */}
+        <div
+          ref={navStuckHeroRef}
+          className="pointer-events-none absolute inset-0 overflow-hidden"
+          aria-hidden
+          hidden
+        >
           <div
-            className="pointer-events-none absolute inset-0"
-            aria-hidden
+            className="absolute inset-x-0"
+            style={{
+              top: -dashboardToolbarHeight,
+              height: dashboardHeroBandHeight,
+            }}
+          >
+            <img
+              src={dashboardHeroUrl || DEFAULT_HERO_IMAGE}
+              className="absolute inset-0 h-full w-full object-cover object-top"
+              alt=""
+              decoding="async"
+            />
+            <div className="absolute inset-0 bg-gradient-to-b from-black/50 via-black/35 to-black/70" />
+          </div>
+          <div
+            className="absolute inset-0"
             style={{
               background:
                 'linear-gradient(to bottom, transparent 0%, transparent 50%, #0a0a0a 50%, #0a0a0a 100%)',
             }}
           />
+        </div>
+        {!(activeTab === 'map' && mapGlobeChrome) ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/2 bg-neutral-950" aria-hidden />
         ) : null}
         <div className="relative z-10 mx-auto max-w-5xl">
           <div className="overflow-x-auto overscroll-x-contain rounded-2xl border border-white/70 bg-white/90 p-1.5 shadow-2xl backdrop-blur-md [scrollbar-width:thin] dark:border-neutral-700/80 dark:bg-neutral-900/90 sm:p-2.5">

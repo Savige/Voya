@@ -1,26 +1,25 @@
 name: Deploy Waypoint
 
+# Synology is on LAN only — GitHub-hosted runners cannot reach 192.168.1.x.
+# Deploy from a self-hosted runner on the home Mac (labels: self-hosted, macOS, synology-lan).
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
   group: deploy-waypoint
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, synology-lan]
     steps:
-      - name: SSH and run deploy script
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script_stop: true
-          script: |
-            cd ${{ secrets.DEPLOY_PATH }}
-            ./deploy/deploy.sh
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to Synology over LAN
+        run: |
+          set -euo pipefail
+          chmod +x deploy/ci-deploy-nas.sh
+          ./deploy/ci-deploy-nas.sh

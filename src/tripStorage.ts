@@ -110,6 +110,13 @@ type BookingDateRow = {
   checkInTime?: unknown
   checkOutTime?: unknown
   photoUrl?: unknown
+  price?: unknown
+  amountPaid?: unknown
+  amountOwing?: unknown
+  priceOriginal?: unknown
+  amountPaidOriginal?: unknown
+  amountOwingOriginal?: unknown
+  currency?: unknown
 }
 
 /**
@@ -143,12 +150,29 @@ export function enrichAccommodationsFromBookings(
     const checkInTime = lodging.checkInTime || String(match.checkInTime ?? '').trim()
     const checkOutTime = lodging.checkOutTime || String(match.checkOutTime ?? '').trim()
     const photoUrl = lodging.photoUrl || String(match.photoUrl ?? '').trim() || undefined
+    const price = lodging.price || String(match.price ?? '').trim()
+    const amountPaid = lodging.amountPaid || String(match.amountPaid ?? '').trim() || undefined
+    const amountOwing = lodging.amountOwing || String(match.amountOwing ?? '').trim() || undefined
+    const priceOriginal =
+      lodging.priceOriginal || String(match.priceOriginal ?? '').trim() || undefined
+    const amountPaidOriginal =
+      lodging.amountPaidOriginal || String(match.amountPaidOriginal ?? '').trim() || undefined
+    const amountOwingOriginal =
+      lodging.amountOwingOriginal || String(match.amountOwingOriginal ?? '').trim() || undefined
+    const currency = lodging.currency || String(match.currency ?? '').trim() || undefined
     return {
       ...lodging,
       checkIn: bIn || lodging.checkIn,
       checkOut: bOut || bIn || lodging.checkOut,
       checkInTime,
       checkOutTime,
+      price,
+      ...(amountPaid ? { amountPaid } : {}),
+      ...(amountOwing ? { amountOwing } : {}),
+      ...(priceOriginal ? { priceOriginal } : {}),
+      ...(amountPaidOriginal ? { amountPaidOriginal } : {}),
+      ...(amountOwingOriginal ? { amountOwingOriginal } : {}),
+      ...(currency ? { currency } : {}),
       ...(photoUrl ? { photoUrl } : {}),
     }
   })

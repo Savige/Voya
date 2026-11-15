@@ -150,22 +150,108 @@ export function buildTripBudgetSummary(
     )
   }
 
-  // Prefer stay lodgings (planner source of truth) over bookings.accommodations mirror.
+  /** Prefer a non-zero total; never let "NZD 0" paid hide price/owing. */
+  const pickLodgingAmount = (row: {
+    price?: string
+    amountPaid?: string
+    amountOwing?: string
+    priceOriginal?: string
+    amountPaidOriginal?: string
+    amountOwingOriginal?: string
+  }): { amountRaw: string; originalRaw?: string } => {
+    const price = (row.price || '').trim()
+    const paid = (row.amountPaid || '').trim()
+    const owing = (row.amountOwing || '').trim()
+    const priceN = moneyStringToAud(price, snapshot)
+    if (price && priceN !== 0) {
+      return {
+        amountRaw: price,
+        originalRaw: (row.priceOriginal || '').trim() || undefined,
+      }
+    }
+    const paidN = moneyStringToAud(paid, snapshot)
+    const owingN = moneyStringToAud(owing, snapshot)
+    if (owing && owingN !== 0 && (!paid || paidN === 0)) {
+      return {
+        amountRaw: owing,
+        originalRaw: (row.amountOwingOriginal || '').trim() || undefined,
+      }
+    }
+    if (paid && paidN !== 0) {
+      return {
+        amountRaw: paid,
+        originalRaw: (row.amountPaidOriginal || '').trim() || undefined,
+      }
+    }
+    if (owing) {
+      return {
+        amountRaw: owing,
+        originalRaw: (row.amountOwingOriginal || '').trim() || undefined,
+      }
+    }
+    if (price) {
+      return {
+        amountRaw: price,
+        originalRaw: (row.priceOriginal || '').trim() || undefined,
+      }
+    }
+    if (paid) {
+      return {
+        amountRaw: paid,
+        originalRaw: (row.amountPaidOriginal || '').trim() || undefined,
+      }
+    }
+    return { amountRaw: '' }
+  }
+
+  // Stay lodgings are the planner source of truth. Also pick up orphan rows
+  // still only on bookings.accommodations (or stay rows with empty money).
+  const lodgingIds = new Set<string>()
+  const lodgingConfs = new Set<string>()
+  const lodgingConfHasMoney = new Set<string>()
   for (const stay of trip.stays || []) {
     for (const lodging of stayAccommodations(stay)) {
+      lodgingIds.add(lodging.id)
+      const conf = lodging.confirmationRef.trim().toLowerCase()
+      if (conf) lodgingConfs.add(conf)
+      const { amountRaw, originalRaw } = pickLodgingAmount(lodging)
+      if (conf && amountRaw && moneyStringToAud(amountRaw, snapshot) !== 0) {
+        lodgingConfHasMoney.add(conf)
+      }
       pushItem(
         lines,
         {
           id: `lodging:${lodging.id}`,
           category: 'lodging',
           label: lodging.name || lodging.confirmationRef || stay.location || 'Accommodation',
-          amountRaw: lodging.price,
-          originalRaw: lodging.priceOriginal,
+          amountRaw,
+          originalRaw,
           currency: lodging.currency,
         },
         snapshot,
       )
     }
+  }
+  for (const row of bookings?.accommodations || []) {
+    const conf = String(row.confirmation || '')
+      .trim()
+      .toLowerCase()
+    // Skip only when this confirmation already contributed a non-zero stay line.
+    if (conf && lodgingConfHasMoney.has(conf)) continue
+    if (!conf && lodgingIds.has(row.id)) continue
+    const { amountRaw, originalRaw } = pickLodgingAmount(row)
+    pushItem(
+      lines,
+      {
+        id: `lodging-booking:${row.id}`,
+        category: 'lodging',
+        label: row.name || row.confirmation || 'Accommodation',
+        amountRaw,
+        originalRaw,
+        currency: row.currency,
+      },
+      snapshot,
+    )
   }
 
   for (const r of bookings?.restaurants || []) {
