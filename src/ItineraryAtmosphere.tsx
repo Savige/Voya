@@ -37,7 +37,7 @@ export function ItineraryAtmosphere() {
 
   return (
     <div
-      className="pointer-events-none absolute inset-0 overflow-hidden rounded-[1.5rem]"
+      className="pointer-events-none absolute inset-0 overflow-hidden"
       aria-hidden
     >
       {/* Deep navy → indigo wash (the purple/blue night sky) */}

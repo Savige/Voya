@@ -123,6 +123,7 @@ export function ItineraryDestinationsView({
   formatStayRange,
 }: Props) {
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({})
+  const stripBtnRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const [highlightStayId, setHighlightStayId] = useState<string | null>(null)
   const highlightTimer = useRef<number | null>(null)
 
@@ -135,8 +136,21 @@ export function ItineraryDestinationsView({
   const scrollToStay = (stayId: string) => {
     const el = sectionRefs.current[stayId]
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      // Account for sticky toolbar + trip tabs so the destination isn't hidden underneath.
+      const stickyTop = document.querySelector<HTMLElement>('[data-trip-nav]')
+      const toolbar = document.querySelector<HTMLElement>('[data-dashboard-toolbar]')
+      const offset =
+        (toolbar?.getBoundingClientRect().height ?? 64) +
+        (stickyTop?.getBoundingClientRect().height ?? 56) +
+        12
+      const y = el.getBoundingClientRect().top + window.scrollY - offset
+      window.scrollTo({ top: Math.max(0, Math.round(y)), behavior: 'smooth' })
     }
+    stripBtnRefs.current[stayId]?.scrollIntoView({
+      behavior: 'smooth',
+      inline: 'center',
+      block: 'nearest',
+    })
     setHighlightStayId(stayId)
     if (highlightTimer.current != null) window.clearTimeout(highlightTimer.current)
     highlightTimer.current = window.setTimeout(() => setHighlightStayId(null), 1400)
@@ -162,11 +176,14 @@ export function ItineraryDestinationsView({
     )
   }
 
+  const compactStrip = stays.length > 8
+
   return (
     <div className="relative mt-5 overflow-hidden rounded-2xl border border-white/10 shadow-[0_0_40px_rgba(56,189,248,0.08)]">
       <ItineraryAtmosphere />
 
       <div className="relative z-10 p-4 sm:p-5">
+        {/* Journey strip — horizontal scroll; compact (numbers only) when many stops */}
         <div className="mb-5 overflow-x-auto pb-1 [scrollbar-width:thin]">
           <div className="flex min-w-min items-center gap-0 px-1">
             {stays.map((stay, index) => {
@@ -175,20 +192,27 @@ export function ItineraryDestinationsView({
                 <div key={stay.id} className="flex items-center">
                   {index > 0 ? (
                     <div
-                      className="mx-1 h-px w-6 shrink-0 bg-gradient-to-r from-sky-400/50 to-indigo-400/40 sm:w-10"
+                      className={`mx-0.5 h-px shrink-0 bg-gradient-to-r from-sky-400/50 to-indigo-400/40 sm:mx-1 ${
+                        compactStrip ? 'w-3 sm:w-5' : 'w-6 sm:w-10'
+                      }`}
                       aria-hidden
                     />
                   ) : null}
                   <button
                     type="button"
+                    ref={(btn) => {
+                      stripBtnRefs.current[stay.id] = btn
+                    }}
                     onClick={() => scrollToStay(stay.id)}
-                    className={`group flex max-w-[7.5rem] flex-col items-center gap-1.5 rounded-xl px-1.5 py-1 transition-transform duration-300 ${
-                      active ? 'scale-105' : 'hover:scale-[1.03]'
-                    }`}
+                    className={`group flex flex-col items-center rounded-xl py-1 transition-transform duration-300 ${
+                      compactStrip ? 'max-w-[2.75rem] gap-1 px-1' : 'max-w-[7.5rem] gap-1.5 px-1.5'
+                    } ${active ? 'scale-105' : 'hover:scale-[1.03]'}`}
                     title={stay.location || `Stop ${index + 1}`}
                   >
                     <span
-                      className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold text-white shadow-md transition-shadow duration-300 ${
+                      className={`flex items-center justify-center rounded-full font-bold text-white shadow-md transition-shadow duration-300 ${
+                        compactStrip ? 'h-7 w-7 text-[10px]' : 'h-8 w-8 text-xs'
+                      } ${
                         active
                           ? 'bg-sky-400 shadow-sky-400/50 ring-2 ring-sky-200/80'
                           : 'bg-blue-600 ring-2 ring-white/25 group-hover:ring-sky-300/50'
@@ -196,14 +220,23 @@ export function ItineraryDestinationsView({
                     >
                       {index + 1}
                     </span>
-                    <span className="w-full truncate text-center text-[10px] font-semibold text-slate-200/90">
-                      {stay.location || 'Destination'}
-                    </span>
+                    {!compactStrip ? (
+                      <span className="w-full truncate text-center text-[10px] font-semibold text-slate-200/90">
+                        {stay.location || 'Destination'}
+                      </span>
+                    ) : null}
                   </button>
                 </div>
               )
             })}
           </div>
+          {compactStrip ? (
+            <p className="mt-1.5 truncate text-center text-[10px] text-slate-400">
+              {highlightStayId
+                ? stays.find((s) => s.id === highlightStayId)?.location || 'Destination'
+                : `${stays.length} destinations — tap a number to jump`}
+            </p>
+          ) : null}
         </div>
 
         {/* Numbered spine + cards */}

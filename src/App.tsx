@@ -6615,6 +6615,7 @@ export default function App() {
       */}
       <header
         ref={dashboardToolbarRef}
+        data-dashboard-toolbar
         className="sticky top-0 z-50 overflow-hidden px-3 pt-3 sm:px-4 sm:pt-4"
       >
         <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden>
@@ -6773,6 +6774,7 @@ export default function App() {
       */}
       <nav
         ref={tripNavRef}
+        data-trip-nav
         className="sticky z-40 px-3 py-4 sm:px-4 bg-transparent"
         style={{ top: dashboardToolbarHeight }}
         aria-label="Trip sections"
