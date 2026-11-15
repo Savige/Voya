@@ -40,7 +40,12 @@ type Props = {
   setActivityPlaceSearchInput: (value: string) => void
   activityPlaceSuggestions: PlaceSuggestion[]
   activityPlaceSearchError?: string | null
-  placeGoogleUrl: (place: { label: string; googleMapsUri?: string }) => string
+  placeGoogleUrl: (place: {
+    label: string
+    googleMapsUri?: string
+    lat?: number
+    lon?: number
+  }) => string
   resolveRecommendationCategory: (
     category: string | undefined,
     label: string,
@@ -52,6 +57,7 @@ type Props = {
   onOpenStop: (stayId: string, activity: StayActivity, stayLocation: string) => void
   onOpenPlanner: () => void
   onOpenOnMap: (stayId: string) => void
+  onEditLodging?: (stayId: string, lodgingId?: string | 'new') => void
   formatDayLabel: (iso: string) => string
   formatStayRange: (start: string, end: string) => string
 }
@@ -119,6 +125,7 @@ export function ItineraryDestinationsView({
   onOpenStop,
   onOpenPlanner,
   onOpenOnMap,
+  onEditLodging,
   formatDayLabel,
   formatStayRange,
 }: Props) {
@@ -306,10 +313,31 @@ export function ItineraryDestinationsView({
                         {formatStayRange(stay.startDate, stay.endDate)}
                         {nights > 0 ? ` · ${nights} night${nights === 1 ? '' : 's'}` : ''}
                       </p>
-                      <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-slate-400">
-                        <MapPin size={12} className="shrink-0 opacity-70" aria-hidden />
-                        <span className="truncate">{lodgingLabel}</span>
-                      </p>
+                      {onEditLodging && !readOnly ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onEditLodging(
+                              stay.id,
+                              lodgings.length === 1 ? lodgings[0].id : lodgings[0]?.id || 'new',
+                            )
+                          }
+                          className="mt-1 flex max-w-full items-center gap-1.5 rounded-md text-left text-xs font-medium text-slate-400 underline-offset-2 hover:text-sky-200 hover:underline"
+                          title={
+                            lodgings.length
+                              ? 'Edit lodging'
+                              : 'Add lodging'
+                          }
+                        >
+                          <MapPin size={12} className="shrink-0 opacity-70" aria-hidden />
+                          <span className="truncate">{lodgingLabel}</span>
+                        </button>
+                      ) : (
+                        <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-slate-400">
+                          <MapPin size={12} className="shrink-0 opacity-70" aria-hidden />
+                          <span className="truncate">{lodgingLabel}</span>
+                        </p>
+                      )}
                       {coverage.partialCoverage ? (
                         <p className="mt-1 text-[11px] font-medium text-amber-300/90">
                           Lodging covers {coverage.coveredNights} of {coverage.totalNights} nights
@@ -411,6 +439,8 @@ export function ItineraryDestinationsView({
                                 const mapsUrl = placeGoogleUrl({
                                   label: mapsLabel,
                                   googleMapsUri: stop.googleMapsUri,
+                                  lat: stop.lat,
+                                  lon: stop.lon,
                                 })
                                 return (
                                 <li key={stop.id}>

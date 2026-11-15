@@ -235,8 +235,23 @@ const resolveRecommendationCategory = (existingCategory: string | undefined, tex
   return existing
 }
 
-const placeGoogleUrl = (place: Pick<PlaceSuggestion, 'googleMapsUri' | 'label'>) =>
-  place.googleMapsUri?.trim() || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place.label)}`
+/** Always open Google Maps (place search may store an OSM marker URL). */
+const placeGoogleUrl = (
+  place: Pick<PlaceSuggestion, 'googleMapsUri' | 'label' | 'lat' | 'lon'>,
+) => {
+  const uri = place.googleMapsUri?.trim() || ''
+  if (/google\.[^/]*\/maps/i.test(uri) || /maps\.app\.goo\.gl/i.test(uri) || /maps\.google\./i.test(uri)) {
+    return uri
+  }
+  const osm = uri.match(/mlat=(-?[\d.]+)[\s\S]*?mlon=(-?[\d.]+)/i)
+  if (osm) {
+    return `https://www.google.com/maps/search/?api=1&query=${osm[1]},${osm[2]}`
+  }
+  if (typeof place.lat === 'number' && typeof place.lon === 'number') {
+    return `https://www.google.com/maps/search/?api=1&query=${place.lat},${place.lon}`
+  }
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place.label)}`
+}
 
 /** Calendar day grid: full day (midnight–midnight). Desktop shows CAL_VISIBLE_HOURS rows; narrow mobile shows CAL_MOBILE_VISIBLE_HOURS; scroll for the rest. */
 const CAL_START_HOUR = 0
@@ -7930,6 +7945,9 @@ export default function App() {
                   onOpenOnMap={(stayId) => {
                     setMapFocusStayId(stayId)
                     setActiveTab('map')
+                  }}
+                  onEditLodging={(stayId, lodgingId) => {
+                    openAddAccommodationForStay(stayId, lodgingId)
                   }}
                   formatDayLabel={formatSingleDateLabel}
                   formatStayRange={(start, end) => formatDateRangeLabel(start, end)}

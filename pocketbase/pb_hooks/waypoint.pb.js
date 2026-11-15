@@ -139,14 +139,7 @@ routerAdd('POST', '/api/waypoint/search', function (e) {
       if (!isNaN(lon) && isFinite(lon)) s.lon = lon
       if (s.lat != null && s.lon != null) {
         s.googleMapsUri =
-          'https://www.openstreetmap.org/?mlat=' +
-          s.lat +
-          '&mlon=' +
-          s.lon +
-          '#map=14/' +
-          s.lat +
-          '/' +
-          s.lon
+          'https://www.google.com/maps/search/?api=1&query=' + s.lat + ',' + s.lon
       }
       var cat = item.type || item['class']
       if (cat) s.category = cat
@@ -389,14 +382,7 @@ routerAdd('POST', '/api/waypoint/recommendations/refresh', function (e) {
         if (!isNaN(plon) && isFinite(plon)) row.lon = plon
         if (row.lat != null && row.lon != null) {
           row.googleMapsUri =
-            'https://www.openstreetmap.org/?mlat=' +
-            row.lat +
-            '&mlon=' +
-            row.lon +
-            '#map=14/' +
-            row.lat +
-            '/' +
-            row.lon
+            'https://www.google.com/maps/search/?api=1&query=' + row.lat + ',' + row.lon
         }
         out.push(row)
         if (out.length >= 24) break
