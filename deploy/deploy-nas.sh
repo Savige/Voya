@@ -1,31 +1,33 @@
 #!/usr/bin/env bash
-# Run on a Mac (or host) that can reach the Synology over LAN.
-# Used by GitHub Actions self-hosted runners labeled synology-lan.
+# Manual deploy: sync this Mac → Synology and rebuild Waypoint containers.
+# LAN only — not used by GitHub Actions.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REMOTE="${DEPLOY_SSH_USER:-rsavige}@${DEPLOY_SSH_HOST:-192.168.1.165}"
 REMOTE_DIR="${DEPLOY_REMOTE_DIR:-/volume1/docker/waypoint}"
 SSH_KEY="${DEPLOY_SSH_KEY:-$HOME/.ssh/id_ed25519_nas}"
-SSH=(ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
-RSYNC=(rsync -az --delete
-  --exclude .git
-  --exclude node_modules
-  --exclude dist
-  --exclude .DS_Store
-  --exclude pocketbase/pb_data
-  --exclude .env
-  --exclude .env.local
-  --exclude .env.*.local
-  --exclude deploy/.env.production
-)
+SSH=(ssh -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
 echo "==> Sync $ROOT → $REMOTE:$REMOTE_DIR"
-"${RSYNC[@]}" -e "${SSH[*]}" "$ROOT/" "$REMOTE:$REMOTE_DIR/"
+"${SSH[@]}" "$REMOTE" "mkdir -p '$REMOTE_DIR'"
+
+# macOS openrsync cannot talk to Synology rsync over SSH — tar stream, then
+# local rsync on the NAS. Leave pb_data, secrets, and root-owned build dirs alone.
+COPYFILE_DISABLE=1 tar czf - \
+  --exclude .git \
+  --exclude node_modules \
+  --exclude dist \
+  --exclude .DS_Store \
+  --exclude pocketbase/pb_data \
+  --exclude .env \
+  --exclude .env.local \
+  --exclude 'deploy/.env.production' \
+  -C "$ROOT" . \
+| "${SSH[@]}" "$REMOTE" \
+  "rm -rf /tmp/waypoint-incoming && mkdir -p /tmp/waypoint-incoming && tar xzf - -C /tmp/waypoint-incoming && /usr/bin/rsync -a --delete --exclude pocketbase/pb_data --exclude deploy/.env.production --exclude .env --exclude node_modules --exclude dist /tmp/waypoint-incoming/ '$REMOTE_DIR/' && rm -rf /tmp/waypoint-incoming"
 
 echo "==> Build + recreate containers on NAS"
-# Live PocketBase is waypoint-pb17 (compose container_name conflicts / Synology btrfs
-# recreate bugs). Rebuild images, recreate SPA via compose, recreate PB by name.
 "${SSH[@]}" "$REMOTE" bash -s <<'REMOTE'
 set -euo pipefail
 export PATH="/usr/local/bin:$PATH"
@@ -45,14 +47,13 @@ fi
 
 "${COMPOSE[@]}" -f deploy/docker-compose.yml --env-file "$ENV_FILE" build
 
-# SPA / nginx — safe to recreate via compose
+# SPA / nginx
 "${COMPOSE[@]}" -f deploy/docker-compose.yml --env-file "$ENV_FILE" up -d --no-deps --force-recreate waypoint
 
 # PocketBase — keep working container name + mounts used on this NAS
 PB_NAME=waypoint-pb17
 docker stop "$PB_NAME" 2>/dev/null || true
 docker rm "$PB_NAME" 2>/dev/null || true
-# shellcheck disable=SC2046
 docker run -d \
   --name "$PB_NAME" \
   --restart unless-stopped \
@@ -66,4 +67,4 @@ docker run -d \
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'NAMES|waypoint($|-pb)' || true
 REMOTE
 
-echo "==> Deploy finished"
+echo "==> Deploy finished — https://waypoint.savige.me"

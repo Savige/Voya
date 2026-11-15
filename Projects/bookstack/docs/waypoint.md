@@ -123,12 +123,22 @@ Cloudflare DNS-only A records (or `*.savige.me` wildcard) → `192.168.1.165`. P
 
 ## Setup / deploy (Synology)
 
+**Manual only** — not deployed via GitHub Actions. From the Mac on the LAN:
+
 ```bash
-# Sync code from Mac (example: tar over SSH), then:
+cd ~/Voya   # or wherever the repo lives
+./deploy/deploy-nas.sh
+```
+
+That syncs to `/volume1/docker/waypoint`, rebuilds Docker images, recreates `waypoint` (SPA) and `waypoint-pb17` (PocketBase). Does not touch `pocketbase/pb_data` or `deploy/.env.production` on the NAS.
+
+First-time proxy / env:
+
+```bash
+# after sync, on NAS or via SSH:
 cd /volume1/docker/waypoint
 cp deploy/.env.production.example deploy/.env.production
 # edit VITE_POCKETBASE_URL if needed
-
 docker-compose -f deploy/docker-compose.yml up -d --build
 sudo bash deploy/install-synology-proxy.sh
 ```
@@ -139,19 +149,6 @@ Then:
 2. Disable email verification for household accounts if you aren’t running SMTP
 3. Open https://waypoint.savige.me and create a user
 4. Create a trip and confirm it appears after refresh / another device
-
-### Rebuild after frontend or env changes
-
-```bash
-cd /volume1/docker/waypoint
-docker-compose -f deploy/docker-compose.yml up -d --build waypoint
-```
-
-### Rebuild after PocketBase hooks/migrations change
-
-```bash
-docker-compose -f deploy/docker-compose.yml up -d --build pocketbase
-```
 
 Strip macOS `._*` files from `pocketbase/pb_migrations` before build if you sync from Finder/rsync without filters.
 

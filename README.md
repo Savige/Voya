@@ -75,15 +75,13 @@ public/              Static assets (favicon, planet textures for the map sky)
 
 ## Deploy (NAS)
 
-Production overview: **[DEPLOY.md](DEPLOY.md)** · Synology detail: **[deploy/SYNOLOGY.md](deploy/SYNOLOGY.md)** · compose notes: **[deploy/README.md](deploy/README.md)**
+Manual only (LAN) — no GitHub Actions. From this Mac:
 
 ```bash
-cp deploy/.env.production.example deploy/.env.production
-# edit VITE_POCKETBASE_URL=https://pocketbase.savige.me
-
-docker compose -f deploy/docker-compose.yml up -d --build
-sudo bash deploy/install-synology-proxy.sh
+./deploy/deploy-nas.sh
 ```
+
+Overview: **[DEPLOY.md](DEPLOY.md)** · Synology: **[deploy/SYNOLOGY.md](deploy/SYNOLOGY.md)** · compose: **[deploy/README.md](deploy/README.md)**
 
 | Host | Backend |
 | --- | --- |
