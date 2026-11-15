@@ -28,6 +28,9 @@ export type SearchPlacesOptions = {
   limit?: number
   nearLat?: number
   nearLon?: number
+  country?: string
+  countryCode?: string
+  signal?: AbortSignal
 }
 
 export async function searchPlaces(
@@ -45,10 +48,13 @@ export async function searchPlaces(
     body.nearLat = opts.nearLat
     body.nearLon = opts.nearLon
   }
+  if (opts.country?.trim()) body.country = opts.country.trim()
+  if (opts.countryCode?.trim()) body.countryCode = opts.countryCode.trim().toLowerCase()
   const res = await fetch(pocketBaseApiUrl('/api/waypoint/search'), {
     method: 'POST',
     headers: await authHeaders(),
     body: JSON.stringify(body),
+    signal: opts.signal,
   })
   if (!res.ok) {
     throw new Error(await readApiError(res, 'Search failed'))

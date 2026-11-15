@@ -199,6 +199,29 @@ const APP_BUILD = import.meta.env.VITE_APP_BUILD ?? '—'
 
 const uid = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : String(Date.now()))
 
+/** ISO country code for Nominatim countrycodes= bias (best-effort from trip country name). */
+function countryCodeFromTripCountry(country: string | undefined | null): string | undefined {
+  const t = String(country || '')
+    .trim()
+    .toLowerCase()
+  if (!t) return undefined
+  if (/\b(new zealand|aotearoa)\b/.test(t) || t === 'nz') return 'nz'
+  if (/\baustralia\b/.test(t) || t === 'au') return 'au'
+  if (/\bunited states\b|\busa\b|\bamerica\b/.test(t) || t === 'us') return 'us'
+  if (/\bunited kingdom\b|\bengland\b|\bscotland\b|\bwales\b/.test(t) || t === 'uk' || t === 'gb')
+    return 'gb'
+  if (/\bcanada\b/.test(t)) return 'ca'
+  if (/\bjapan\b/.test(t)) return 'jp'
+  if (/\bfrance\b/.test(t)) return 'fr'
+  if (/\bitaly\b/.test(t)) return 'it'
+  if (/\bspain\b/.test(t)) return 'es'
+  if (/\bgermany\b/.test(t)) return 'de'
+  if (/\bthailand\b/.test(t)) return 'th'
+  if (/\bindonesia\b/.test(t)) return 'id'
+  if (/\bfiji\b/.test(t)) return 'fj'
+  return undefined
+}
+
 const recommendationCategoryFromText = (text: string) => {
   const t = text.toLowerCase()
   if (/\b(restaurant|diner|grill|sushi|ramen|eatery|bistro|steakhouse|streat|kai)\b/.test(t)) return 'Restaurant'
@@ -7718,6 +7741,7 @@ export default function App() {
               places={visitPlaces}
               readOnly={tripIsReadOnly || !selectedTrip}
               tripCountry={selectedTrip?.country}
+              tripCountryCode={countryCodeFromTripCountry(selectedTrip?.country)}
               nearLat={visitSearchNear.nearLat}
               nearLon={visitSearchNear.nearLon}
               placeGoogleUrl={placeGoogleUrl}

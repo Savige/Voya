@@ -33,11 +33,11 @@ function mapToVisitCategory(
   )
     return 'Restaurant'
   if (
-    /\b(lookout|viewpoint|scenic|tower|overlook)\b/.test(t) ||
+    /\b(lookout|viewpoint|scenic|tower|overlook|heights)\b/.test(t) ||
     raw === 'Landmark'
   )
     return 'Lookout'
-  if (/\b(town|city|village|suburb)\b/.test(t)) return 'Town'
+  if (/\b(town|city|village|suburb|neighbourhood|neighborhood)\b/.test(t)) return 'Town'
   if (
     /\b(activity|adventure|tour|museum|experience|kayak|surf|zipline)\b/.test(t) ||
     raw === 'Experiences/Adventure' ||
@@ -73,6 +73,7 @@ type Props = {
   places: VisitPlace[]
   readOnly?: boolean
   tripCountry?: string
+  tripCountryCode?: string
   nearLat?: number
   nearLon?: number
   placeGoogleUrl: (place: {
@@ -96,6 +97,7 @@ export function VisitPlacesPanel({
   places,
   readOnly,
   tripCountry,
+  tripCountryCode,
   nearLat,
   nearLon,
   placeGoogleUrl,
@@ -115,7 +117,12 @@ export function VisitPlacesPanel({
   const [saving, setSaving] = useState(false)
   const draftFileRef = useRef<HTMLInputElement>(null)
   const backfilled = useRef(new Set<string>())
-  const search = usePlaceSuggestions(query, { nearLat, nearLon })
+  const search = usePlaceSuggestions(query, {
+    nearLat,
+    nearLon,
+    country: tripCountry,
+    countryCode: tripCountryCode,
+  })
 
   const sorted = useMemo(() => {
     return [...places].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
@@ -302,26 +309,26 @@ export function VisitPlacesPanel({
               <div className="absolute z-20 mt-1 max-h-52 w-full overflow-y-auto rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-neutral-700 dark:bg-neutral-950">
                 {search.autocompleteError ? (
                   <p className="px-3 py-2 text-xs text-rose-600">{search.autocompleteError}</p>
-                ) : search.suggestions.length === 0 ? (
+                ) : null}
+                {search.suggestions.length === 0 && !search.autocompleteError ? (
                   <p className="px-3 py-2 text-xs text-neutral-500">No matches yet…</p>
-                ) : (
-                  search.suggestions.slice(0, 8).map((place) => (
-                    <button
-                      key={place.key}
-                      type="button"
-                      className="block w-full border-b border-neutral-100 px-3 py-2 text-left text-sm text-neutral-800 last:border-0 hover:bg-neutral-50 dark:border-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-900"
-                      onClick={() => pickSuggestion(place)}
-                    >
-                      <span className="block truncate font-medium">
-                        {place.name || place.label.split(',')[0]}
-                      </span>
-                      <span className="block truncate text-xs text-neutral-500">
-                        {place.category ? `${place.category} · ` : ''}
-                        {place.label}
-                      </span>
-                    </button>
-                  ))
-                )}
+                ) : null}
+                {search.suggestions.slice(0, 8).map((place) => (
+                  <button
+                    key={place.key}
+                    type="button"
+                    className="block w-full border-b border-neutral-100 px-3 py-2 text-left text-sm text-neutral-800 last:border-0 hover:bg-neutral-50 dark:border-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-900"
+                    onClick={() => pickSuggestion(place)}
+                  >
+                    <span className="block truncate font-medium">
+                      {place.name || place.label.split(',')[0]}
+                    </span>
+                    <span className="block truncate text-xs text-neutral-500">
+                      {place.category ? `${place.category} · ` : ''}
+                      {place.label}
+                    </span>
+                  </button>
+                ))}
               </div>
             ) : null}
           </div>

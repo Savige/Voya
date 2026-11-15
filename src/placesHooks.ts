@@ -101,6 +101,8 @@ export function useDestinationSuggestions(query: string) {
 export type PlaceSuggestionsNear = {
   nearLat?: number
   nearLon?: number
+  country?: string
+  countryCode?: string
 }
 
 export function usePlaceSuggestions(query: string, near?: PlaceSuggestionsNear) {
@@ -108,6 +110,8 @@ export function usePlaceSuggestions(query: string, near?: PlaceSuggestionsNear) 
   const [autocompleteError, setAutocompleteError] = useState<string | null>(null)
   const nearLat = near?.nearLat
   const nearLon = near?.nearLon
+  const country = near?.country
+  const countryCode = near?.countryCode
 
   useEffect(() => {
     const q = query.trim()
@@ -122,29 +126,34 @@ export function usePlaceSuggestions(query: string, near?: PlaceSuggestionsNear) 
       return
     }
     const controller = new AbortController()
+    // Clear stale errors immediately so typing/backspacing can recover.
+    setAutocompleteError(null)
     const timer = window.setTimeout(async () => {
       try {
-        setAutocompleteError(null)
         const places = await searchPlaces(q, {
           limit: 9,
+          signal: controller.signal,
           ...(typeof nearLat === 'number' && typeof nearLon === 'number'
             ? { nearLat, nearLon }
             : {}),
+          ...(country ? { country } : {}),
+          ...(countryCode ? { countryCode } : {}),
         })
         if (controller.signal.aborted) return
         setRemoteSuggestions(places)
+        setAutocompleteError(null)
       } catch (err) {
-        if ((err as any)?.name === 'AbortError') return
-        setRemoteSuggestions([])
+        if (controller.signal.aborted || (err as any)?.name === 'AbortError') return
+        // Keep prior suggestions visible; only surface the error.
         setAutocompleteError(err instanceof Error ? err.message : 'Search unavailable')
       }
-    }, 280)
+    }, 220)
 
     return () => {
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [query, nearLat, nearLon])
+  }, [query, nearLat, nearLon, country, countryCode])
 
   return { suggestions: remoteSuggestions, autocompleteError }
 }
