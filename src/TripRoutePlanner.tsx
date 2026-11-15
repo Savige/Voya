@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { getAirportByIata } from './data/airportLookup'
 import { fetchLocationPhoto, peekLocationPhotoCache } from './locationPhotos'
+import { fetchDrivingStats, haversineKm as mapHaversineKm } from './mapTripRoute'
 import { usePlaceSuggestions } from './placesHooks'
 import type { PlaceSuggestion } from './placesTypes'
 import type { CarBooking, FlightBooking, Stay } from './tripTypes'
@@ -370,11 +371,11 @@ const haversineKm = (a: { lat: number; lon: number }, b: { lat: number; lon: num
   return 2 * R * Math.asin(Math.sqrt(h))
 }
 
-const formatDriveDuration = (km: number) => {
-  const hours = km / 75
-  const h = Math.floor(hours)
-  const m = Math.round((hours - h) * 60)
-  if (h <= 0) return `${Math.max(m, 1)}m`
+const formatDriveDurationMin = (totalMin: number) => {
+  const min = Math.max(1, Math.round(totalMin))
+  const h = Math.floor(min / 60)
+  const m = min % 60
+  if (h <= 0) return `${m}m`
   if (m === 0) return `${h}h`
   return `${h}h ${m}m`
 }
@@ -426,7 +427,12 @@ const stayMatchesAirport = (stay: Stay, iata: string) => {
 
 type TransportLeg =
   | { kind: 'flight'; flight: FlightBooking }
-  | { kind: 'drive'; km: number; label: string; car?: CarBooking }
+  | {
+      kind: 'drive'
+      from: { lat: number; lon: number }
+      to: { lat: number; lon: number }
+      car?: CarBooking
+    }
   | { kind: 'empty' }
 
 type RouteGap = {
@@ -530,16 +536,17 @@ function pickDriveBetween(
     if (km >= 15) {
       return {
         kind: 'drive',
-        km,
-        label: `${km}km • ${formatDriveDuration(km)}`,
+        from: fromPos,
+        to: toPos,
         car: overlappingCars[0],
       }
     }
   } else if (overlappingCars[0]) {
+    // No coords — still surface the rental chip without a distance estimate.
     return {
       kind: 'drive',
-      km: 0,
-      label: overlappingCars[0].company || 'Rental car',
+      from: { lat: 0, lon: 0 },
+      to: { lat: 0, lon: 0 },
       car: overlappingCars[0],
     }
   }
@@ -577,14 +584,43 @@ function TimelineDriveChip({
   leg: Extract<TransportLeg, { kind: 'drive' }>
   onOpenCar: (carId?: string) => void
 }) {
+  const hasCoords =
+    Number.isFinite(leg.from.lat) &&
+    Number.isFinite(leg.from.lon) &&
+    Number.isFinite(leg.to.lat) &&
+    Number.isFinite(leg.to.lon) &&
+    !(leg.from.lat === 0 && leg.from.lon === 0 && leg.to.lat === 0 && leg.to.lon === 0)
+  const fallbackKm = hasCoords ? Math.round(mapHaversineKm(leg.from, leg.to)) : 0
+  const [label, setLabel] = useState(
+    hasCoords ? `${fallbackKm}km · …` : leg.car?.company || 'Rental car',
+  )
+
+  useEffect(() => {
+    if (!hasCoords) return
+    let alive = true
+    void fetchDrivingStats(leg.from, leg.to).then((stats) => {
+      if (!alive) return
+      if (!stats) {
+        // OSRM unavailable — keep crow-flies distance, mark time as approximate.
+        setLabel(`${fallbackKm}km • ~${formatDriveDurationMin((fallbackKm / 70) * 60)}`)
+        return
+      }
+      setLabel(`${stats.distanceKm}km • ${formatDriveDurationMin(stats.durationMin)}`)
+    })
+    return () => {
+      alive = false
+    }
+  }, [hasCoords, leg.from.lat, leg.from.lon, leg.to.lat, leg.to.lon, fallbackKm])
+
   return (
     <button
       type="button"
       onClick={() => onOpenCar(leg.car?.id)}
+      title="Typical driving time (road routing, not live traffic)"
       className="inline-flex items-center gap-2 rounded-full border border-slate-500 bg-neutral-950 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-neutral-900"
     >
       <Car size={15} className="text-emerald-300" aria-hidden />
-      {leg.label}
+      {label}
     </button>
   )
 }

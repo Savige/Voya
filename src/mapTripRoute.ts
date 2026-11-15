@@ -390,11 +390,87 @@ function straightLine(from: LngLat, to: LngLat): Array<[number, number]> {
   ]
 }
 
-function osrmPath(from: LngLat, to: LngLat): string {
+function osrmPath(from: LngLat, to: LngLat, overview: 'full' | 'false' = 'full'): string {
+  const geo = overview === 'full' ? '&geometries=geojson' : ''
   return (
     `/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}` +
-    `?overview=full&geometries=geojson`
+    `?overview=${overview}${geo}`
   )
+}
+
+export type DrivingStats = {
+  /** Road distance in whole kilometres. */
+  distanceKm: number
+  /** Typical driving duration in whole minutes (OSRM, no live traffic). */
+  durationMin: number
+}
+
+const drivingStatsCache = new Map<string, DrivingStats>()
+const drivingStatsInflight = new Map<string, Promise<DrivingStats | null>>()
+
+async function parseOsrmStats(res: Response): Promise<DrivingStats | null> {
+  if (!res.ok) return null
+  const json = (await res.json()) as {
+    code?: string
+    routes?: Array<{ distance?: number; duration?: number }>
+  }
+  if (json.code && json.code !== 'Ok') return null
+  const route = json.routes?.[0]
+  if (!route || typeof route.distance !== 'number' || typeof route.duration !== 'number') return null
+  return {
+    distanceKm: Math.max(1, Math.round(route.distance / 1000)),
+    durationMin: Math.max(1, Math.round(route.duration / 60)),
+  }
+}
+
+async function fetchDrivingStatsOnce(from: LngLat, to: LngLat): Promise<DrivingStats | null> {
+  const path = osrmPath(from, to, 'false')
+  try {
+    const proxied = await fetch(`/osrm${path}`)
+    const fromProxy = await parseOsrmStats(proxied)
+    if (fromProxy) return fromProxy
+  } catch {
+    /* try absolute */
+  }
+  try {
+    const direct = await fetch(`https://router.project-osrm.org${path}`)
+    return await parseOsrmStats(direct)
+  } catch {
+    return null
+  }
+}
+
+/** OSRM road distance + typical drive time (cached; not live traffic). */
+export async function fetchDrivingStats(from: LngLat, to: LngLat): Promise<DrivingStats | null> {
+  const key = roadCacheKey(from, to)
+  const cached = drivingStatsCache.get(key)
+  if (cached) return cached
+
+  if (haversineKm(from, to) < 3) {
+    const stats = { distanceKm: Math.max(1, Math.round(haversineKm(from, to))), durationMin: 5 }
+    drivingStatsCache.set(key, stats)
+    return stats
+  }
+
+  const existing = drivingStatsInflight.get(key)
+  if (existing) return existing
+
+  const pending = (async () => {
+    try {
+      let stats = await fetchDrivingStatsOnce(from, to)
+      if (!stats) {
+        await new Promise((r) => setTimeout(r, 350))
+        stats = await fetchDrivingStatsOnce(from, to)
+      }
+      if (stats) drivingStatsCache.set(key, stats)
+      return stats
+    } finally {
+      drivingStatsInflight.delete(key)
+    }
+  })()
+
+  drivingStatsInflight.set(key, pending)
+  return pending
 }
 
 async function parseOsrmResponse(res: Response): Promise<Array<[number, number]> | null> {
