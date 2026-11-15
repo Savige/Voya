@@ -21,13 +21,21 @@ function parseJsonField(value) {
 routerAdd('POST', '/api/waypoint/search', function (e) {
   try {
     var NOMINATIM = 'https://nominatim.openstreetmap.org'
+    var OVERPASS = 'https://overpass-api.de/api/interpreter'
     var USER_AGENT = 'WaypointTravelPlanner/1.0 (personal; contact: local-nas)'
     var body = e.requestInfo().body || {}
     var query = String(body.query || '').trim()
     var limit = Math.min(Number(body.limit) || 9, 12)
+    var nearLat = Number(body.nearLat)
+    var nearLon = Number(body.nearLon)
+    var hasNear =
+      !isNaN(nearLat) && isFinite(nearLat) && !isNaN(nearLon) && isFinite(nearLon)
     if (query.length < 2) return e.json(200, { suggestions: [] })
 
-    var cacheKey = 'search:v2:' + query.toLowerCase()
+    var nearKey = hasNear
+      ? ':near:' + nearLat.toFixed(2) + ',' + nearLon.toFixed(2)
+      : ''
+    var cacheKey = 'search:v3:' + query.toLowerCase() + nearKey
     try {
       var cached = e.app.findFirstRecordByFilter(
         'place_cache',
@@ -36,11 +44,12 @@ routerAdd('POST', '/api/waypoint/search', function (e) {
       if (cached) {
         var payload = parseJsonField(cached.get('payload'))
         var cachedSuggestions = payload.suggestions || []
-        // Never serve a poisoned empty cache — fall through to Nominatim.
+        // Never serve a poisoned empty cache — fall through to live search.
         if (Array.isArray(cachedSuggestions) && cachedSuggestions.length > 0) {
           return e.json(200, {
             suggestions: cachedSuggestions,
-            cached: true
+            cached: true,
+            source: cached.get('source') || 'nominatim+overpass'
           })
         }
       }
@@ -48,7 +57,7 @@ routerAdd('POST', '/api/waypoint/search', function (e) {
 
     var url =
       NOMINATIM +
-      '/search?format=jsonv2&addressdetails=1&accept-language=en&limit=' +
+      '/search?format=jsonv2&addressdetails=1&extratags=1&accept-language=en&limit=' +
       encodeURIComponent(String(limit)) +
       '&q=' +
       encodeURIComponent(query)
@@ -72,6 +81,28 @@ routerAdd('POST', '/api/waypoint/search', function (e) {
     }
 
     var suggestions = []
+    var seenKeys = {}
+
+    function pushSuggestion(s) {
+      if (!s || !s.label) return
+      var dedupe =
+        s.key ||
+        (s.lat != null && s.lon != null
+          ? String(s.lat) + ',' + String(s.lon)
+          : s.label.toLowerCase())
+      if (seenKeys[dedupe]) return
+      seenKeys[dedupe] = 1
+      // Also dedupe by short name near same coords.
+      var nameKey =
+        String(s.name || s.label.split(',')[0] || '')
+          .trim()
+          .toLowerCase() +
+        (s.lat != null ? ':' + Math.round(Number(s.lat) * 100) : '')
+      if (nameKey.length > 2 && seenKeys['n:' + nameKey]) return
+      if (nameKey.length > 2) seenKeys['n:' + nameKey] = 1
+      suggestions.push(s)
+    }
+
     for (var i = 0; i < hits.length; i++) {
       var item = hits[i]
       var lat = Number(item.lat)
@@ -79,6 +110,7 @@ routerAdd('POST', '/api/waypoint/search', function (e) {
       var label = String(item.display_name || item.name || '').trim()
       if (!label) continue
       var addr = item.address && typeof item.address === 'object' ? item.address : {}
+      var extratags = item.extratags && typeof item.extratags === 'object' ? item.extratags : {}
       var placeName = String(
         item.name ||
           addr.city ||
@@ -144,8 +176,168 @@ routerAdd('POST', '/api/waypoint/search', function (e) {
       var cat = item.type || item['class']
       if (cat) s.category = cat
       if (item.type) s.primaryType = item.type
-      suggestions.push(s)
+      var wd = String(extratags.wikidata || '').trim()
+      if (wd) s.wikidataId = wd
+      var wp = String(extratags.wikipedia || '').trim()
+      if (wp) s.wikipedia = wp
+      pushSuggestion(s)
     }
+
+    // Overpass name match around trip bias (or first Nominatim hit) for businesses/POIs.
+    var overpassLat = hasNear ? nearLat : null
+    var overpassLon = hasNear ? nearLon : null
+    if (
+      (overpassLat == null || overpassLon == null) &&
+      suggestions.length > 0 &&
+      suggestions[0].lat != null &&
+      suggestions[0].lon != null
+    ) {
+      overpassLat = Number(suggestions[0].lat)
+      overpassLon = Number(suggestions[0].lon)
+    }
+    var wantOverpass =
+      overpassLat != null &&
+      overpassLon != null &&
+      (suggestions.length < Math.min(limit, 6) || query.length >= 3)
+    if (wantOverpass) {
+      try {
+        // Escape Overpass regex specials in the user query.
+        var safe = query.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
+        var radiusM = hasNear ? 40000 : 25000
+        var oq =
+          '[out:json][timeout:22];(' +
+          'node["name"~"' +
+          safe +
+          '",i]["amenity"](around:' +
+          radiusM +
+          ',' +
+          overpassLat +
+          ',' +
+          overpassLon +
+          ');' +
+          'node["name"~"' +
+          safe +
+          '",i]["shop"](around:' +
+          radiusM +
+          ',' +
+          overpassLat +
+          ',' +
+          overpassLon +
+          ');' +
+          'node["name"~"' +
+          safe +
+          '",i]["tourism"](around:' +
+          radiusM +
+          ',' +
+          overpassLat +
+          ',' +
+          overpassLon +
+          ');' +
+          'node["name"~"' +
+          safe +
+          '",i]["leisure"](around:' +
+          radiusM +
+          ',' +
+          overpassLat +
+          ',' +
+          overpassLon +
+          ');' +
+          'node["name"~"' +
+          safe +
+          '",i]["historic"](around:' +
+          radiusM +
+          ',' +
+          overpassLat +
+          ',' +
+          overpassLon +
+          ');' +
+          'way["name"~"' +
+          safe +
+          '",i]["amenity"](around:' +
+          radiusM +
+          ',' +
+          overpassLat +
+          ',' +
+          overpassLon +
+          ');' +
+          'way["name"~"' +
+          safe +
+          '",i]["shop"](around:' +
+          radiusM +
+          ',' +
+          overpassLat +
+          ',' +
+          overpassLon +
+          ');' +
+          'way["name"~"' +
+          safe +
+          '",i]["tourism"](around:' +
+          radiusM +
+          ',' +
+          overpassLat +
+          ',' +
+          overpassLon +
+          ');' +
+          ');out center 30;'
+        var ores = $http.send({
+          url: OVERPASS,
+          method: 'POST',
+          headers: {
+            'User-Agent': USER_AGENT,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: 'data=' + encodeURIComponent(oq),
+          timeout: 40
+        })
+        if (ores.statusCode >= 200 && ores.statusCode < 300) {
+          var odata = ores.json && typeof ores.json === 'object' ? ores.json : {}
+          var elements = Array.isArray(odata.elements) ? odata.elements : []
+          for (var oi = 0; oi < elements.length; oi++) {
+            var el = elements[oi]
+            var tags = el.tags || {}
+            var oname = String(tags.name || '').trim()
+            if (!oname) continue
+            var olat = Number(el.lat != null ? el.lat : el.center && el.center.lat)
+            var olon = Number(el.lon != null ? el.lon : el.center && el.center.lon)
+            var kind =
+              tags.tourism ||
+              tags.leisure ||
+              tags.amenity ||
+              tags.shop ||
+              tags.historic ||
+              'place'
+            var bits = [oname]
+            if (tags['addr:street']) bits.push(String(tags['addr:street']))
+            if (tags['addr:city'] || tags['addr:suburb']) {
+              bits.push(String(tags['addr:city'] || tags['addr:suburb']))
+            }
+            var olabel = bits.join(', ')
+            var row = {
+              key: 'osm:' + (el.type || 'node') + ':' + el.id,
+              label: olabel,
+              name: oname,
+              category: kind,
+              primaryType: kind,
+              types: [kind]
+            }
+            if (!isNaN(olat) && isFinite(olat)) row.lat = olat
+            if (!isNaN(olon) && isFinite(olon)) row.lon = olon
+            if (row.lat != null && row.lon != null) {
+              row.googleMapsUri =
+                'https://www.google.com/maps/search/?api=1&query=' + row.lat + ',' + row.lon
+            }
+            if (tags.wikidata) row.wikidataId = String(tags.wikidata).trim()
+            if (tags.wikipedia) row.wikipedia = String(tags.wikipedia).trim()
+            pushSuggestion(row)
+            if (suggestions.length >= limit + 6) break
+          }
+        }
+      } catch (overpassErr) {
+        console.log('[waypoint] search overpass ' + overpassErr)
+      }
+    }
+
+    suggestions = suggestions.slice(0, Math.max(limit, 9))
 
     // Only cache successful non-empty results.
     if (suggestions.length > 0) {
@@ -163,16 +355,20 @@ routerAdd('POST', '/api/waypoint/search', function (e) {
         rec.set('cache_key', cacheKey)
         rec.set('kind', 'search')
         rec.set('payload', { suggestions: suggestions })
-        rec.set('source', 'nominatim')
+        rec.set('source', 'nominatim+overpass')
         rec.set('fetched_at', new Date().toISOString())
-        rec.set('ttl_days', 180)
+        rec.set('ttl_days', 14)
         e.app.save(rec)
       } catch (cacheErr) {
         console.log('[waypoint] cache save failed ' + cacheErr)
       }
     }
 
-    return e.json(200, { suggestions: suggestions, cached: false })
+    return e.json(200, {
+      suggestions: suggestions,
+      cached: false,
+      source: 'nominatim+overpass'
+    })
   } catch (err) {
     console.log('[waypoint] search error ' + err)
     return e.json(400, {

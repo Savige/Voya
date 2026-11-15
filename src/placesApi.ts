@@ -24,14 +24,31 @@ async function readApiError(res: Response, fallback: string): Promise<string> {
   return text.length > 180 ? `${fallback} (${res.status})` : text
 }
 
-export async function searchPlaces(query: string, limit = 9): Promise<PlaceSuggestion[]> {
+export type SearchPlacesOptions = {
+  limit?: number
+  nearLat?: number
+  nearLon?: number
+}
+
+export async function searchPlaces(
+  query: string,
+  limitOrOpts: number | SearchPlacesOptions = 9,
+): Promise<PlaceSuggestion[]> {
   if (!isPocketBaseConfigured()) return []
   const q = query.trim()
   if (q.length < 2) return []
+  const opts: SearchPlacesOptions =
+    typeof limitOrOpts === 'number' ? { limit: limitOrOpts } : limitOrOpts || {}
+  const limit = opts.limit ?? 9
+  const body: Record<string, unknown> = { query: q, limit }
+  if (typeof opts.nearLat === 'number' && typeof opts.nearLon === 'number') {
+    body.nearLat = opts.nearLat
+    body.nearLon = opts.nearLon
+  }
   const res = await fetch(pocketBaseApiUrl('/api/waypoint/search'), {
     method: 'POST',
     headers: await authHeaders(),
-    body: JSON.stringify({ query: q, limit }),
+    body: JSON.stringify(body),
   })
   if (!res.ok) {
     throw new Error(await readApiError(res, 'Search failed'))

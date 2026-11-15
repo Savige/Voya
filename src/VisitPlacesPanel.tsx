@@ -1,6 +1,10 @@
-import { ExternalLink, MapPin, Plus, Trash2, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
-import { fetchLocationPhoto } from './locationPhotos'
+import { ExternalLink, ImagePlus, MapPin, Plus, Trash2, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  CATEGORY_PLACEHOLDER,
+  fileToPhotoDataUrl,
+  resolvePlacePhoto,
+} from './placePhotos'
 import { usePlaceSuggestions } from './placesHooks'
 import type { PlaceSuggestion } from './placesTypes'
 import {
@@ -15,7 +19,11 @@ function mapToVisitCategory(
 ): VisitPlaceCategory {
   const t = `${raw || ''} ${label}`.toLowerCase()
   if (/\b(hike|hiking|trail|track|walk|trek|park)\b/.test(t) || raw === 'Hike/Walk') return 'Hike'
-  if (/\b(restaurant|cafe|dining|food|eatery|bistro)\b/.test(t) || raw === 'Restaurant' || raw === 'Cafe')
+  if (
+    /\b(restaurant|cafe|café|dining|food|eatery|bistro|pub|bar|shop)\b/.test(t) ||
+    raw === 'Restaurant' ||
+    raw === 'Cafe'
+  )
     return 'Restaurant'
   if (
     /\b(lookout|viewpoint|view|scenic|tower|summit|overlook)\b/.test(t) ||
@@ -35,10 +43,31 @@ function mapToVisitCategory(
   return 'Other'
 }
 
+function CategoryThumb({
+  category,
+  className,
+}: {
+  category?: string
+  className?: string
+}) {
+  const key = ((VISIT_PLACE_CATEGORIES as readonly string[]).includes(category || '')
+    ? category
+    : 'Other') as VisitPlaceCategory
+  const style = CATEGORY_PLACEHOLDER[key] || CATEGORY_PLACEHOLDER.Other
+  return (
+    <div className={`flex h-full w-full flex-col items-center justify-center gap-1 ${style.bg} ${className || ''}`}>
+      <MapPin size={22} aria-hidden />
+      <span className="text-[10px] font-semibold uppercase tracking-wide">{style.label}</span>
+    </div>
+  )
+}
+
 type Props = {
   places: VisitPlace[]
   readOnly?: boolean
   tripCountry?: string
+  nearLat?: number
+  nearLon?: number
   placeGoogleUrl: (place: {
     label: string
     googleMapsUri?: string
@@ -52,6 +81,7 @@ type Props = {
     types?: string[],
   ) => string
   onAdd: (place: Omit<VisitPlace, 'id' | 'createdAt'>) => void
+  onUpdate: (placeId: string, patch: Partial<VisitPlace>) => void
   onDelete: (placeId: string) => void
 }
 
@@ -59,9 +89,12 @@ export function VisitPlacesPanel({
   places,
   readOnly,
   tripCountry,
+  nearLat,
+  nearLon,
   placeGoogleUrl,
   resolveRecommendationCategory,
   onAdd,
+  onUpdate,
   onDelete,
 }: Props) {
   const [query, setQuery] = useState('')
@@ -69,8 +102,13 @@ export function VisitPlacesPanel({
   const [category, setCategory] = useState<VisitPlaceCategory>('Other')
   const [draft, setDraft] = useState<PlaceSuggestion | null>(null)
   const [photoUrl, setPhotoUrl] = useState<string | undefined>()
+  const [photoBusy, setPhotoBusy] = useState(false)
+  const [photoError, setPhotoError] = useState<string | null>(null)
+  const [pasteUrl, setPasteUrl] = useState('')
   const [saving, setSaving] = useState(false)
-  const search = usePlaceSuggestions(query)
+  const draftFileRef = useRef<HTMLInputElement>(null)
+  const backfilled = useRef(new Set<string>())
+  const search = usePlaceSuggestions(query, { nearLat, nearLon })
 
   const sorted = useMemo(() => {
     return [...places].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
@@ -79,6 +117,8 @@ export function VisitPlacesPanel({
   useEffect(() => {
     if (!draft) {
       setPhotoUrl(undefined)
+      setPhotoError(null)
+      setPasteUrl('')
       return
     }
     if (draft.photoUrl) {
@@ -86,18 +126,48 @@ export function VisitPlacesPanel({
       return
     }
     let cancelled = false
-    const q = [draft.label, tripCountry].filter(Boolean).join(', ')
-    void fetchLocationPhoto(q, { pick: 'best', purpose: 'avatar', thumbWidth: 480 }).then((url) => {
-      if (!cancelled) setPhotoUrl(url || undefined)
+    setPhotoBusy(true)
+    void resolvePlacePhoto({
+      label: draft.label,
+      name: draft.name,
+      wikidataId: draft.wikidataId,
+      country: draft.country || tripCountry,
+      category: draft.category || draft.primaryType,
     })
+      .then((url) => {
+        if (!cancelled) setPhotoUrl(url || undefined)
+      })
+      .finally(() => {
+        if (!cancelled) setPhotoBusy(false)
+      })
     return () => {
       cancelled = true
     }
   }, [draft, tripCountry])
 
+  // Lazy backfill empty saved cards (Wikidata/Commons only).
+  useEffect(() => {
+    if (readOnly) return
+    for (const place of places) {
+      if (place.photoUrl || backfilled.current.has(place.id)) continue
+      backfilled.current.add(place.id)
+      void resolvePlacePhoto({
+        label: place.label,
+        name: place.name,
+        wikidataId: place.wikidataId,
+        country: tripCountry,
+        category: place.category,
+      }).then((url) => {
+        if (url) onUpdate(place.id, { photoUrl: url })
+      })
+    }
+  }, [places, readOnly, tripCountry, onUpdate])
+
   const pickSuggestion = (place: PlaceSuggestion) => {
     setDraft(place)
     setQuery(place.label)
+    setPhotoError(null)
+    setPasteUrl('')
     const inferred = resolveRecommendationCategory(
       place.category,
       place.label,
@@ -113,6 +183,45 @@ export function VisitPlacesPanel({
     setNotes('')
     setCategory('Other')
     setPhotoUrl(undefined)
+    setPhotoError(null)
+    setPasteUrl('')
+  }
+
+  const applyPasteUrl = (target: 'draft' | string) => {
+    const url = pasteUrl.trim()
+    if (!url) return
+    try {
+      // Basic sanity — allow http(s) and data URLs.
+      if (!/^https?:\/\//i.test(url) && !url.startsWith('data:image/')) {
+        setPhotoError('Use an https image URL')
+        return
+      }
+      setPhotoError(null)
+      if (target === 'draft') {
+        setPhotoUrl(url)
+        setPasteUrl('')
+      } else {
+        onUpdate(target, { photoUrl: url })
+        setPasteUrl('')
+      }
+    } catch {
+      setPhotoError('Invalid image URL')
+    }
+  }
+
+  const onPickFile = async (file: File | undefined, target: 'draft' | string) => {
+    if (!file) return
+    setPhotoBusy(true)
+    setPhotoError(null)
+    try {
+      const dataUrl = await fileToPhotoDataUrl(file)
+      if (target === 'draft') setPhotoUrl(dataUrl)
+      else onUpdate(target, { photoUrl: dataUrl })
+    } catch (err) {
+      setPhotoError(err instanceof Error ? err.message : 'Could not use image')
+    } finally {
+      setPhotoBusy(false)
+    }
   }
 
   const save = async () => {
@@ -138,6 +247,7 @@ export function VisitPlacesPanel({
         category,
         googleMapsUri: mapsUri,
         ...(notes.trim() ? { notes: notes.trim() } : {}),
+        ...(draft?.wikidataId ? { wikidataId: draft.wikidataId } : {}),
       })
       clearDraft()
     } finally {
@@ -153,7 +263,7 @@ export function VisitPlacesPanel({
             Places to explore
           </h2>
           <p className="text-neutral-500 text-sm">
-            Research spots — not on the itinerary yet.
+            Research spots — not on the itinerary yet. Photos from Wikidata/Commons when available.
           </p>
         </div>
         <span className="px-3 py-1 rounded-full border border-sky-200 bg-sky-50 text-sky-800 text-xs font-semibold dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200">
@@ -171,7 +281,7 @@ export function VisitPlacesPanel({
                 if (draft && e.target.value.trim() !== draft.label) setDraft(null)
               }}
               disabled={!onAdd}
-              placeholder="Search a place to research…"
+              placeholder="Search a place or business…"
               className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2.5 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
             />
             {query.trim().length >= 2 && !draft ? (
@@ -188,7 +298,13 @@ export function VisitPlacesPanel({
                       className="block w-full border-b border-neutral-100 px-3 py-2 text-left text-sm text-neutral-800 last:border-0 hover:bg-neutral-50 dark:border-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-900"
                       onClick={() => pickSuggestion(place)}
                     >
-                      {place.label}
+                      <span className="block truncate font-medium">
+                        {place.name || place.label.split(',')[0]}
+                      </span>
+                      <span className="block truncate text-xs text-neutral-500">
+                        {place.category ? `${place.category} · ` : ''}
+                        {place.label}
+                      </span>
                     </button>
                   ))
                 )}
@@ -203,9 +319,7 @@ export function VisitPlacesPanel({
                   {photoUrl ? (
                     <img src={photoUrl} alt="" className="h-full w-full object-cover" />
                   ) : (
-                    <div className="flex h-full items-center justify-center text-neutral-400">
-                      <MapPin size={22} aria-hidden />
-                    </div>
+                    <CategoryThumb category={category} />
                   )}
                 </div>
                 <div className="min-w-0 flex-1 space-y-2">
@@ -234,6 +348,44 @@ export function VisitPlacesPanel({
                   </div>
                 </div>
               </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <input
+                  value={pasteUrl}
+                  onChange={(e) => setPasteUrl(e.target.value)}
+                  placeholder="Paste photo URL"
+                  className="min-w-[12rem] flex-1 rounded-lg border border-neutral-200 bg-white px-2 py-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-900"
+                />
+                <button
+                  type="button"
+                  onClick={() => applyPasteUrl('draft')}
+                  disabled={!pasteUrl.trim()}
+                  className="rounded-lg border border-neutral-200 px-2 py-1.5 text-xs font-medium text-neutral-700 disabled:opacity-40 dark:border-neutral-700 dark:text-neutral-200"
+                >
+                  Use URL
+                </button>
+                <input
+                  ref={draftFileRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    void onPickFile(e.target.files?.[0], 'draft')
+                    e.target.value = ''
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={photoBusy}
+                  onClick={() => draftFileRef.current?.click()}
+                  className="inline-flex items-center gap-1 rounded-lg border border-neutral-200 px-2 py-1.5 text-xs font-medium text-neutral-700 dark:border-neutral-700 dark:text-neutral-200"
+                >
+                  <ImagePlus size={13} aria-hidden />
+                  {photoBusy ? 'Working…' : 'Upload'}
+                </button>
+              </div>
+              {photoError ? <p className="mt-1 text-xs text-rose-600">{photoError}</p> : null}
+
               <div className="mt-3 flex justify-end gap-2">
                 <button
                   type="button"
@@ -288,9 +440,7 @@ export function VisitPlacesPanel({
                       loading="lazy"
                     />
                   ) : (
-                    <div className="flex h-full items-center justify-center text-neutral-400">
-                      <MapPin size={28} aria-hidden />
-                    </div>
+                    <CategoryThumb category={place.category} />
                   )}
                 </div>
                 <div className="space-y-2 p-3">
@@ -311,6 +461,12 @@ export function VisitPlacesPanel({
                     <p className="line-clamp-3 text-xs text-neutral-600 dark:text-neutral-400">
                       {place.notes}
                     </p>
+                  ) : null}
+                  {!readOnly && !place.photoUrl ? (
+                    <CardPhotoAdd
+                      onUrl={(url) => onUpdate(place.id, { photoUrl: url })}
+                      onFile={(file) => void onPickFile(file, place.id)}
+                    />
                   ) : null}
                   <div className="flex items-center justify-between gap-2">
                     <a
@@ -340,6 +496,59 @@ export function VisitPlacesPanel({
           })}
         </ul>
       )}
+    </div>
+  )
+}
+
+function CardPhotoAdd({
+  onUrl,
+  onFile,
+}: {
+  onUrl: (url: string) => void
+  onFile: (file: File | undefined) => void
+}) {
+  const [url, setUrl] = useState('')
+  const fileRef = useRef<HTMLInputElement>(null)
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <input
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        placeholder="Add photo URL"
+        className="min-w-0 flex-1 rounded-lg border border-neutral-200 bg-white px-2 py-1 text-[11px] dark:border-neutral-700 dark:bg-neutral-900"
+      />
+      <button
+        type="button"
+        disabled={!url.trim()}
+        onClick={() => {
+          const v = url.trim()
+          if (!v) return
+          if (!/^https?:\/\//i.test(v) && !v.startsWith('data:image/')) return
+          onUrl(v)
+          setUrl('')
+        }}
+        className="rounded-md border border-neutral-200 px-1.5 py-1 text-[11px] font-medium disabled:opacity-40 dark:border-neutral-700"
+      >
+        Use
+      </button>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          onFile(e.target.files?.[0])
+          e.target.value = ''
+        }}
+      />
+      <button
+        type="button"
+        onClick={() => fileRef.current?.click()}
+        className="inline-flex items-center gap-0.5 rounded-md border border-neutral-200 px-1.5 py-1 text-[11px] font-medium dark:border-neutral-700"
+      >
+        <ImagePlus size={11} aria-hidden />
+        Upload
+      </button>
     </div>
   )
 }

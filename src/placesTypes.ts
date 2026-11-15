@@ -16,6 +16,9 @@ export type PlaceSuggestion = {
   category?: string
   primaryType?: string
   types?: string[]
+  /** OSM/Wikidata Q-id when present (free photo via P18). */
+  wikidataId?: string
+  wikipedia?: string
 }
 
 export type GeocodeResult = {

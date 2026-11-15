@@ -571,6 +571,7 @@ export function parseTripsFromUnknown(parsed: unknown): TripsState {
                     const googleMapsUri = String(x.googleMapsUri ?? '').trim()
                     const notes = String(x.notes ?? '').trim()
                     const cost = String(x.cost ?? '').trim()
+                    const wikidataId = String(x.wikidataId ?? '').trim()
                     return {
                       id: String(x.id ?? ''),
                       label: String(x.label ?? '').trim(),
@@ -582,6 +583,7 @@ export function parseTripsFromUnknown(parsed: unknown): TripsState {
                       ...(category ? { category } : {}),
                       ...(googleMapsUri ? { googleMapsUri } : {}),
                       ...(notes ? { notes } : {}),
+                      ...(wikidataId ? { wikidataId } : {}),
                       createdAt: Number(x.createdAt ?? Date.now()),
                     }
                   })

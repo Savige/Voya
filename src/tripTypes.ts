@@ -28,6 +28,8 @@ export type VisitPlace = {
   category?: string
   googleMapsUri?: string
   notes?: string
+  /** OSM Wikidata Q-id for free P18 photo lookup. */
+  wikidataId?: string
   createdAt: number
 }
 

@@ -3256,6 +3256,17 @@ export default function App() {
   const packList = selectedTrip?.packList ?? []
   const visitPlaces = selectedTrip?.visitPlaces ?? []
   const stays = useMemo(() => [...(selectedTrip?.stays ?? [])].sort((a, b) => a.startDate.localeCompare(b.startDate)), [selectedTrip?.stays])
+  const visitSearchNear = useMemo(() => {
+    const withCoords = stays.filter(
+      (s) => typeof s.lat === 'number' && typeof s.lon === 'number',
+    )
+    if (withCoords.length === 0) return { nearLat: undefined as number | undefined, nearLon: undefined as number | undefined }
+    const lat =
+      withCoords.reduce((sum, s) => sum + (s.lat as number), 0) / withCoords.length
+    const lon =
+      withCoords.reduce((sum, s) => sum + (s.lon as number), 0) / withCoords.length
+    return { nearLat: lat, nearLon: lon }
+  }, [stays])
   const bookings = selectedTrip?.bookings ?? EMPTY_TRIP_BOOKINGS
   const remaining = useMemo(() => mustDos.filter((m) => !m.done).length, [mustDos])
   const packedCount = useMemo(() => packList.filter((x) => x.done).length, [packList])
@@ -3938,6 +3949,24 @@ export default function App() {
               ...t,
               clientRev: (t.clientRev ?? 0) + 1,
               visitPlaces: t.visitPlaces.filter((p) => p.id !== placeId),
+            },
+      ),
+    }))
+  }
+
+  const updateVisitPlace = (placeId: string, patch: Partial<VisitPlace>) => {
+    if (!state.selectedTripId || tripIsReadOnly) return
+    setState((prev) => ({
+      ...prev,
+      trips: prev.trips.map((t) =>
+        t.id !== prev.selectedTripId
+          ? t
+          : {
+              ...t,
+              clientRev: (t.clientRev ?? 0) + 1,
+              visitPlaces: t.visitPlaces.map((p) =>
+                p.id === placeId ? { ...p, ...patch } : p,
+              ),
             },
       ),
     }))
@@ -7655,9 +7684,12 @@ export default function App() {
               places={visitPlaces}
               readOnly={tripIsReadOnly || !selectedTrip}
               tripCountry={selectedTrip?.country}
+              nearLat={visitSearchNear.nearLat}
+              nearLon={visitSearchNear.nearLon}
               placeGoogleUrl={placeGoogleUrl}
               resolveRecommendationCategory={resolveRecommendationCategory}
               onAdd={addVisitPlace}
+              onUpdate={updateVisitPlace}
               onDelete={deleteVisitPlace}
             />
             <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 p-7">

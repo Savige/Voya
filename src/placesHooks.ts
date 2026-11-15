@@ -98,9 +98,16 @@ export function useDestinationSuggestions(query: string) {
   return { suggestions, autocompleteError }
 }
 
-export function usePlaceSuggestions(query: string) {
+export type PlaceSuggestionsNear = {
+  nearLat?: number
+  nearLon?: number
+}
+
+export function usePlaceSuggestions(query: string, near?: PlaceSuggestionsNear) {
   const [remoteSuggestions, setRemoteSuggestions] = useState<PlaceSuggestion[]>([])
   const [autocompleteError, setAutocompleteError] = useState<string | null>(null)
+  const nearLat = near?.nearLat
+  const nearLon = near?.nearLon
 
   useEffect(() => {
     const q = query.trim()
@@ -118,7 +125,12 @@ export function usePlaceSuggestions(query: string) {
     const timer = window.setTimeout(async () => {
       try {
         setAutocompleteError(null)
-        const places = await searchPlaces(q, 9)
+        const places = await searchPlaces(q, {
+          limit: 9,
+          ...(typeof nearLat === 'number' && typeof nearLon === 'number'
+            ? { nearLat, nearLon }
+            : {}),
+        })
         if (controller.signal.aborted) return
         setRemoteSuggestions(places)
       } catch (err) {
@@ -132,7 +144,7 @@ export function usePlaceSuggestions(query: string) {
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [query])
+  }, [query, nearLat, nearLon])
 
   return { suggestions: remoteSuggestions, autocompleteError }
 }
