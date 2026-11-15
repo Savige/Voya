@@ -564,14 +564,27 @@ export function parseTripsFromUnknown(parsed: unknown): TripsState {
               : [],
             visitPlaces: Array.isArray(t.visitPlaces)
               ? t.visitPlaces
-                  .map((x: any) => ({
-                    id: String(x.id ?? ''),
-                    label: String(x.label ?? '').trim(),
-                    lat: typeof x.lat === 'number' ? x.lat : undefined,
-                    lon: typeof x.lon === 'number' ? x.lon : undefined,
-                    cost: String(x.cost ?? '').trim(),
-                    createdAt: Number(x.createdAt ?? Date.now()),
-                  }))
+                  .map((x: any) => {
+                    const name = String(x.name ?? '').trim()
+                    const photoUrl = String(x.photoUrl ?? '').trim()
+                    const category = String(x.category ?? '').trim()
+                    const googleMapsUri = String(x.googleMapsUri ?? '').trim()
+                    const notes = String(x.notes ?? '').trim()
+                    const cost = String(x.cost ?? '').trim()
+                    return {
+                      id: String(x.id ?? ''),
+                      label: String(x.label ?? '').trim(),
+                      ...(name ? { name } : {}),
+                      lat: typeof x.lat === 'number' ? x.lat : undefined,
+                      lon: typeof x.lon === 'number' ? x.lon : undefined,
+                      ...(cost ? { cost } : {}),
+                      ...(photoUrl ? { photoUrl } : {}),
+                      ...(category ? { category } : {}),
+                      ...(googleMapsUri ? { googleMapsUri } : {}),
+                      ...(notes ? { notes } : {}),
+                      createdAt: Number(x.createdAt ?? Date.now()),
+                    }
+                  })
                   .filter((x: VisitPlace) => x.id && x.label.length > 0)
               : [],
             stays: Array.isArray(t.stays)

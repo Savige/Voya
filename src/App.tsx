@@ -133,6 +133,7 @@ import {
   type Trip,
   type TripBookings,
   type TripsState,
+  type VisitPlace,
   isTripReadOnly,
   stayAccommodationForDate,
   stayAccommodationLabel,
@@ -167,6 +168,7 @@ import { BrandLogo } from './BrandLogo'
 import { buildTripBudgetSummary } from './budgetTotals'
 import { CancelAccommodationDialog } from './CancelAccommodationDialog'
 import { ItineraryDestinationsView } from './ItineraryDestinationsView'
+import { VisitPlacesPanel } from './VisitPlacesPanel'
 import { ConfirmDialog } from './ConfirmDialog'
 import {
   CONVERTER_CURRENCIES,
@@ -3899,6 +3901,48 @@ export default function App() {
     }))
   }
 
+  const addVisitPlace = (place: Omit<VisitPlace, 'id' | 'createdAt'>) => {
+    if (!state.selectedTripId || tripIsReadOnly) return
+    const label = place.label.trim()
+    if (!label) return
+    setState((prev) => ({
+      ...prev,
+      trips: prev.trips.map((t) =>
+        t.id !== prev.selectedTripId
+          ? t
+          : {
+              ...t,
+              clientRev: (t.clientRev ?? 0) + 1,
+              visitPlaces: [
+                {
+                  id: uid(),
+                  createdAt: Date.now(),
+                  ...place,
+                  label,
+                },
+                ...t.visitPlaces,
+              ],
+            },
+      ),
+    }))
+  }
+
+  const deleteVisitPlace = (placeId: string) => {
+    if (!state.selectedTripId || tripIsReadOnly) return
+    setState((prev) => ({
+      ...prev,
+      trips: prev.trips.map((t) =>
+        t.id !== prev.selectedTripId
+          ? t
+          : {
+              ...t,
+              clientRev: (t.clientRev ?? 0) + 1,
+              visitPlaces: t.visitPlaces.filter((p) => p.id !== placeId),
+            },
+      ),
+    }))
+  }
+
   const autofillFlightFromText = () => {
     const text = flightQuickInput.trim()
     if (!text) return
@@ -7607,6 +7651,15 @@ export default function App() {
           <div
             className={`space-y-8 animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
           >
+            <VisitPlacesPanel
+              places={visitPlaces}
+              readOnly={tripIsReadOnly || !selectedTrip}
+              tripCountry={selectedTrip?.country}
+              placeGoogleUrl={placeGoogleUrl}
+              resolveRecommendationCategory={resolveRecommendationCategory}
+              onAdd={addVisitPlace}
+              onDelete={deleteVisitPlace}
+            />
             <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 p-7">
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div>

@@ -144,11 +144,13 @@ export function buildMapPointsFromTrip(
   }
 
   for (const p of visitPlaces) {
+    const title = (p.name || p.label.split(',')[0] || p.label).trim() || p.label
     out.push({
       key: `place:${p.id}`,
-      label: p.label,
+      label: p.category ? `${title} · ${p.category}` : title,
       markerKind: 'place',
       category: 'place',
+      addressHint: p.label,
       lat: p.lat,
       lon: p.lon,
     })

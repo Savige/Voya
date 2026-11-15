@@ -13,14 +13,34 @@ export type PackListItem = {
   createdAt: number
 }
 
+/** Research / wishlist place — not a dated itinerary stop. */
 export type VisitPlace = {
   id: string
+  /** Full place line (often from search: name + region). */
   label: string
+  /** Short display title when known. */
+  name?: string
   lat?: number
   lon?: number
+  /** Legacy; not shown in Tips UI. */
   cost?: string
+  photoUrl?: string
+  category?: string
+  googleMapsUri?: string
+  notes?: string
   createdAt: number
 }
+
+export const VISIT_PLACE_CATEGORIES = [
+  'Hike',
+  'Restaurant',
+  'Activity',
+  'Lookout',
+  'Town',
+  'Other',
+] as const
+
+export type VisitPlaceCategory = (typeof VISIT_PLACE_CATEGORIES)[number]
 
 /** Optional lodging booked under a place stop. */
 export type StopAccommodation = {
