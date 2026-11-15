@@ -256,9 +256,12 @@ const resolveRecommendationCategory = (existingCategory: string | undefined, tex
   const fromGoogleTypes = categoryFromGoogleTypes(primaryType, types)
   // Prefer OSM/Google type, but also re-check text so "Roy's Peak" → Hike even if type is thin.
   const fromText = recommendationCategoryFromText(text)
-  const fromExistingType = categoryFromGoogleTypes(existingCategory, existingCategory ? [existingCategory] : undefined)
+  const fromExistingType = categoryFromGoogleTypes(
+    existingCategory,
+    existingCategory ? [existingCategory] : undefined,
+  )
   const inferred =
-    (fromGoogleTypes && fromGoogleTypes !== 'Other' ? fromGoogleTypes : undefined) ||
+    fromGoogleTypes ||
     (fromText !== 'Other' ? fromText : undefined) ||
     fromExistingType ||
     'Other'
