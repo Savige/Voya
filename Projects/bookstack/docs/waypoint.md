@@ -130,7 +130,7 @@ cd ~/Voya   # or wherever the repo lives
 ./deploy/deploy-nas.sh
 ```
 
-That syncs to `/volume1/docker/waypoint`, rebuilds Docker images, recreates `waypoint` (SPA) and `waypoint-pb17` (PocketBase). Does not touch `pocketbase/pb_data` or `deploy/.env.production` on the NAS.
+That syncs to `/volume1/docker/waypoint`, rebuilds Docker images, recreates `waypoint` (SPA) and a fresh `waypoint-pb*` PocketBase container (Synology btrfs often leaves old PB names stuck in “Removal In Progress”). Does not touch `pocketbase/pb_data` or `deploy/.env.production` on the NAS.
 
 First-time proxy / env:
 

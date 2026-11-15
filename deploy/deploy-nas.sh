@@ -52,18 +52,20 @@ docker tag deploy_waypoint:latest waypoint_waypoint:latest 2>/dev/null || true
 docker tag deploy_pocketbase:latest waypoint_pocketbase:latest 2>/dev/null || true
 
 # SPA / nginx — container name "waypoint" may belong to another compose project
-docker stop waypoint 2>/dev/null || true
-docker rm waypoint 2>/dev/null || true
+docker rm -f waypoint 2>/dev/null || true
 docker run -d \
   --name waypoint \
   --restart unless-stopped \
   -p 8081:80 \
   waypoint_waypoint:latest
 
-# PocketBase — keep working container name + mounts used on this NAS
-PB_NAME=waypoint-pb17
-docker stop "$PB_NAME" 2>/dev/null || true
-docker rm "$PB_NAME" 2>/dev/null || true
+# PocketBase — Synology btrfs often leaves old containers stuck in "Removal In
+# Progress", so always start a fresh name and stop any currently running pb.
+while read -r c; do
+  [[ -n "$c" ]] || continue
+  docker stop "$c" 2>/dev/null || true
+done < <(docker ps --filter name='^waypoint-pb' --format '{{.Names}}')
+PB_NAME="waypoint-pb$(date +%y%m%d%H%M)"
 docker run -d \
   --name "$PB_NAME" \
   --restart unless-stopped \
