@@ -403,7 +403,16 @@ export function ItineraryDestinationsView({
                             </div>
 
                             <ul className="mt-2 space-y-1.5">
-                              {stops.map((stop) => (
+                              {stops.map((stop) => {
+                                const mapsLabel =
+                                  (stop.placeLabel || '').trim() ||
+                                  [stop.name, stop.notes].filter(Boolean).join(', ') ||
+                                  stop.name
+                                const mapsUrl = placeGoogleUrl({
+                                  label: mapsLabel,
+                                  googleMapsUri: stop.googleMapsUri,
+                                })
+                                return (
                                 <li key={stop.id}>
                                   <div className="flex items-start gap-2 rounded-lg border border-white/10 bg-slate-900/60 px-2.5 py-2">
                                     <span
@@ -432,6 +441,17 @@ export function ItineraryDestinationsView({
                                         </p>
                                       ) : null}
                                     </button>
+                                    <a
+                                      href={mapsUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-white/10 hover:text-sky-200"
+                                      aria-label={`Open ${stop.name} in Maps`}
+                                      title="Open in Maps"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <MapPin size={14} aria-hidden />
+                                    </a>
                                     {!readOnly ? (
                                       <button
                                         type="button"
@@ -444,7 +464,8 @@ export function ItineraryDestinationsView({
                                     ) : null}
                                   </div>
                                 </li>
-                              ))}
+                                )
+                              })}
                               {stops.length === 0 && !composing ? (
                                 <li className="px-0.5 py-1 text-xs text-slate-500">No stops yet.</li>
                               ) : null}
