@@ -47,8 +47,18 @@ fi
 
 "${COMPOSE[@]}" -f deploy/docker-compose.yml --env-file "$ENV_FILE" build
 
-# SPA / nginx
-"${COMPOSE[@]}" -f deploy/docker-compose.yml --env-file "$ENV_FILE" up -d --no-deps --force-recreate waypoint
+# Tag images the way this NAS already runs them
+docker tag deploy_waypoint:latest waypoint_waypoint:latest 2>/dev/null || true
+docker tag deploy_pocketbase:latest waypoint_pocketbase:latest 2>/dev/null || true
+
+# SPA / nginx — container name "waypoint" may belong to another compose project
+docker stop waypoint 2>/dev/null || true
+docker rm waypoint 2>/dev/null || true
+docker run -d \
+  --name waypoint \
+  --restart unless-stopped \
+  -p 8081:80 \
+  waypoint_waypoint:latest
 
 # PocketBase — keep working container name + mounts used on this NAS
 PB_NAME=waypoint-pb17
