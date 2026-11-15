@@ -204,13 +204,18 @@ const recommendationCategoryFromText = (text: string) => {
   if (/\b(restaurant|diner|grill|sushi|ramen|eatery|bistro|steakhouse|streat|kai)\b/.test(t)) return 'Restaurant'
   if (/\b(spa|wellness|relax|massage|onsen|hot spring|hot tub|hot tubs|thermal|sauna|calm|retreat)\b/.test(t)) return 'Relaxation'
   if (/\b(adventure|adventures|zipline|rafting|climb|kayak|surf|snorkel|tour|tours|glow worm|glow-worm)\b/.test(t)) return 'Experiences/Adventure'
-  if (/\b(hike|hiking|trail|track|walk|trek|summit|pathway|boardwalk|route)\b/.test(t)) return 'Hike/Walk'
+  if (
+    /\b(hike|hiking|trail|track|walk|trek|summit|peak|mountain|ridge|saddle|pathway|boardwalk|route)\b/.test(
+      t,
+    )
+  )
+    return 'Hike/Walk'
   if (/\b(hotel|hostel|resort|inn|apartment|accommodation)\b/.test(t)) return 'Accommodation'
   if (/\b(museum|gallery|temple|shrine|culture|historic)\b/.test(t)) return 'Museum/Culture'
   if (/\b(shopping|market|mall|boutique)\b/.test(t)) return 'Shopping'
   if (/\b(cafe|coffee|bakery|tea)\b/.test(t)) return 'Cafe'
   if (/\b(bar|club|nightlife|pub|cocktail)\b/.test(t)) return 'Nightlife'
-  if (/\b(tower|viewpoint|landmark|plaza|square)\b/.test(t)) return 'Landmark'
+  if (/\b(tower|viewpoint|lookout|landmark|plaza|square|overlook)\b/.test(t)) return 'Landmark'
   return 'Other'
 }
 
@@ -221,16 +226,42 @@ const categoryFromGoogleTypes = (primaryType?: string, types?: string[]) => {
   if (ordered.length === 0) return undefined
 
   const has = (...keys: string[]) => keys.some((k) => ordered.includes(k))
-  if (has('restaurant', 'food', 'meal_takeaway', 'meal_delivery')) return 'Restaurant'
+  if (has('restaurant', 'food', 'meal_takeaway', 'meal_delivery', 'cafe', 'fast_food', 'pub', 'bar'))
+    return 'Restaurant'
   if (has('spa', 'sauna', 'wellness_center', 'hot_spring', 'bath')) return 'Relaxation'
   if (has('tourist_attraction', 'tour_agency', 'travel_agency', 'adventure_sports_center', 'amusement_center')) return 'Experiences/Adventure'
-  if (has('hiking_area', 'trail_head', 'park', 'campground')) return 'Hike/Walk'
+  // OSM natural=* / tourism tags often arrive as primaryType/category.
+  if (
+    has(
+      'hiking_area',
+      'trail_head',
+      'park',
+      'campground',
+      'peak',
+      'mountain',
+      'ridge',
+      'saddle',
+      'alpine_hut',
+      'wilderness_hut',
+      'path',
+      'footway',
+    )
+  )
+    return 'Hike/Walk'
+  if (has('viewpoint', 'attraction')) return 'Landmark'
   return undefined
 }
 
 const resolveRecommendationCategory = (existingCategory: string | undefined, text: string, primaryType?: string, types?: string[]) => {
   const fromGoogleTypes = categoryFromGoogleTypes(primaryType, types)
-  const inferred = fromGoogleTypes || recommendationCategoryFromText(text)
+  // Prefer OSM/Google type, but also re-check text so "Roy's Peak" → Hike even if type is thin.
+  const fromText = recommendationCategoryFromText(text)
+  const fromExistingType = categoryFromGoogleTypes(existingCategory, existingCategory ? [existingCategory] : undefined)
+  const inferred =
+    (fromGoogleTypes && fromGoogleTypes !== 'Other' ? fromGoogleTypes : undefined) ||
+    (fromText !== 'Other' ? fromText : undefined) ||
+    fromExistingType ||
+    'Other'
   const existing = (existingCategory ?? '').trim()
   if (inferred !== 'Other') return inferred
   if (!existing || existing.toLowerCase() === 'other') return 'Other'

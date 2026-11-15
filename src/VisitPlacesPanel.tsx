@@ -18,7 +18,14 @@ function mapToVisitCategory(
   label: string,
 ): VisitPlaceCategory {
   const t = `${raw || ''} ${label}`.toLowerCase()
-  if (/\b(hike|hiking|trail|track|walk|trek|park)\b/.test(t) || raw === 'Hike/Walk') return 'Hike'
+  // Peaks/summits/mountains → Hike (e.g. Roy's Peak), not Lookout.
+  if (
+    /\b(hike|hiking|trail|track|walk|trek|park|peak|peaks|summit|mountain|ridge|saddle|alpine)\b/.test(
+      t,
+    ) ||
+    raw === 'Hike/Walk'
+  )
+    return 'Hike'
   if (
     /\b(restaurant|cafe|café|dining|food|eatery|bistro|pub|bar|shop)\b/.test(t) ||
     raw === 'Restaurant' ||
@@ -26,7 +33,7 @@ function mapToVisitCategory(
   )
     return 'Restaurant'
   if (
-    /\b(lookout|viewpoint|view|scenic|tower|summit|overlook)\b/.test(t) ||
+    /\b(lookout|viewpoint|scenic|tower|overlook)\b/.test(t) ||
     raw === 'Landmark'
   )
     return 'Lookout'
@@ -145,10 +152,17 @@ export function VisitPlacesPanel({
     }
   }, [draft, tripCountry])
 
-  // Lazy backfill empty saved cards (Wikidata/Commons only).
+  // Lazy backfill empty saved cards (Wikidata/Commons only) + fix weak categories.
   useEffect(() => {
     if (readOnly) return
     for (const place of places) {
+      const rawCat = (place.category || '').trim()
+      if (!rawCat || rawCat === 'Other' || rawCat.toLowerCase() === 'peak') {
+        const better = mapToVisitCategory(rawCat || undefined, `${place.name || ''} ${place.label}`)
+        if (better !== 'Other' && better !== rawCat) {
+          onUpdate(place.id, { category: better })
+        }
+      }
       if (place.photoUrl || backfilled.current.has(place.id)) continue
       backfilled.current.add(place.id)
       void resolvePlacePhoto({
