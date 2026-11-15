@@ -217,18 +217,19 @@ export function stayLodgingCoverage(stay: Stay | null | undefined): StayLodgingC
   }
 }
 
-/** Lodging covering a given itinerary day, if any. */
+/** Lodging covering a given itinerary day, if any (no primary fallback — uncovered nights stay empty). */
 export function stayAccommodationForDate(
   stay: Stay | null | undefined,
   date: string,
 ): StopAccommodation | null {
-  if (!stay || !date) return stayPrimaryAccommodation(stay)
+  if (!stay || !date) return null
   const confirmed = stayConfirmedAccommodations(stay)
-  const hit = confirmed.find((a) => {
-    const { checkIn, checkOut } = lodgingCoverageInterval(a, stay)
-    return date >= checkIn && date < checkOut
-  })
-  return hit || stayPrimaryAccommodation(stay)
+  return (
+    confirmed.find((a) => {
+      const { checkIn, checkOut } = lodgingCoverageInterval(a, stay)
+      return date >= checkIn && date < checkOut
+    }) || null
+  )
 }
 
 export type StayActivity = {

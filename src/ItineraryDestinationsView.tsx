@@ -373,6 +373,11 @@ export function ItineraryDestinationsView({
                                     <p className="text-[11px] text-slate-400 truncate">
                                       {dayLodgingName}
                                     </p>
+                                  ) : coverage.partialCoverage &&
+                                    coverage.uncoveredNights.includes(day) ? (
+                                    <p className="text-[11px] font-medium text-amber-300/90">
+                                      No lodging this night
+                                    </p>
                                   ) : (
                                     <p className="text-[11px] text-slate-500">
                                       {stopTotal === 0
