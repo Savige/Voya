@@ -21,18 +21,18 @@ The extra **`docker-compose.mail.yml`** runs **Inbucket** so GoTrue can send sig
 
 | Service | Port | Notes |
 |---------|------|--------|
-| Kong (HTTP) | **8000** | NPM should proxy `api.ryansavige.com` → `172.17.0.1:8000` |
+| Kong (HTTP) | **8000** | NPM should proxy `api.savige.me` → `172.17.0.1:8000` |
 | Kong (HTTPS) | **8444** | Default 8443 was in use by another container; changed in `.env` |
 | Inbucket web UI | **9000** | `http://127.0.0.1:9000` — read confirmation emails in dev |
 | Inbucket SMTP | **2500** | Used by `auth`; hostname `supabase-mail` on Docker network |
 
 ## URLs in `.env`
 
-Set for `ryansavige.com`:
+Set for `savige.me`:
 
-- `SUPABASE_PUBLIC_URL=https://api.ryansavige.com`
-- `API_EXTERNAL_URL=https://api.ryansavige.com`
-- `SITE_URL=https://waypoint.ryansavige.com`
+- `SUPABASE_PUBLIC_URL=https://api.savige.me`
+- `API_EXTERNAL_URL=https://api.savige.me`
+- `SITE_URL=https://waypoint.savige.me`
 - `ADDITIONAL_REDIRECT_URLS` includes the waypoint app origin
 - `ENABLE_EMAIL_AUTOCONFIRM=false` (confirm via email)
 

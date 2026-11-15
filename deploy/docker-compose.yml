@@ -2,7 +2,7 @@
 #   docker-compose -f deploy/docker-compose.yml up -d --build
 #
 # Compose loads env from deploy/.env (symlink to .env.production) when present.
-# Production: https://waypoint.ryansavige.com  +  https://pocketbase.ryansavige.com
+# Production: https://waypoint.savige.me  +  https://pocketbase.savige.me
 
 services:
   pocketbase:
@@ -13,6 +13,11 @@ services:
     #   docker run -d --name waypoint-pb2 --restart unless-stopped -p 8090:8090 \
     #     -v .../pb_data:/pb/pb_data -v .../pb_hooks:/pb/pb_hooks waypoint_pocketbase:latest
     container_name: waypoint-pocketbase
+    environment:
+      # Shared with Cloudflare Email Worker (Bearer / X-Waypoint-Email-Secret)
+      BOOKING_EMAIL_WEBHOOK_SECRET: ${BOOKING_EMAIL_WEBHOOK_SECRET:-}
+      # AeroDataBox via RapidAPI — flight schedule lookup (Basic $0 plan OK)
+      AERODATABOX_RAPIDAPI_KEY: ${AERODATABOX_RAPIDAPI_KEY:-}
     volumes:
       - ../pocketbase/pb_data:/pb/pb_data
       - ../pocketbase/pb_hooks:/pb/pb_hooks
@@ -25,7 +30,7 @@ services:
       context: ..
       dockerfile: Dockerfile
       args:
-        VITE_POCKETBASE_URL: ${VITE_POCKETBASE_URL:-https://pocketbase.ryansavige.com}
+        VITE_POCKETBASE_URL: ${VITE_POCKETBASE_URL:-https://pocketbase.savige.me}
         VITE_APP_BUILD: ${VITE_APP_BUILD:-synology}
         BUILD_NUMBER: ${BUILD_NUMBER:-}
     container_name: waypoint

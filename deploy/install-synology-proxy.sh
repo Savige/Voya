@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install Synology reverse proxies:
-#   https://waypoint.ryansavige.com     ->  http://127.0.0.1:8081  (SPA)
-#   https://pocketbase.ryansavige.com   ->  http://127.0.0.1:8090  (PocketBase)
+#   https://waypoint.savige.me     ->  http://127.0.0.1:8081  (SPA)
+#   https://pocketbase.savige.me   ->  http://127.0.0.1:8090  (PocketBase)
 # Run on the NAS as admin:  sudo bash deploy/install-synology-proxy.sh
 set -euo pipefail
 
@@ -35,6 +35,12 @@ for key, rule in list(data.items()):
         continue
     frontend = rule.get("frontend") or {}
     if frontend.get("fqdn") in (
+        "waypoint.savige.me",
+        "pocketbase.savige.me",
+        "waypoint-api.savige.me",
+        "voya.savige.me",
+        "voya-api.savige.me",
+        # legacy ryansavige.com hosts (remove on cutover)
         "waypoint.ryansavige.com",
         "pocketbase.ryansavige.com",
         "waypoint-api.ryansavige.com",
@@ -70,8 +76,8 @@ def rule(rid, fqdn, port, desc):
         "proxy_send_timeout": 60,
     }
 
-data[app_id] = rule(app_id, "waypoint.ryansavige.com", 8081, "Waypoint app")
-data[api_id] = rule(api_id, "pocketbase.ryansavige.com", 8090, "PocketBase (Waypoint)")
+data[app_id] = rule(app_id, "waypoint.savige.me", 8081, "Waypoint app")
+data[api_id] = rule(api_id, "pocketbase.savige.me", 8090, "PocketBase (Waypoint)")
 with open(path, "w") as f:
     json.dump(data, f, indent="\t")
     f.write("\n")
@@ -82,7 +88,7 @@ CERT_INCLUDE=""
 TLS_PROFILE=""
 for conf in /usr/syno/etc/www/certificate/*/cert.conf; do
   [[ -f "$conf" ]] || continue
-  if grep -q "ryansavige.com" "$conf" 2>/dev/null; then
+  if grep -q "savige.me" "$conf" 2>/dev/null; then
     dir=$(dirname "$conf")
     base=$(basename "$dir")
     CERT_INCLUDE="include /usr/syno/etc/www/certificate/${base}/cert.conf*;"
@@ -90,15 +96,38 @@ for conf in /usr/syno/etc/www/certificate/*/cert.conf; do
     break
   fi
 done
+# Temporary fallback while *.savige.me cert is being issued
+if [[ -z "${CERT_INCLUDE}" ]]; then
+  for conf in /usr/syno/etc/www/certificate/*/cert.conf; do
+    [[ -f "$conf" ]] || continue
+    if grep -q "ryansavige.com" "$conf" 2>/dev/null; then
+      dir=$(dirname "$conf")
+      base=$(basename "$dir")
+      CERT_INCLUDE="include /usr/syno/etc/www/certificate/${base}/cert.conf*;"
+      TLS_PROFILE="include /usr/syno/etc/security-profile/tls-profile/config/${base}.conf*;"
+      break
+    fi
+  done
+fi
 
 if [[ -z "${CERT_INCLUDE}" ]]; then
   CERT_DIR="/usr/syno/etc/certificate/ReverseProxy/${APP_RP_ID}"
   WWW_CERT_DIR="/usr/syno/etc/www/certificate/ReverseProxy_${APP_RP_ID}"
-  ACME_DIR="/volume1/docker/acme/config/*.ryansavige.com_ecc"
+  ACME_DIR=""
+  for d in /volume1/docker/acme/config/*.savige.me_ecc /volume1/docker/acme/config/*.ryansavige.com_ecc; do
+    [[ -d "$d" ]] || continue
+    ACME_DIR="$d"
+    break
+  done
+  if [[ -z "$ACME_DIR" ]]; then
+    echo "No ACME cert dir found under /volume1/docker/acme/config for savige.me (or legacy ryansavige.com)."
+    exit 1
+  fi
   mkdir -p "$CERT_DIR" "$WWW_CERT_DIR"
   cp -f "$ACME_DIR/fullchain.cer" "$CERT_DIR/fullchain.pem"
   cp -f "$ACME_DIR/fullchain.cer" "$CERT_DIR/cert.pem"
-  cp -f "$ACME_DIR/"*.ryansavige.com.key "$CERT_DIR/privkey.pem"
+  KEY_FILE=$(ls "$ACME_DIR"/*.key 2>/dev/null | head -1)
+  cp -f "$KEY_FILE" "$CERT_DIR/privkey.pem"
   cp -f "$ACME_DIR/ca.cer" "$CERT_DIR/chain.pem"
   chmod 400 "$CERT_DIR"/*
   cat > "$WWW_CERT_DIR/cert.conf" <<EOF
@@ -160,8 +189,8 @@ server {
 EOF
 }
 
-write_site "$APP_SITE_CONF" "waypoint.ryansavige.com" "http://127.0.0.1:8081"
-write_site "$API_SITE_CONF" "pocketbase.ryansavige.com" "http://127.0.0.1:8090"
+write_site "$APP_SITE_CONF" "waypoint.savige.me" "http://127.0.0.1:8081"
+write_site "$API_SITE_CONF" "pocketbase.savige.me" "http://127.0.0.1:8090"
 
 # Drop old enabled links if re-running
 rm -f /usr/local/etc/nginx/sites-enabled/server.waypoint-app.conf \
@@ -182,8 +211,8 @@ if nginx -t 2>/dev/null; then
     nginx -s reload
   fi
   echo "Reverse proxy enabled:"
-  echo "  https://waypoint.ryansavige.com    -> :8081"
-  echo "  https://pocketbase.ryansavige.com  -> :8090"
+  echo "  https://waypoint.savige.me    -> :8081"
+  echo "  https://pocketbase.savige.me  -> :8090"
 else
   echo "nginx -t failed; restore backup if needed: $BACKUP"
   exit 1
@@ -193,6 +222,6 @@ echo
 echo "DNS (Cloudflare DNS-only / grey cloud):"
 echo "  A  waypoint    192.168.1.165"
 echo "  A  pocketbase  192.168.1.165"
-echo "  (or a *.ryansavige.com wildcard covering both)"
+echo "  (or a *.savige.me wildcard covering both)"
 echo
-echo "DSM: Control Panel → Security → Certificate → assign *.ryansavige.com to these reverse proxies if TLS looks wrong."
+echo "DSM: Control Panel → Security → Certificate → assign *.savige.me to these reverse proxies if TLS looks wrong."

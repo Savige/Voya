@@ -1,0 +1,8 @@
+name = "waypoint-email-inbound"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Bind via Cloudflare dashboard Email Routing → Worker route.
+# Secrets: WAYPOINT_EMAIL_WEBHOOK_URL, WAYPOINT_EMAIL_WEBHOOK_SECRET
+
+account_id = "82c39dfcb14c42f10b529aa372344a8f"

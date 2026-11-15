@@ -1,7 +1,7 @@
 # Deploying Waypoint
 
-Production host: **https://waypoint.ryansavige.com**  
-API (PocketBase): **https://pocketbase.ryansavige.com**
+Production host: **https://waypoint.savige.me**  
+API (PocketBase): **https://pocketbase.savige.me**
 
 See **[deploy/SYNOLOGY.md](deploy/SYNOLOGY.md)**.
 
@@ -13,6 +13,6 @@ sudo bash deploy/install-synology-proxy.sh
 
 | Variable | Required? | Notes |
 |----------|-----------|--------|
-| `VITE_POCKETBASE_URL` | Yes for sync | `https://pocketbase.ryansavige.com` |
+| `VITE_POCKETBASE_URL` | Yes for sync | `https://pocketbase.savige.me` |
 
 No Google Maps/Places keys. Missing PocketBase URL → local-only browser storage.

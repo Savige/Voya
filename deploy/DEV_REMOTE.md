@@ -3,7 +3,7 @@
 Use when the SPA runs on your Mac (`npm run dev`) but PocketBase runs on the NAS.
 
 ```env
-VITE_POCKETBASE_URL=https://pocketbase.ryansavige.com
+VITE_POCKETBASE_URL=https://pocketbase.savige.me
 VITE_DEV_AUTH_BYPASS=0
 ```
 

@@ -10,9 +10,9 @@ Open **`http://YOUR_SERVER_IP:81`** (default NPM admin port). First login is oft
 
 Before requesting Let’s Encrypt certificates, create **A** (or **CNAME**) records so each hostname resolves to this server:
 
-- `waypoint.ryansavige.com`
-- `api.ryansavige.com`
-- `cc.ryansavige.com` (if used)
+- `waypoint.savige.me`
+- `api.savige.me`
+- `cc.savige.me` (if used)
 
 ## Proxy Hosts
 
@@ -20,9 +20,9 @@ Before requesting Let’s Encrypt certificates, create **A** (or **CNAME**) reco
 
 | Domain names | Scheme | Forward hostname | Forward port | Websockets |
 |--------------|--------|------------------|--------------|------------|
-| `waypoint.ryansavige.com` | HTTP | see below | `8081` (prod) or **`5173`** (Vite dev — instant reload) | **On** for dev (HMR WebSockets); optional for static prod |
-| `api.ryansavige.com` | HTTP | see below | `8000` | **On** (Supabase Auth / Realtime) |
-| `cc.ryansavige.com` | HTTP | see below | *your app port* | As needed |
+| `waypoint.savige.me` | HTTP | see below | `8081` (prod) or **`5173`** (Vite dev — instant reload) | **On** for dev (HMR WebSockets); optional for static prod |
+| `api.savige.me` | HTTP | see below | `8000` | **On** (Supabase Auth / Realtime) |
+| `cc.savige.me` | HTTP | see below | *your app port* | As needed |
 
 **Forward hostname:** If NPM runs **on the host** (not in Docker), use **`127.0.0.1`**. If NPM runs **inside Docker** (common), use **`172.17.0.1`** on Linux so the container reaches the host — **`127.0.0.1` inside the NPM container is not your host** and will 502. Do **not** use a public DDNS name (e.g. `ryan.1260.me`) as the forward target.
 
@@ -47,8 +47,8 @@ You see that page when the hostname you open is **not** listed on any Proxy Host
 
 ## Supabase and Waypoint
 
-- Rebuild Waypoint with `VITE_SUPABASE_URL=https://api.ryansavige.com` (see [`.env.production.example`](.env.production.example)).
-- In Supabase `docker/.env`, set public URLs to `https://api.ryansavige.com` and site URL to `https://waypoint.ryansavige.com` as in [SUPABASE.md](SUPABASE.md).
+- Rebuild Waypoint with `VITE_SUPABASE_URL=https://api.savige.me` (see [`.env.production.example`](.env.production.example)).
+- In Supabase `docker/.env`, set public URLs to `https://api.savige.me` and site URL to `https://waypoint.savige.me` as in [SUPABASE.md](SUPABASE.md).
 
 ## Firewall
 

@@ -1,7 +1,7 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// DEV_HMR_HOST — when set (e.g. waypoint.ryansavige.com), HMR uses wss:443 behind NPM + HTTPS.
+// DEV_HMR_HOST — when set (e.g. waypoint.savige.me), HMR uses wss:443 behind NPM + HTTPS.
 // See deploy/DEV_REMOTE.md
 
 /** Bottom-right build label; recomputed on every `vite build` / dev server start. Not taken from .env files (avoids a stale pinned string). */
@@ -34,6 +34,15 @@ export default defineConfig(({ mode }) => {
       host: true,
       port: 5173,
       strictPort: true,
+      proxy: {
+        // Browser → same-origin → public OSRM (avoids flaky CORS / tracker blocks).
+        '/osrm': {
+          target: 'https://router.project-osrm.org',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (p) => p.replace(/^\/osrm/, ''),
+        },
+      },
       ...(devHmrHost
         ? {
             allowedHosts: true,

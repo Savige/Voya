@@ -15,7 +15,7 @@ Waypoint expects the full Supabase stack (Postgres, Auth, PostgREST, Kong, etc.)
 3. Copy `.env.example` to `.env` and follow **[Self-Hosting with Docker](https://supabase.com/docs/guides/self-hosting/docker)** to:
    - Change default passwords and secrets.
    - Generate JWT settings and keys as documented.
-   - Set `SUPABASE_PUBLIC_URL`, `API_EXTERNAL_URL`, `SITE_URL`, and `ADDITIONAL_REDIRECT_URLS` to match how browsers will reach your instance (e.g. `https://api.ryansavige.com` for the API and `https://waypoint.ryansavige.com` for the app).
+   - Set `SUPABASE_PUBLIC_URL`, `API_EXTERNAL_URL`, `SITE_URL`, and `ADDITIONAL_REDIRECT_URLS` to match how browsers will reach your instance (e.g. `https://api.savige.me` for the API and `https://waypoint.savige.me` for the app).
 
 4. Start the stack (from the `docker` directory):
 
@@ -31,7 +31,7 @@ Waypoint expects the full Supabase stack (Postgres, Auth, PostgREST, Kong, etc.)
 
    (See [SERVER_SETUP.md](SERVER_SETUP.md) if this repo documents a specific server layout.)
 
-5. Confirm Kong is reachable (default HTTP port from `.env`: often `8000`). The **Project URL** you pass to the frontend is this API URL (e.g. `https://api.ryansavige.com` behind a reverse proxy).
+5. Confirm Kong is reachable (default HTTP port from `.env`: often `8000`). The **Project URL** you pass to the frontend is this API URL (e.g. `https://api.savige.me` behind a reverse proxy).
 
 6. From `.env`, copy `ANON_KEY` (and optionally verify in Studio) for `VITE_SUPABASE_ANON_KEY` when building Waypoint.
 
@@ -41,7 +41,7 @@ Waypoint sends users to a **“Confirm your email”** screen and uses `emailRed
 
 1. **SMTP** — Configure GoTrue mail settings in `docker/.env` (see [Auth emails](https://supabase.com/docs/guides/self-hosting/docker#configuring-auth-emails) / `GOTRUE_SMTP_*` in the official `.env.example`).
 2. **Do not auto-confirm** — Set **`ENABLE_EMAIL_AUTOCONFIRM=false`** (or `GOTRUE_MAILER_AUTOCONFIRM=false` depending on your stack version) so new users must click the link before they can sign in.
-3. **Redirect URLs** — In Studio **Authentication → URL Configuration**, add your app URL (e.g. `https://waypoint.ryansavige.com` and `https://waypoint.ryansavige.com/**`) to **Redirect URLs** so the confirmation link can return users to the app. The app sends `emailRedirectTo` as the site origin with a trailing slash (e.g. `https://waypoint.ryansavige.com/`); include that exact string in **Redirect URLs** or sign-up can fail with a redirect validation error.
+3. **Redirect URLs** — In Studio **Authentication → URL Configuration**, add your app URL (e.g. `https://waypoint.savige.me` and `https://waypoint.savige.me/**`) to **Redirect URLs** so the confirmation link can return users to the app. The app sends `emailRedirectTo` as the site origin with a trailing slash (e.g. `https://waypoint.savige.me/`); include that exact string in **Redirect URLs** or sign-up can fail with a redirect validation error.
 
 If email is not configured, sign-up may still create users (depending on settings) but no message will arrive until SMTP is set.
 
@@ -61,7 +61,7 @@ If the app errors with **“Could not find the table `public.shared_itineraries`
 ## 3. Security
 
 - Do not expose Postgres port `5432` to the public internet unless required and locked down.
-- Prefer TLS on `api.ryansavige.com` via Nginx Proxy Manager (or Nginx) in front of Kong.
+- Prefer TLS on `api.savige.me` via Nginx Proxy Manager (or Nginx) in front of Kong.
 - Review [Configuring and securing Supabase](https://supabase.com/docs/guides/self-hosting/docker#configuring-and-securing-supabase).
 
 ## 4. Updates
