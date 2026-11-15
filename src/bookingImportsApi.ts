@@ -96,25 +96,41 @@ export function enrichTripFromImportParses(trip: Trip, parses: ParsedBookingFiel
         }
       }
       const lodging = mergeLodgingFromParsed(parsed, confirmation, prevLodging, prevBooking)
-      const before = JSON.stringify({
-        lodging: prevLodging,
-        booking: prevBooking
+      const snapshot = (row: {
+        price?: string
+        amountPaid?: string
+        amountOwing?: string
+        address?: string
+        bookingUrl?: string
+        checkInTime?: string
+        checkOutTime?: string
+        photoUrl?: string
+        name?: string
+        checkIn?: string
+        checkOut?: string
+      } | null | undefined) =>
+        row
           ? {
-              price: prevBooking.price,
-              amountPaid: prevBooking.amountPaid,
-              amountOwing: prevBooking.amountOwing,
-              photoUrl: prevBooking.photoUrl,
+              price: row.price || '',
+              amountPaid: row.amountPaid || '',
+              amountOwing: row.amountOwing || '',
+              address: row.address || '',
+              bookingUrl: row.bookingUrl || '',
+              checkInTime: row.checkInTime || '',
+              checkOutTime: row.checkOutTime || '',
+              photoUrl: row.photoUrl || '',
+              name: row.name || '',
+              checkIn: row.checkIn || '',
+              checkOut: row.checkOut || '',
             }
-          : null,
+          : null
+      const before = JSON.stringify({
+        lodging: snapshot(prevLodging),
+        booking: snapshot(prevBooking),
       })
       const after = JSON.stringify({
-        lodging,
-        booking: {
-          price: lodging.price,
-          amountPaid: lodging.amountPaid,
-          amountOwing: lodging.amountOwing,
-          photoUrl: lodging.photoUrl,
-        },
+        lodging: snapshot(lodging),
+        booking: snapshot(lodging),
       })
       if (before === after) continue
       dirty = true
@@ -320,7 +336,20 @@ function upsertByConfirmation<T extends { id: string; confirmation: string; crea
   const idx = list.findIndex((x) => confKey(x.confirmation) === key)
   if (idx < 0) return [...list, next]
   const prev = list[idx]
-  return list.map((x, i) => (i === idx ? { ...prev, ...next, id: prev.id, createdAt: prev.createdAt } : x))
+  // Never let empty strings from a thinner row wipe known fields.
+  const merged: Record<string, unknown> = { ...prev, id: prev.id, createdAt: prev.createdAt }
+  for (const [k, v] of Object.entries(next as Record<string, unknown>)) {
+    if (k === 'id' || k === 'createdAt') continue
+    if (typeof v === 'string') {
+      const t = v.trim()
+      if (!t) continue
+      merged[k] = t
+      continue
+    }
+    if (v === undefined || v === null) continue
+    merged[k] = v
+  }
+  return list.map((x, i) => (i === idx ? (merged as T) : x))
 }
 
 /** True when this confirmation already exists on the trip (re-forward / update). */

@@ -117,11 +117,136 @@ type BookingDateRow = {
   amountPaidOriginal?: unknown
   amountOwingOriginal?: unknown
   currency?: unknown
+  address?: unknown
+  bookingUrl?: unknown
+  name?: unknown
+}
+
+function pickNonEmpty(...vals: Array<string | undefined | null>): string {
+  for (const v of vals) {
+    const t = String(v ?? '').trim()
+    if (t) return t
+  }
+  return ''
+}
+
+/** Merge two lodging rows without letting empty strings wipe known fields. */
+export function mergeStopAccommodations(
+  primary: StopAccommodation,
+  secondary: StopAccommodation,
+): StopAccommodation {
+  const amountPaid = pickNonEmpty(primary.amountPaid, secondary.amountPaid) || undefined
+  const amountOwing = pickNonEmpty(primary.amountOwing, secondary.amountOwing) || undefined
+  const priceOriginal = pickNonEmpty(primary.priceOriginal, secondary.priceOriginal) || undefined
+  const amountPaidOriginal =
+    pickNonEmpty(primary.amountPaidOriginal, secondary.amountPaidOriginal) || undefined
+  const amountOwingOriginal =
+    pickNonEmpty(primary.amountOwingOriginal, secondary.amountOwingOriginal) || undefined
+  const currency = pickNonEmpty(primary.currency, secondary.currency) || undefined
+  const photoUrl = pickNonEmpty(primary.photoUrl, secondary.photoUrl) || undefined
+  return {
+    id: primary.id || secondary.id,
+    name: pickNonEmpty(primary.name, secondary.name, 'Accommodation'),
+    address: pickNonEmpty(primary.address, secondary.address),
+    checkIn: pickNonEmpty(primary.checkIn, secondary.checkIn),
+    checkOut: pickNonEmpty(primary.checkOut, secondary.checkOut),
+    checkInTime: pickNonEmpty(primary.checkInTime, secondary.checkInTime),
+    checkOutTime: pickNonEmpty(primary.checkOutTime, secondary.checkOutTime),
+    price: pickNonEmpty(primary.price, secondary.price),
+    ...(amountPaid ? { amountPaid } : {}),
+    ...(amountOwing ? { amountOwing } : {}),
+    ...(priceOriginal ? { priceOriginal } : {}),
+    ...(amountPaidOriginal ? { amountPaidOriginal } : {}),
+    ...(amountOwingOriginal ? { amountOwingOriginal } : {}),
+    ...(currency ? { currency } : {}),
+    bookingUrl: pickNonEmpty(primary.bookingUrl, secondary.bookingUrl),
+    confirmationRef: pickNonEmpty(primary.confirmationRef, secondary.confirmationRef),
+    ...(photoUrl ? { photoUrl } : {}),
+  }
+}
+
+function mergeAccommodationBookings(
+  primary: AccommodationBooking,
+  secondary: AccommodationBooking,
+): AccommodationBooking {
+  const amountPaid = pickNonEmpty(primary.amountPaid, secondary.amountPaid) || undefined
+  const amountOwing = pickNonEmpty(primary.amountOwing, secondary.amountOwing) || undefined
+  const priceOriginal = pickNonEmpty(primary.priceOriginal, secondary.priceOriginal) || undefined
+  const amountPaidOriginal =
+    pickNonEmpty(primary.amountPaidOriginal, secondary.amountPaidOriginal) || undefined
+  const amountOwingOriginal =
+    pickNonEmpty(primary.amountOwingOriginal, secondary.amountOwingOriginal) || undefined
+  const currency = pickNonEmpty(primary.currency, secondary.currency) || undefined
+  const photoUrl = pickNonEmpty(primary.photoUrl, secondary.photoUrl) || undefined
+  const address = pickNonEmpty(primary.address, secondary.address) || undefined
+  const price = pickNonEmpty(primary.price, secondary.price) || undefined
+  const bookingUrl = pickNonEmpty(primary.bookingUrl, secondary.bookingUrl) || undefined
+  const checkInTime = pickNonEmpty(primary.checkInTime, secondary.checkInTime) || undefined
+  const checkOutTime = pickNonEmpty(primary.checkOutTime, secondary.checkOutTime) || undefined
+  return {
+    id: primary.id || secondary.id,
+    name: pickNonEmpty(primary.name, secondary.name, 'Accommodation'),
+    checkIn: pickNonEmpty(primary.checkIn, secondary.checkIn),
+    checkOut: pickNonEmpty(primary.checkOut, secondary.checkOut),
+    confirmation: pickNonEmpty(primary.confirmation, secondary.confirmation),
+    ...(address ? { address } : {}),
+    ...(price ? { price } : {}),
+    ...(amountPaid ? { amountPaid } : {}),
+    ...(amountOwing ? { amountOwing } : {}),
+    ...(priceOriginal ? { priceOriginal } : {}),
+    ...(amountPaidOriginal ? { amountPaidOriginal } : {}),
+    ...(amountOwingOriginal ? { amountOwingOriginal } : {}),
+    ...(currency ? { currency } : {}),
+    ...(bookingUrl ? { bookingUrl } : {}),
+    ...(photoUrl ? { photoUrl } : {}),
+    ...(checkInTime ? { checkInTime } : {}),
+    ...(checkOutTime ? { checkOutTime } : {}),
+    createdAt: Math.min(primary.createdAt || Date.now(), secondary.createdAt || Date.now()),
+  }
+}
+
+function unionAccommodationsByConfirmation(
+  primary: StopAccommodation[],
+  secondary: StopAccommodation[],
+): StopAccommodation[] {
+  const byKey = new Map<string, StopAccommodation>()
+  const keyOf = (a: StopAccommodation) => {
+    const conf = a.confirmationRef.trim().toLowerCase()
+    return conf || `id:${a.id}`
+  }
+  for (const a of secondary) byKey.set(keyOf(a), a)
+  for (const a of primary) {
+    const k = keyOf(a)
+    const other = byKey.get(k)
+    byKey.set(k, other ? mergeStopAccommodations(a, other) : a)
+  }
+  return [...byKey.values()]
+}
+
+function unionBookingAccommodations(
+  primary: AccommodationBooking[],
+  secondary: AccommodationBooking[],
+): AccommodationBooking[] {
+  const byKey = new Map<string, AccommodationBooking>()
+  const keyOf = (a: AccommodationBooking) => {
+    const conf = String(a.confirmation || '')
+      .trim()
+      .toLowerCase()
+    return conf || `id:${a.id}`
+  }
+  for (const a of secondary) byKey.set(keyOf(a), a)
+  for (const a of primary) {
+    const k = keyOf(a)
+    const other = byKey.get(k)
+    byKey.set(k, other ? mergeAccommodationBookings(a, other) : a)
+  }
+  return [...byKey.values()]
 }
 
 /**
- * Copy check-in/out dates from Trip.bookings.accommodations onto stop lodgings
- * that are missing dates (or still carry a legacy stay-wide placeholder).
+ * Copy missing lodging details from Trip.bookings.accommodations onto stop lodgings.
+ * Always fills blank price/address/url/times; only overwrites dates when missing or
+ * still carrying a legacy stay-wide placeholder.
  */
 export function enrichAccommodationsFromBookings(
   accommodations: StopAccommodation[],
@@ -140,30 +265,35 @@ export function enrichAccommodationsFromBookings(
     if (!match) return lodging
     const bIn = String(match.checkIn ?? '').trim()
     const bOut = String(match.checkOut ?? '').trim()
-    if (!bIn && !bOut) return lodging
 
     const hasOwn = Boolean(lodging.checkIn && lodging.checkOut)
     const looksLegacyFullStay =
       hasOwn && stayStart && stayEnd && lodging.checkIn === stayStart && lodging.checkOut === stayEnd
-    if (hasOwn && !looksLegacyFullStay) return lodging
+    const takeDates = Boolean(bIn || bOut) && (!hasOwn || looksLegacyFullStay)
 
-    const checkInTime = lodging.checkInTime || String(match.checkInTime ?? '').trim()
-    const checkOutTime = lodging.checkOutTime || String(match.checkOutTime ?? '').trim()
-    const photoUrl = lodging.photoUrl || String(match.photoUrl ?? '').trim() || undefined
-    const price = lodging.price || String(match.price ?? '').trim()
-    const amountPaid = lodging.amountPaid || String(match.amountPaid ?? '').trim() || undefined
-    const amountOwing = lodging.amountOwing || String(match.amountOwing ?? '').trim() || undefined
+    const checkInTime = pickNonEmpty(lodging.checkInTime, String(match.checkInTime ?? ''))
+    const checkOutTime = pickNonEmpty(lodging.checkOutTime, String(match.checkOutTime ?? ''))
+    const photoUrl = pickNonEmpty(lodging.photoUrl, String(match.photoUrl ?? '')) || undefined
+    const price = pickNonEmpty(lodging.price, String(match.price ?? ''))
+    const address = pickNonEmpty(lodging.address, String(match.address ?? ''))
+    const bookingUrl = pickNonEmpty(lodging.bookingUrl, String(match.bookingUrl ?? ''))
+    const name = pickNonEmpty(lodging.name, String(match.name ?? ''), 'Accommodation')
+    const amountPaid = pickNonEmpty(lodging.amountPaid, String(match.amountPaid ?? '')) || undefined
+    const amountOwing = pickNonEmpty(lodging.amountOwing, String(match.amountOwing ?? '')) || undefined
     const priceOriginal =
-      lodging.priceOriginal || String(match.priceOriginal ?? '').trim() || undefined
+      pickNonEmpty(lodging.priceOriginal, String(match.priceOriginal ?? '')) || undefined
     const amountPaidOriginal =
-      lodging.amountPaidOriginal || String(match.amountPaidOriginal ?? '').trim() || undefined
+      pickNonEmpty(lodging.amountPaidOriginal, String(match.amountPaidOriginal ?? '')) || undefined
     const amountOwingOriginal =
-      lodging.amountOwingOriginal || String(match.amountOwingOriginal ?? '').trim() || undefined
-    const currency = lodging.currency || String(match.currency ?? '').trim() || undefined
+      pickNonEmpty(lodging.amountOwingOriginal, String(match.amountOwingOriginal ?? '')) || undefined
+    const currency = pickNonEmpty(lodging.currency, String(match.currency ?? '')) || undefined
     return {
       ...lodging,
-      checkIn: bIn || lodging.checkIn,
-      checkOut: bOut || bIn || lodging.checkOut,
+      name,
+      address,
+      bookingUrl,
+      checkIn: takeDates ? bIn || lodging.checkIn : lodging.checkIn,
+      checkOut: takeDates ? bOut || bIn || lodging.checkOut : lodging.checkOut,
       checkInTime,
       checkOutTime,
       price,
@@ -715,12 +845,24 @@ function unionStaysPreferRicherLodging(primary: Stay[], secondary: Stay[]): Stay
       byId.set(s.id, s)
       continue
     }
-    const a = stayAccommodations(s).length
-    const b = stayAccommodations(other).length
-    // Prefer the copy with more lodgings; otherwise keep primary.
-    byId.set(s.id, a >= b ? { ...other, ...s, accommodations: stayAccommodations(s) } : { ...s, ...other, accommodations: stayAccommodations(other) })
+    const primaryAcc = stayAccommodations(s)
+    const otherAcc = stayAccommodations(other)
+    const accommodations = unionAccommodationsByConfirmation(primaryAcc, otherAcc)
+    // Keep primary stay shell (dates/location) but never drop richer lodging fields.
+    byId.set(s.id, { ...other, ...s, accommodations })
   }
   return dedupeOverlappingStays([...byId.values()])
+}
+
+function bookingListSize(trip: Trip): number {
+  const b = trip.bookings
+  if (!b) return 0
+  return (
+    (b.flights?.length ?? 0) +
+    (b.rentalCars?.length ?? 0) +
+    (b.restaurants?.length ?? 0) +
+    (b.accommodations?.length ?? 0)
+  )
 }
 
 export function mergeTripsPreferRicherStays(remote: TripsState, local: TripsState): TripsState {
@@ -744,22 +886,26 @@ export function mergeTripsPreferRicherStays(remote: TripsState, local: TripsStat
       : localStays.length > remoteStays.length
         ? unionStaysPreferRicherLodging(localStays, remoteStays)
         : unionStaysPreferRicherLodging(remoteStays, localStays)
-    const preferLocalBookings =
-      (rt.bookings?.flights?.length ?? 0) +
-        (rt.bookings?.rentalCars?.length ?? 0) +
-        (rt.bookings?.restaurants?.length ?? 0) +
-        (rt.bookings?.accommodations?.length ?? 0) ===
-        0 &&
-      (lt.bookings?.flights?.length ?? 0) +
-        (lt.bookings?.rentalCars?.length ?? 0) +
-        (lt.bookings?.restaurants?.length ?? 0) +
-        (lt.bookings?.accommodations?.length ?? 0) >
-        0
+
+    const remoteAcc = rt.bookings?.accommodations || []
+    const localAcc = lt.bookings?.accommodations || []
+    const accommodations = unionBookingAccommodations(remoteAcc, localAcc)
+    const preferLocalBookingsShell =
+      bookingListSize(rt) === 0 && bookingListSize(lt) > 0
+    const baseBookings = preferLocalBookingsShell ? lt.bookings : rt.bookings
+    const bookings = {
+      ...baseBookings,
+      accommodations,
+      flights: preferLocalBookingsShell ? lt.bookings.flights : rt.bookings.flights,
+      rentalCars: preferLocalBookingsShell ? lt.bookings.rentalCars : rt.bookings.rentalCars,
+      restaurants: preferLocalBookingsShell ? lt.bookings.restaurants : rt.bookings.restaurants,
+    }
+
     return {
       ...rt,
       clientRev: Math.max(localRev, remoteRev),
       stays,
-      bookings: preferLocalBookings ? lt.bookings : rt.bookings,
+      bookings,
     }
   })
   const remoteIds = new Set(remote.trips.map((t) => t.id))

@@ -30,6 +30,10 @@ export default defineConfig(({ mode }) => {
       'import.meta.env.VITE_APP_BUILD': JSON.stringify(buildId),
     },
     plugins: [react()],
+    build: {
+      // MapLibre alone is ~1MB+ minified; warn only for unexpectedly huge apps.
+      chunkSizeWarningLimit: 2500,
+    },
     server: {
       host: true,
       port: 5173,

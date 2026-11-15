@@ -1,5 +1,7 @@
 import {
   createContext,
+  lazy,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -108,7 +110,9 @@ import { FlightDetailsModal } from './FlightDetailsModal'
 import { ErrorBoundary } from './ErrorBoundary'
 import { MapSheetUnderlay } from './MapSheetUnderlay'
 import { PageStarfield } from './PageStarfield'
-import { TripMap } from './TripMap'
+const TripMap = lazy(() =>
+  import('./TripMap').then((m) => ({ default: m.TripMap })),
+)
 import {
   buildFlightRouteDisplay,
   loadTripsState,
@@ -2841,15 +2845,40 @@ export default function App() {
         }
         return
       }
-      const merged = mergeTripsPreferRicherStays(result.state, localCache)
-      setState(merged)
-      saveTripsState(merged, authSession.email)
-      tripsHydratedRef.current = true
-      requestAnimationFrame(() => {
-        skipRemoteSaveRef.current = false
-      })
+      let merged = mergeTripsPreferRicherStays(result.state, localCache)
+      // Restore lodging price/address/url/times from applied imports before
+      // persisting — sync merge used to wipe these and save the thin copy.
+      void listAppliedBookingImports()
+        .then(async (applied) => {
+          if (gen !== remoteFetchGenRef.current) return
+          if (applied.length) {
+            const parses = await Promise.all(
+              applied.map((row) => withDisplayCurrency(row.parsed, displayCurrency)),
+            )
+            merged = {
+              ...merged,
+              trips: merged.trips.map((t) => enrichTripFromImportParses(t, parses)),
+            }
+          }
+          if (gen !== remoteFetchGenRef.current) return
+          setState(merged)
+          saveTripsState(merged, authSession.email)
+          tripsHydratedRef.current = true
+          requestAnimationFrame(() => {
+            skipRemoteSaveRef.current = false
+          })
+        })
+        .catch(() => {
+          if (gen !== remoteFetchGenRef.current) return
+          setState(merged)
+          saveTripsState(merged, authSession.email)
+          tripsHydratedRef.current = true
+          requestAnimationFrame(() => {
+            skipRemoteSaveRef.current = false
+          })
+        })
     })
-  }, [authReady, backendUserId, authSession?.email])
+  }, [authReady, backendUserId, authSession?.email, displayCurrency])
 
   useEffect(() => {
     if (!isSupabaseConfigured() || isDevAuthBypass()) return
@@ -4568,20 +4597,57 @@ export default function App() {
     }
     setState((prev) => ({
       ...prev,
-      trips: prev.trips.map((trip) =>
-        trip.id !== prev.selectedTripId
-          ? trip
-          : {
-              ...trip,
-              clientRev: (trip.clientRev ?? 0) + 1,
-              // Move lodging onto the chosen destination; remove from every other stay.
-              stays: trip.stays.map((s) => {
-                const current = stayAccommodations(s).filter((a) => a.id !== lodging.id)
-                if (s.id !== hostId) return { ...s, accommodations: current }
-                return { ...s, accommodations: [...current, lodging] }
-              }),
-            },
-      ),
+      trips: prev.trips.map((trip) => {
+        if (trip.id !== prev.selectedTripId) return trip
+        const conf = lodging.confirmationRef.trim().toLowerCase()
+        const prevBooking = (trip.bookings.accommodations || []).find(
+          (b) => b.confirmation.trim().toLowerCase() === conf,
+        )
+        const bookingRow = {
+          id: prevBooking?.id || lodging.id,
+          name: lodging.name,
+          checkIn: lodging.checkIn,
+          checkOut: lodging.checkOut,
+          confirmation: lodging.confirmationRef,
+          address: lodging.address,
+          price: lodging.price,
+          ...(lodging.amountPaid ? { amountPaid: lodging.amountPaid } : {}),
+          ...(lodging.amountOwing ? { amountOwing: lodging.amountOwing } : {}),
+          ...(lodging.priceOriginal ? { priceOriginal: lodging.priceOriginal } : {}),
+          ...(lodging.amountPaidOriginal
+            ? { amountPaidOriginal: lodging.amountPaidOriginal }
+            : {}),
+          ...(lodging.amountOwingOriginal
+            ? { amountOwingOriginal: lodging.amountOwingOriginal }
+            : {}),
+          ...(lodging.currency ? { currency: lodging.currency } : {}),
+          bookingUrl: lodging.bookingUrl,
+          ...(lodging.photoUrl ? { photoUrl: lodging.photoUrl } : {}),
+          checkInTime: lodging.checkInTime,
+          checkOutTime: lodging.checkOutTime,
+          createdAt: prevBooking?.createdAt || Date.now(),
+        }
+        const accommodations = [
+          ...(trip.bookings.accommodations || []).filter(
+            (b) => b.confirmation.trim().toLowerCase() !== conf,
+          ),
+          bookingRow,
+        ]
+        return {
+          ...trip,
+          clientRev: (trip.clientRev ?? 0) + 1,
+          // Move lodging onto the chosen destination; remove from every other stay.
+          stays: trip.stays.map((s) => {
+            const current = stayAccommodations(s).filter((a) => a.id !== lodging.id)
+            if (s.id !== hostId) return { ...s, accommodations: current }
+            return { ...s, accommodations: [...current, lodging] }
+          }),
+          bookings: {
+            ...trip.bookings,
+            accommodations,
+          },
+        }
+      }),
     }))
     setStayError(null)
     return true
@@ -8153,26 +8219,34 @@ export default function App() {
                 </div>
               ) : (
                 <ErrorBoundary label="Map">
-                  <TripMap
-                    active={activeTab === 'map'}
-                    mapPoints={mapPoints}
-                    mapCategoryVisible={mapCategoryVisible}
-                    stays={stays}
-                    visitPlaces={visitPlaces}
-                    flights={bookings.flights}
-                    rentalCars={bookings.rentalCars}
-                    restaurants={bookings.restaurants}
-                    country={selectedTrip.country}
-                    tripEndDate={selectedTrip.endDate}
-                    resolvedPointCoords={resolvedPointCoords}
-                    cameraFingerprint={mapCameraFingerprint}
-                    pageStarfield
-                    skyLit={mapSkyLit}
-                    onGlobeChromeChange={setMapGlobeChrome}
-                    onBasemapChange={setMapBasemap}
-                    focusStayId={mapFocusStayId}
-                    onFocusStayConsumed={() => setMapFocusStayId(null)}
-                  />
+                  <Suspense
+                    fallback={
+                      <div className="flex h-full items-center justify-center text-sm text-neutral-400">
+                        Loading map…
+                      </div>
+                    }
+                  >
+                    <TripMap
+                      active={activeTab === 'map'}
+                      mapPoints={mapPoints}
+                      mapCategoryVisible={mapCategoryVisible}
+                      stays={stays}
+                      visitPlaces={visitPlaces}
+                      flights={bookings.flights}
+                      rentalCars={bookings.rentalCars}
+                      restaurants={bookings.restaurants}
+                      country={selectedTrip.country}
+                      tripEndDate={selectedTrip.endDate}
+                      resolvedPointCoords={resolvedPointCoords}
+                      cameraFingerprint={mapCameraFingerprint}
+                      pageStarfield
+                      skyLit={mapSkyLit}
+                      onGlobeChromeChange={setMapGlobeChrome}
+                      onBasemapChange={setMapBasemap}
+                      focusStayId={mapFocusStayId}
+                      onFocusStayConsumed={() => setMapFocusStayId(null)}
+                    />
+                  </Suspense>
                 </ErrorBoundary>
               )}
             </div>
