@@ -577,12 +577,19 @@ function TimelineFlightChip({
   )
 }
 
+function googleMapsDrivingUrl(
+  from: { lat: number; lon: number },
+  to: { lat: number; lon: number },
+): string {
+  const origin = `${from.lat},${from.lon}`
+  const destination = `${to.lat},${to.lon}`
+  return `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&travelmode=driving`
+}
+
 function TimelineDriveChip({
   leg,
-  onOpenCar,
 }: {
   leg: Extract<TransportLeg, { kind: 'drive' }>
-  onOpenCar: (carId?: string) => void
 }) {
   const hasCoords =
     Number.isFinite(leg.from.lat) &&
@@ -592,7 +599,7 @@ function TimelineDriveChip({
     !(leg.from.lat === 0 && leg.from.lon === 0 && leg.to.lat === 0 && leg.to.lon === 0)
   const fallbackKm = hasCoords ? Math.round(mapHaversineKm(leg.from, leg.to)) : 0
   const [label, setLabel] = useState(
-    hasCoords ? `${fallbackKm}km · …` : leg.car?.company || 'Rental car',
+    hasCoords ? `${fallbackKm}km · …` : leg.car?.company || 'Drive',
   )
 
   useEffect(() => {
@@ -612,16 +619,29 @@ function TimelineDriveChip({
     }
   }, [hasCoords, leg.from.lat, leg.from.lon, leg.to.lat, leg.to.lon, fallbackKm])
 
+  const className =
+    'inline-flex items-center gap-2 rounded-full border border-slate-500 bg-neutral-950 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-neutral-900'
+
+  if (!hasCoords) {
+    return (
+      <span className={className} title="Driving leg">
+        <Car size={15} className="text-emerald-300" aria-hidden />
+        {label}
+      </span>
+    )
+  }
+
   return (
-    <button
-      type="button"
-      onClick={() => onOpenCar(leg.car?.id)}
-      title="Typical driving time (road routing, not live traffic)"
-      className="inline-flex items-center gap-2 rounded-full border border-slate-500 bg-neutral-950 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-neutral-900"
+    <a
+      href={googleMapsDrivingUrl(leg.from, leg.to)}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Open driving directions in Google Maps"
+      className={className}
     >
       <Car size={15} className="text-emerald-300" aria-hidden />
       {label}
-    </button>
+    </a>
   )
 }
 
@@ -1183,9 +1203,7 @@ export function TripRoutePlanner({
               {beforeFlights.map((flight) => (
                 <TimelineFlightChip key={flight.id} flight={flight} onOpen={onOpenFlight} />
               ))}
-              {driveIntoStay ? (
-                <TimelineDriveChip leg={driveIntoStay} onOpenCar={onOpenCar} />
-              ) : null}
+              {driveIntoStay ? <TimelineDriveChip leg={driveIntoStay} /> : null}
             </>
           )
 
