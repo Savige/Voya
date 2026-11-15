@@ -4,6 +4,13 @@
 
 /* Faster taps on touch devices (avoids legacy 300ms delay where applicable). */
 @layer base {
+  html,
+  body,
+  #app {
+    background-color: #0a0a0a;
+    overscroll-behavior-y: none;
+  }
+
   button,
   [type='button'],
   [type='submit'],
@@ -26,21 +33,29 @@
   min-height: 2.25rem;
 }
 
+.rdp-modern .rdp-month {
+  position: relative;
+}
+
 .rdp-modern .rdp-month_caption {
   position: relative;
   display: flex;
-  justify-content: flex-start;
+  justify-content: center;
   gap: 0.5rem;
   align-items: center;
   min-height: 2.5rem;
-  padding-right: 5.2rem; /* reserve space for nav buttons */
+}
+
+.rdp-modern[data-nav-layout='around'] .rdp-month_caption {
+  margin-inline: 2.5rem; /* keep dropdowns clear of side chevrons */
 }
 
 .rdp-modern .rdp-dropdowns {
   display: inline-flex;
   gap: 0.35rem;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
+  max-width: 100%;
 }
 
 .rdp-modern .rdp-dropdown_root select {
@@ -109,10 +124,19 @@
   opacity: 0.45;
 }
 
-.rdp-modern .rdp-nav {
-  display: inline-flex;
-  gap: 0.35rem;
-  align-items: center;
+.rdp-modern[data-nav-layout='around'] .rdp-button_previous,
+.rdp-modern[data-nav-layout='around'] .rdp-button_next {
+  position: absolute;
+  top: 0;
+  z-index: 1;
+}
+
+.rdp-modern[data-nav-layout='around'] .rdp-button_previous {
+  inset-inline-start: 0;
+}
+
+.rdp-modern[data-nav-layout='around'] .rdp-button_next {
+  inset-inline-end: 0;
 }
 
 .rdp-day {
@@ -192,46 +216,67 @@
   background-color: rgba(15, 23, 42, 0.95) !important;
 }
 
-.dark .border-white\/70 {
-  border-color: #334155 !important;
-}
-
+/*
+  Dark contrast tokens (vs #0a0a0a / #111827 surfaces):
+  - body/primary text ≥ #e5e7eb
+  - secondary/muted text ≥ #a8b4c4 (~8:1) — never raw neutral-500 (#737373 fails AA)
+  - interactive control borders ≥ #64748b (~3.7:1 UI)
+  - primary CTA text stays pure white on blue/sky fills
+*/
+.dark .border-white\/70,
 .dark .border-neutral-100,
-.dark .border-neutral-200 {
-  border-color: #334155 !important;
+.dark .border-neutral-200,
+.dark .border-neutral-300,
+.dark .border-neutral-600,
+.dark .border-neutral-700,
+.dark .border-neutral-800,
+.dark .dark\:border-neutral-600,
+.dark .dark\:border-neutral-700,
+.dark .dark\:border-neutral-800 {
+  border-color: #64748b !important;
 }
 
-.dark .text-neutral-900 {
+.dark .text-neutral-900,
+.dark .dark\:text-neutral-900,
+.dark .dark\:text-neutral-100,
+.dark .dark\:text-white {
   color: #f3f4f6 !important;
 }
 
 .dark .text-neutral-800,
-.dark .text-neutral-700 {
+.dark .text-neutral-700,
+.dark .dark\:text-neutral-800,
+.dark .dark\:text-neutral-700,
+.dark .dark\:text-neutral-200 {
   color: #e5e7eb !important;
 }
 
 .dark .text-neutral-600,
-.dark .text-neutral-500 {
-  color: #94a3b8 !important;
+.dark .text-neutral-500,
+.dark .dark\:text-neutral-600,
+.dark .dark\:text-neutral-500 {
+  color: #a8b4c4 !important;
 }
 
-.dark .text-neutral-400 {
+.dark .text-neutral-400,
+.dark .dark\:text-neutral-400,
+.dark .dark\:text-neutral-300 {
   color: #cbd5e1 !important;
 }
 
 .dark input,
 .dark button,
-.dark select {
-  border-color: #334155;
+.dark select,
+.dark textarea {
+  border-color: #64748b;
 }
 
-.dark button {
-  color: #e5e7eb;
-}
+/* Do not force button text color — preserves text-white on primary CTAs (AA on blue-600). */
 
 .dark .hover\:bg-neutral-100:hover,
 .dark .hover\:bg-neutral-200:hover,
-.dark .hover\:bg-neutral-50:hover {
+.dark .hover\:bg-neutral-50:hover,
+.dark .dark\:hover\:bg-neutral-800:hover {
   background-color: #334155 !important;
 }
 
@@ -239,21 +284,137 @@
 .dark select,
 .dark textarea {
   background-color: #0f172a;
-  color: #e5e7eb;
+  color: #f1f5f9;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #94a3b8;
+  opacity: 1;
+}
+
+/* Add-flight wizard: dark sheet matching app chrome (same idea as flight-details). */
+.flight-wizard .fw-hit {
+  color: #7dd3fc;
+  font-weight: 700;
+}
+.dark .flight-wizard {
+  background-color: #0a0a0a !important;
+  border-color: #64748b !important;
+  color: #f3f4f6;
+}
+.dark .flight-wizard .bg-neutral-900 {
+  background-color: #111827 !important;
+}
+.dark .flight-wizard .bg-neutral-800 {
+  background-color: #1f2937 !important;
+}
+.dark .flight-wizard .bg-slate-100 {
+  background-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+.dark .flight-wizard input,
+.dark .flight-wizard select,
+.dark .flight-wizard textarea {
+  background-color: transparent !important;
+  color: #f3f4f6 !important;
+  border-color: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+.dark .flight-wizard input::placeholder,
+.dark .flight-wizard textarea::placeholder {
+  color: #94a3b8 !important;
+  opacity: 1;
+}
+/* Kill browser autofill navy slabs inside rounded field rows. */
+.dark .flight-wizard input:-webkit-autofill,
+.dark .flight-wizard input:-webkit-autofill:hover,
+.dark .flight-wizard input:-webkit-autofill:focus,
+.dark .flight-wizard textarea:-webkit-autofill {
+  -webkit-text-fill-color: #f3f4f6;
+  caret-color: #f3f4f6;
+  transition: background-color 99999s ease-out;
+  box-shadow: 0 0 0 1000px transparent inset;
+}
+.dark .flight-wizard option {
+  background-color: #111827;
+  color: #f3f4f6;
+}
+.dark .flight-wizard .rdp-modern .rdp-day-button {
+  color: #f1f5f9;
+}
+.dark .flight-wizard .rdp-modern .rdp-weekday {
+  color: #cbd5e1;
+}
+/* Keep month title centered between side chevrons (narrow flight sheet). */
+.dark .flight-wizard .rdp-modern[data-nav-layout='around'] .rdp-month_caption,
+.dark .flight-wizard .rdp-modern[data-nav-layout='around'] .rdp-caption {
+  margin-inline: 2.75rem;
+  justify-content: center;
+  text-align: center;
+  color: #f8fafc;
+  font-weight: 600;
+}
+.dark .flight-wizard .rdp-modern .rdp-button_previous,
+.dark .flight-wizard .rdp-modern .rdp-button_next {
+  background: #1e293b !important;
+  border-color: #64748b !important;
+  color: #f8fafc !important;
+}
+.dark .flight-wizard .rdp-modern .rdp-button_previous .rdp-chevron,
+.dark .flight-wizard .rdp-modern .rdp-button_next .rdp-chevron {
+  fill: #f8fafc !important;
+  color: #f8fafc !important;
+}
+.dark .flight-wizard .rdp-modern .rdp-button_previous:hover:not(:disabled),
+.dark .flight-wizard .rdp-modern .rdp-button_next:hover:not(:disabled) {
+  background: #334155 !important;
+}
+
+/* Flight details modal: dark sheet matching the app chrome. */
+.dark .flight-details {
+  background-color: #0a0a0a !important;
+  border-color: #64748b !important;
+  color: #f3f4f6;
+}
+.dark .flight-details .bg-neutral-900 {
+  background-color: #111827 !important;
+}
+.dark .flight-details .bg-slate-100 {
+  background-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+.dark .flight-details input,
+.dark .flight-details select,
+.dark .flight-details textarea {
+  background-color: transparent !important;
+  color: #f3f4f6 !important;
+  border-color: transparent;
+}
+.dark .flight-details input::placeholder,
+.dark .flight-details textarea::placeholder {
+  color: #94a3b8 !important;
+  opacity: 1;
+}
+.dark .flight-details option {
+  background-color: #111827;
+  color: #f3f4f6;
 }
 
 .dark .rdp-modern .rdp-dropdown_root select,
 .dark .rdp-modern .rdp-button_previous,
 .dark .rdp-modern .rdp-button_next {
   background: #1e293b;
-  border-color: #475569;
-  color: #f1f5f9;
+  border-color: #64748b;
+  color: #f8fafc;
 }
 
 .dark .rdp-modern .rdp-button_previous .rdp-chevron,
 .dark .rdp-modern .rdp-button_next .rdp-chevron {
-  opacity: 0.95;
-  color: #f1f5f9;
+  opacity: 1;
+  color: #f8fafc;
+  fill: #f8fafc;
 }
 
 .dark .rdp-modern .rdp-button_previous:hover:not(:disabled),
@@ -263,12 +424,26 @@
 
 .dark .rdp-modern .rdp-disabled .rdp-day-button {
   background: #1f2937;
-  color: #94a3b8;
+  color: #a8b4c4;
 }
 
 .dark .rdp-modern .rdp-outside .rdp-day-button {
   background: #0b1220;
-  color: #64748b;
+  color: #94a3b8;
+}
+
+.dark .rdp-modern .rdp-day-button {
+  color: #f1f5f9;
+}
+
+.dark .rdp-modern .rdp-weekday {
+  color: #cbd5e1;
+  opacity: 1;
+}
+
+.dark .rdp-modern .rdp-range-middle .rdp-day-button {
+  background: #312e81;
+  color: #e0e7ff;
 }
 
 .dark .rdp-modern .rdp-dropdown_root select {
@@ -288,6 +463,11 @@
 .dark .rdp-modern .rdp-dropdown_root select:focus-visible {
   border-color: #a5b4fc;
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.3);
+}
+
+.dark .rdp-modern .rdp-caption,
+.dark .rdp-modern .rdp-month_caption {
+  color: #f8fafc;
 }
 
 /* Peak season indicator (home page destination input -> travel dates) */
@@ -330,8 +510,8 @@
 
 .dark .peak-season-indicator--offpeak {
   background: #0f172a;
-  border-color: #334155;
-  color: #94a3b8;
+  border-color: #64748b;
+  color: #cbd5e1;
 }
 
 .dark .peak-season-indicator--unknown {
@@ -1536,14 +1716,14 @@
 }
 
 .dark .itinerary-calendar-shell {
-  border-color: #334155;
+  border-color: #64748b;
   background: #0f172a;
 }
 
 .dark .itinerary-calendar-nav {
-  border-color: #475569;
+  border-color: #64748b;
   background: #1e293b;
-  color: #e2e8f0;
+  color: #f1f5f9;
 }
 
 .dark .itinerary-calendar-nav:hover:not(:disabled) {
@@ -1551,7 +1731,11 @@
 }
 
 .dark .itinerary-calendar-range-label {
-  color: #94a3b8;
+  color: #cbd5e1;
+}
+
+.dark .itinerary-calendar-col-daynum {
+  color: #a8b4c4;
 }
 
 .dark .itinerary-calendar-month-year {
@@ -1607,7 +1791,7 @@
 
 .dark .itinerary-calendar-grid-body {
   background: #111827;
-  border-color: #475569;
+  border-color: #64748b;
 }
 
 .dark .itinerary-calendar-grid-body.is-over {
@@ -1630,9 +1814,9 @@
 }
 
 .dark .itinerary-calendar-acc-strip-empty {
-  color: #94a3b8;
+  color: #cbd5e1;
   background: rgba(30, 58, 138, 0.2);
-  border-color: rgba(59, 130, 246, 0.35);
+  border-color: #64748b;
 }
 
 .dark .itinerary-calendar-event--important {
@@ -1644,6 +1828,38 @@
 .dark .itinerary-calendar-now-line {
   background: #f87171;
   box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.9);
+}
+
+/* MapLibre: fill the shell — canvas-container can collapse to 0 height with % sizing. */
+.waypoint-map-root.maplibregl-map,
+.waypoint-map-root .maplibregl-canvas-container {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Satellite globe: let starfield show through around Earth. */
+.waypoint-globe-map .maplibregl-canvas,
+.waypoint-globe-map .maplibregl-canvas-container {
+  background: transparent !important;
+}
+
+/* TripMap: hide MapLibre zoom / compass (custom icon toolbar + Recenter instead). */
+.waypoint-map-root .maplibregl-ctrl-top-right {
+  display: none !important;
+}
+
+.waypoint-globe-map .maplibregl-ctrl-attrib,
+.maplibregl-ctrl-attrib {
+  font-size: 9px !important;
+  line-height: 1.25 !important;
+  max-width: min(52vw, 16rem);
+  padding: 2px 5px !important;
+  background: rgba(2, 6, 14, 0.72) !important;
+  color: #cbd5e1 !important;
+}
+
+.maplibregl-ctrl-attrib a {
+  color: #93c5fd !important;
 }
 
 .confetti-burst {
@@ -1673,5 +1889,44 @@
   100% {
     opacity: 0;
     transform: translate(var(--dx), var(--dy)) scale(0.7) rotate(260deg);
+  }
+}
+
+/* Itinerary Destinations — light journey motions */
+@keyframes itin-dest-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.itin-dest-enter {
+  animation: itin-dest-enter 480ms ease-out both;
+}
+
+@keyframes itin-star-twinkle {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+}
+
+.itin-star-twinkle {
+  animation: itin-star-twinkle 2.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .itin-dest-enter,
+  .itin-star-twinkle {
+    animation: none;
   }
 }

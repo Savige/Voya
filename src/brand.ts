@@ -13,4 +13,4 @@ export const BRAND_HOME_SUBTEXT =
 
 export const BRAND_DASHBOARD_SUBTITLE = 'Stays, flights, and days in one place.'
 export const BRAND_FOOTER_TAGLINE = 'Waypoint — plan once, sync everywhere'
-export const BRAND_PUBLIC_URL = 'https://waypoint.ryansavige.com'
+export const BRAND_PUBLIC_URL = 'https://waypoint.savige.me'

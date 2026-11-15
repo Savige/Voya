@@ -11,8 +11,10 @@ import {
   type CSSProperties,
   type FormEvent,
   type ReactNode,
+  type RefObject,
   type TransitionEvent,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   DndContext,
   DragOverlay,
@@ -32,26 +34,15 @@ import {
   BedDouble,
   Briefcase,
   Calendar,
-  Car,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   Compass,
   DollarSign,
-  Ellipsis,
   ExternalLink,
-  Info,
   Luggage,
   Map as MapIcon,
   MapPin,
-  Moon,
-  Plane,
   ShoppingBag,
-  TriangleAlert,
-  Search,
-  Sun,
-  UtensilsCrossed,
   X,
   Lock,
   LogIn,
@@ -89,7 +80,7 @@ import {
   acceptSharedItinerary,
   authSessionFromPocketBaseUser,
   createSharedItinerary,
-  fetchMergedTripsState,
+  fetchMergedTripsStateSafe,
   fetchSharedItineraryMembers,
   fetchSharedItineraryMeta,
   revokeSharedItineraryEntire,
@@ -97,17 +88,31 @@ import {
   type SharedMemberListItem,
   updateSharedItineraryDefaultPermission,
   updateSharedMemberRole,
+  bookingFromEmailFromAuthRecord,
+  upsertBookingFromEmail,
   upsertProfileDisplayName,
   upsertSharedItineraryTrip,
   upsertUserTrips,
 } from './tripsRemote'
 import { geocodeQuery } from './placesApi'
-import { useCachedRecommendations, useDestinationSuggestions, usePlaceSuggestions } from './placesHooks'
+import { useDestinationSuggestions, usePlaceSuggestions } from './placesHooks'
 import type { PlaceSuggestion } from './placesTypes'
+import { AddFlightWizard } from './AddFlightWizard'
+import {
+  planDestinationDelete,
+  planDestinationInsert,
+  planNightAdjust,
+  TripRoutePlanner,
+} from './TripRoutePlanner'
+import { FlightDetailsModal } from './FlightDetailsModal'
+import { ErrorBoundary } from './ErrorBoundary'
+import { MapSheetUnderlay } from './MapSheetUnderlay'
+import { PageStarfield } from './PageStarfield'
 import { TripMap } from './TripMap'
 import {
   buildFlightRouteDisplay,
   loadTripsState,
+  mergeTripsPreferRicherStays,
   parseSingleTripFromUnknown,
   saveTripsState,
   tripsStateForPersonalSave,
@@ -120,13 +125,29 @@ import {
   type RestaurantBooking,
   type Stay,
   type StayActivity,
+  type StopAccommodation,
   type Trip,
   type TripBookings,
   type TripsState,
-  type VisitPlace,
   isTripReadOnly,
+  stayAccommodationForDate,
+  stayAccommodationLabel,
+  stayAccommodations,
+  stayHasAccommodation,
+  stayLodgingCoverage,
+  stayPrimaryAccommodation,
   stripSharingFromTrip,
 } from './tripTypes'
+import type { BookingImportRecord } from './bookingEmailTypes'
+import { suggestTripIdForParsed } from './bookingEmailParse'
+import {
+  applyParsedBookingToTrip,
+  withDisplayCurrency,
+  listPendingBookingImports,
+  pasteBookingEmail,
+  tripHasConfirmation,
+  updateBookingImportStatus,
+} from './bookingImportsApi'
 import {
   BRAND_DASHBOARD_SUBTITLE,
   BRAND_FOOTER_TAGLINE,
@@ -137,32 +158,35 @@ import {
   formatDocumentTitle,
 } from './brand'
 import { BrandLogo } from './BrandLogo'
+import { buildTripBudgetSummary } from './budgetTotals'
+import { CancelAccommodationDialog } from './CancelAccommodationDialog'
+import { ItineraryDestinationsView } from './ItineraryDestinationsView'
 import { ConfirmDialog } from './ConfirmDialog'
-import { formatMoneyAmount, loadDisplayCurrency } from './currency'
+import {
+  CONVERTER_CURRENCIES,
+  convertAmountWithSnapshot,
+  convertMoneyToDisplaySync,
+  currencyForCountry,
+  currencyFullName,
+  DEFAULT_DISPLAY_CURRENCY,
+  formatConverterAmount,
+  formatMoneyAmount,
+  formatMoneyWithOriginal,
+  getFxSnapshot,
+  prefetchFxRates,
+  rateBetween,
+  type FxSnapshot,
+} from './currency'
+import { CurrencySelect } from './CurrencySelect'
+import { DEFAULT_HERO_IMAGE, fetchLocationHeroImage } from './locationPhotos'
 import {
   buildMapPointsFromTrip,
   defaultMapCategoryVisibility,
-  MAP_CATEGORY_LABELS,
-  MAP_CATEGORIES,
-  MAP_LEGEND_LABELS,
   type MapCategory,
   type MapMarkerKind,
 } from './mapItinerary'
 
-const MAP_LEGEND_ICON: Record<MapCategory, typeof BedDouble> = {
-  accommodation: BedDouble,
-  place: MapPin,
-  flight: Plane,
-  rental: Car,
-  dining: UtensilsCrossed,
-  activity: Compass,
-}
-
-const THEME_KEY = 'itinerary:theme'
 const PACK_LIST_CATEGORIES = ['Clothes', 'Documents', 'Tech', 'Toiletries', 'Other'] as const
-const DEFAULT_HERO_IMAGE = 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=1200&auto=format&fit=crop'
-/** Pick randomly from this many top-scored Commons results so the hero varies each load. */
-const HERO_RANDOM_POOL = 12
 const APP_BUILD = import.meta.env.VITE_APP_BUILD ?? '—'
 
 const uid = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : String(Date.now()))
@@ -207,18 +231,6 @@ const resolveRecommendationCategory = (existingCategory: string | undefined, tex
 
 const placeGoogleUrl = (place: Pick<PlaceSuggestion, 'googleMapsUri' | 'label'>) =>
   place.googleMapsUri?.trim() || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place.label)}`
-
-const haversineKm = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
-  const toRad = (d: number) => (d * Math.PI) / 180
-  const R = 6371
-  const dLat = toRad(b.lat - a.lat)
-  const dLon = toRad(b.lon - a.lon)
-  const lat1 = toRad(a.lat)
-  const lat2 = toRad(b.lat)
-  const h = Math.sin(dLat / 2) ** 2 + Math.sin(dLon / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2)
-  return 2 * R * Math.asin(Math.sqrt(h))
-}
-
 
 /** Calendar day grid: full day (midnight–midnight). Desktop shows CAL_VISIBLE_HOURS rows; narrow mobile shows CAL_MOBILE_VISIBLE_HOURS; scroll for the rest. */
 const CAL_START_HOUR = 0
@@ -370,7 +382,12 @@ function computeCalendarResizeRange(
 
 function activityHasConfirmation(activity: StayActivity, stay?: Stay | null): boolean {
   if (activity.confirmationRef?.trim()) return true
-  return Boolean(stay?.confirmationRef?.trim())
+  return stayHasAccommodation(stay)
+}
+
+function stayLodgingAddress(stay: Stay | null | undefined, date?: string): string {
+  const lodging = date ? stayAccommodationForDate(stay, date) : stayPrimaryAccommodation(stay)
+  return (lodging?.address ?? '').trim()
 }
 
 function isActivityImportant(activity: StayActivity, stay?: Stay | null): boolean {
@@ -451,15 +468,6 @@ function normalizeBookingUrl(raw: string): string {
   return `https://${t}`
 }
 
-function parseAmount(raw?: string): number {
-  if (!raw) return 0
-  const t = raw.trim().toLowerCase()
-  if (!t) return 0
-  const cleaned = t.replace(/,/g, '')
-  const match = cleaned.match(/-?\d+(?:\.\d+)?/)
-  return match ? Number(match[0]) : 0
-}
-
 /** Trip itinerary days from start through end **inclusive** (end day is included for travel / wrap-up). */
 function enumerateStayDays(startDate: string, endDate: string): string[] {
   const start = parseIsoDate(startDate)
@@ -476,216 +484,6 @@ function enumerateStayDays(startDate: string, endDate: string): string[] {
   return days
 }
 
-/** First segment before a comma — better for "Paris, France" style location labels. */
-function primaryPlaceQuery(location: string): string {
-  const t = location.trim()
-  if (!t) return ''
-  const first = t.split(',')[0]?.trim() ?? t
-  return first.length >= 2 ? first : t
-}
-
-const HERO_TITLE_NOISE = [
-  'diagram',
-  'schematic',
-  'chart',
-  'graph',
-  'svg',
-  'logo',
-  'icon',
-  'flag',
-  'coat of arms',
-  'currency',
-  'stamp',
-  'coin',
-  'banknote',
-  'passport',
-  'poster',
-  'flyer',
-  'screenshot',
-  'election',
-  'signature',
-  'sheet music',
-  'map of',
-  'map showing',
-  'locator map',
-  'route map',
-  'topographic',
-  'emblem',
-  'seal',
-  'insignia',
-  'badge',
-  'portrait of',
-  'self-portrait',
-  'document',
-  'license',
-  'cover page',
-  'coat of arm',
-]
-
-const HERO_PLACE_HINTS = [
-  'panorama',
-  'panoramic',
-  'aerial',
-  'harbor',
-  'harbour',
-  'waterfront',
-  'downtown',
-  'bridge',
-  'view of',
-  'view from',
-  'bay',
-  'coast',
-  'plaza',
-  'square',
-  'architecture',
-  'sunset',
-  'sunrise',
-  'night view',
-  'city view',
-  'nature',
-  'landscape',
-  'travel',
-]
-
-function scoreHeroCandidate(titleNorm: string, primaryNorm: string, queryTokens: string[]): number {
-  if (queryTokens.length === 0) {
-    if (primaryNorm.length < 3) return -1
-    if (!titleNorm.includes(primaryNorm)) return -1
-    let score = 16
-    for (const hint of HERO_PLACE_HINTS) {
-      if (titleNorm.includes(hint)) score += 2
-    }
-    return score
-  }
-
-  let score = 0
-
-  if (primaryNorm.length >= 3 && titleNorm.includes(primaryNorm)) {
-    score += 18
-  }
-
-  const matched = queryTokens.filter((token) => titleNorm.includes(token)).length
-  if (matched === 0) return -1
-  score += matched * 4
-
-  if (queryTokens.length >= 2 && matched < 2) {
-    score -= 6
-  }
-
-  for (const hint of HERO_PLACE_HINTS) {
-    if (titleNorm.includes(hint)) score += 2
-  }
-
-  return score
-}
-
-async function fetchLocationHeroImage(location: string): Promise<string | null> {
-  const q = location.trim()
-  if (!q) return null
-
-  const primary = primaryPlaceQuery(q)
-  const primaryNorm = primary.toLowerCase().replace(/_/g, ' ')
-  const rawTokens = primary
-    .toLowerCase()
-    .split(/[\s,.-]+/)
-    .filter(Boolean)
-  let queryTokens =
-    rawTokens.length === 1 && rawTokens[0].length >= 3
-      ? rawTokens
-      : rawTokens.filter((t) => t.length >= 3)
-
-  if (queryTokens.length === 0) {
-    const fromFull = q.toLowerCase().split(/[\s,.-]+/).filter((t) => t.length >= 4)
-    if (fromFull.length) queryTokens = fromFull
-    else if (primaryNorm.length >= 3) queryTokens = [primaryNorm]
-  }
-
-  // Place + scenic / travel terms (panorama, nature, landscape, travel weighted by scoring).
-  const searches = [
-    `${primary} panorama`,
-    `${primary} panoramic`,
-    `${primary} nature`,
-    `${primary} landscape`,
-    `${primary} travel`,
-    `${primary} aerial`,
-    `${primary} city`,
-    primary,
-    `${primary} harbor`,
-    `${primary} waterfront`,
-  ]
-
-  const fetchCandidates = async (search: string) => {
-    const params = new URLSearchParams({
-      action: 'query',
-      generator: 'search',
-      gsrsearch: search,
-      gsrnamespace: '6', // File namespace on Commons
-      gsrlimit: '30',
-      prop: 'imageinfo',
-      iiprop: 'url|size',
-      format: 'json',
-      origin: '*',
-    })
-
-    const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params.toString()}`)
-    if (!res.ok) return []
-    const data = (await res.json()) as any
-    const pages = data?.query?.pages ? (Object.values(data.query.pages) as any[]) : []
-
-    return pages
-      .map((p) => {
-        const info = p?.imageinfo?.[0]
-        const url = info?.url
-        const width = Number(info?.width ?? 0)
-        const height = Number(info?.height ?? 0)
-        const titleRaw = String(p?.title ?? '')
-        const titleNorm = titleRaw.toLowerCase().replace(/_/g, ' ')
-        if (typeof url !== 'string' || !url) return null
-        if (width < 1200 || height < 700) return null // avoid low-res results
-
-        for (const noise of HERO_TITLE_NOISE) {
-          if (titleNorm.includes(noise)) return null
-        }
-
-        const relevance = scoreHeroCandidate(titleNorm, primaryNorm, queryTokens)
-        if (relevance < 0) return null
-
-        let score = relevance
-
-        // Prefer higher resolution and landscape orientation for hero images.
-        if (width >= 3000) score += 4
-        else if (width >= 2200) score += 3
-        else if (width >= 1600) score += 2
-        else score -= 2
-
-        const ratio = width / Math.max(1, height)
-        if (ratio >= 1.2) score += 2
-        if (ratio < 1) score -= 2
-
-        return { url, score, width, height }
-      })
-      .filter((x): x is { url: string; score: number; width: number; height: number } => Boolean(x))
-  }
-
-  try {
-    const allCandidates: { url: string; score: number; width: number; height: number }[] = []
-    for (const search of searches) {
-      const candidates = await fetchCandidates(search)
-      allCandidates.push(...candidates)
-      if (allCandidates.length >= 24) break
-    }
-
-    if (allCandidates.length === 0) return null
-    const deduped = allCandidates
-      .sort((a, b) => b.score - a.score)
-      .filter((c, idx, arr) => arr.findIndex((x) => x.url === c.url) === idx)
-    const pool = deduped.slice(0, Math.max(1, Math.min(HERO_RANDOM_POOL, deduped.length)))
-    return pool[Math.floor(Math.random() * pool.length)]?.url ?? null
-  } catch {
-    return null
-  }
-}
-
 type Tab = 'planner' | 'itinerary' | 'budget' | 'map' | 'tips'
 
 const DASHBOARD_TAB_LABELS: Record<Tab, string> = {
@@ -699,6 +497,9 @@ const DASHBOARD_TAB_LABELS: Record<Tab, string> = {
 type View = 'home' | 'dashboard'
 
 const DASHBOARD_TABS: readonly Tab[] = ['planner', 'itinerary', 'budget', 'map', 'tips']
+
+/** Forward confirmations to bookings@inbound.savige.me (CF Email Routing → PB). */
+const BOOKING_EMAIL_IMPORTS_ENABLED = true
 
 function parseAppUrlSearch(search: string): { view: View; tab: Tab; tripId: string | null; shareToken: string | null } {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
@@ -734,8 +535,6 @@ type CalendarActivityModalPayload = {
   bookingRef?: CalendarBookingRef
   stayLocation?: string
 }
-
-const EMPTY_CALENDAR_DAY_ITEMS: CalendarDayItem[] = []
 
 /** Matches map pin colours in mapMarkers.ts (stay / flight / rental / restaurant / activity / place). */
 function calendarMapMarkerKind(item: Pick<CalendarDayItem, 'bookingRef'>): MapMarkerKind {
@@ -781,7 +580,7 @@ function calendarItemKindLabel(p: Pick<CalendarActivityModalPayload, 'bookingRef
   if (tab === 'rentalCar') return 'Rental car'
   if (tab === 'restaurant') return 'Restaurant'
   if (tab === 'accommodation') return 'Accommodation'
-  return 'Activity'
+  return 'Stop'
 }
 
 function calendarPayloadToDayItem(p: CalendarActivityModalPayload): CalendarDayItem {
@@ -791,32 +590,6 @@ function calendarPayloadToDayItem(p: CalendarActivityModalPayload): CalendarDayI
     activity: p.activity,
     bookingRef: p.bookingRef,
   }
-}
-
-type BookingFilter = BookingTab | 'all'
-type BookingRowKind = BookingTab | 'activity'
-type BookingManagementRow = {
-  id: string
-  kind: BookingRowKind
-  filterKind: BookingTab
-  sortTs: number
-  overlapStartTs: number
-  overlapEndTs: number
-  dateText: string
-  title: string
-  subtitle: string
-  /** Confirmation refs, times, etc. (not the price — see priceAmount). */
-  meta?: string
-  /** Parsed numeric amount for right-aligned currency display. */
-  priceAmount?: number
-  /** When kind is flight, drives baggage icon row in the list. */
-  flightBaggage?: { checked: number; carryOn: number; personal: boolean }
-  removable: boolean
-  removeId?: string
-  removeTab?: BookingTab
-  stayId?: string
-  activityId?: string
-  kindLabel: string
 }
 
 const toIsoDate = (d?: Date) => {
@@ -976,11 +749,16 @@ function CalendarBookingDetailsReadonly({
           {row('From', [b.fromLabel?.trim(), b.fromIata?.trim().toUpperCase()].filter(Boolean).join(' · '))}
           {row('To', [b.toLabel?.trim(), b.toIata?.trim().toUpperCase()].filter(Boolean).join(' · '))}
           {row('Airline', b.airline)}
+          {row('Flight', b.flightNumber)}
           {row('Depart', `${formatSingleDateLabel(b.departDate)} ${(b.departTime ?? '').trim()}`)}
           {row('Arrive', `${formatSingleDateLabel(b.arriveDate || b.departDate)} ${(b.arriveTime ?? '').trim()}`)}
+          {row('Terminal', b.departTerminal)}
+          {row('Seat', b.seat)}
+          {row('Status', b.bookingStatus)}
           {row('Bags', `Checked ${b.checkedBags} · Carry-on ${b.carryOnBags}${b.personalItem ? ' · Personal item' : ''}`)}
           {row('Confirmation', b.confirmation)}
           {row('Price', b.price)}
+          {row('Notes', b.notes)}
         </div>
       </div>
     )
@@ -1008,9 +786,24 @@ function CalendarBookingDetailsReadonly({
       <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Planner booking</p>
       <div className="space-y-2.5">
         {row('Name', b.name)}
+        {row('Address', b.address)}
         {row('Check-in', formatSingleDateLabel(b.checkIn))}
         {row('Check-out', formatSingleDateLabel(b.checkOut))}
         {row('Confirmation', b.confirmation)}
+        {row('Total', b.price)}
+        {row('Paid', b.amountPaid)}
+        {row('Owing', b.amountOwing)}
+        {b.photoUrl ? (
+          <div className="pt-1">
+            <img
+              src={b.photoUrl}
+              alt=""
+              className="h-28 w-full max-w-xs rounded-xl object-cover"
+              loading="lazy"
+              referrerPolicy="no-referrer"
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -1083,6 +876,42 @@ const getPeakSeasonInfoFromLocalDb = (destination: string, monthDate: Date): Pea
   }
 }
 
+function useLockPageScrollWhile(locked: boolean, allowInsideRef: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    if (!locked) return undefined
+    const html = document.documentElement
+    const body = document.body
+    const prevHtmlOverflow = html.style.overflow
+    const prevBodyOverflow = body.style.overflow
+    const prevBodyTouchAction = body.style.touchAction
+    html.style.overflow = 'hidden'
+    body.style.overflow = 'hidden'
+    body.style.touchAction = 'none'
+
+    const allowInside = (target: EventTarget | null) => {
+      const node = allowInsideRef.current
+      return node != null && target instanceof Node && node.contains(target)
+    }
+    const onWheel = (e: WheelEvent) => {
+      if (allowInside(e.target)) return
+      e.preventDefault()
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      if (allowInside(e.target)) return
+      e.preventDefault()
+    }
+    window.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    window.addEventListener('touchmove', onTouchMove, { capture: true, passive: false })
+    return () => {
+      html.style.overflow = prevHtmlOverflow
+      body.style.overflow = prevBodyOverflow
+      body.style.touchAction = prevBodyTouchAction
+      window.removeEventListener('wheel', onWheel, true)
+      window.removeEventListener('touchmove', onTouchMove, true)
+    }
+  }, [locked, allowInsideRef])
+}
+
 function DateRangeDropdown({
   startDate,
   endDate,
@@ -1091,6 +920,12 @@ function DateRangeDropdown({
   placeholder,
   initialMonthIso,
   className = '',
+  triggerClassName,
+  buttonLabel,
+  title,
+  open: openProp,
+  onOpenChange,
+  popoverClassName = '',
 }: {
   startDate: string
   endDate: string
@@ -1099,13 +934,27 @@ function DateRangeDropdown({
   placeholder?: string
   initialMonthIso?: string
   className?: string
+  triggerClassName?: string
+  buttonLabel?: string
+  title?: string
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  popoverClassName?: string
 }) {
-  const [open, setOpen] = useState(false)
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
+  const isControlled = openProp !== undefined
+  const open = isControlled ? openProp : uncontrolledOpen
+  const setOpen = (next: boolean) => {
+    if (!isControlled) setUncontrolledOpen(next)
+    onOpenChange?.(next)
+  }
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [range, setRange] = useState<DateRange | undefined>(() => ({
     from: parseIsoDate(startDate) ?? undefined,
     to: parseIsoDate(endDate) ?? undefined,
   }))
+
+  useLockPageScrollWhile(open, rootRef)
 
   useEffect(() => {
     setRange({
@@ -1131,26 +980,39 @@ function DateRangeDropdown({
   }, [open])
 
   const initialMonth = parseIsoDate(initialMonthIso)
+  const label =
+    buttonLabel ??
+    (startDate || endDate ? formatDateRangeLabel(startDate, endDate) : (placeholder ?? 'Select start and end dates'))
 
   return (
     <div ref={rootRef} className={`relative ${className}`}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen(!open)}
         disabled={disabled}
-        className="w-full text-left px-3 py-2 rounded-xl border border-neutral-200 bg-white disabled:bg-neutral-50 text-sm"
+        title={title}
+        className={
+          triggerClassName
+            ? `inline-flex items-center gap-1.5 ${triggerClassName}`
+            : 'inline-flex w-full items-center gap-1.5 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-left text-sm disabled:bg-neutral-50'
+        }
       >
-        {startDate || endDate ? formatDateRangeLabel(startDate, endDate) : (placeholder ?? 'Select start and end dates')}
+        <span className="min-w-0 truncate">{label}</span>
+        <Pencil size={12} className="shrink-0 opacity-80" aria-hidden />
       </button>
       {open ? (
-        <div className="absolute left-0 mt-2 rounded-2xl border border-neutral-200 bg-white p-3 shadow-xl z-20">
+        <div
+          className={`absolute z-[60] mt-2 rounded-2xl border border-neutral-200 bg-white p-3 shadow-xl dark:border-neutral-600 dark:bg-neutral-900 ${
+            popoverClassName || 'left-0'
+          }`}
+        >
           <div className="flex flex-col md:flex-row md:items-start md:gap-4">
             <DayPicker
               mode="range"
               selected={range}
               defaultMonth={range?.from ?? parseIsoDate(startDate) ?? initialMonth ?? new Date()}
               captionLayout="dropdown-years"
-              navLayout="after"
+              navLayout="around"
               fromYear={new Date().getFullYear()}
               toYear={new Date().getFullYear() + 10}
               startMonth={startOfToday()}
@@ -1188,7 +1050,7 @@ function DateRangeDropdown({
               }}
             />
             <div className="mt-3 md:mt-2 md:min-w-[150px]">
-              <div className="text-xs text-neutral-600">
+              <div className="text-xs text-neutral-600 dark:text-neutral-300">
                 Dates selected: {startDate || endDate ? formatDateRangeLabel(startDate, endDate) : 'None'}
               </div>
             </div>
@@ -1218,6 +1080,8 @@ function DateSingleDropdown({
   const rootRef = useRef<HTMLDivElement | null>(null)
   const selected = parseIsoDate(date) ?? undefined
   const initialMonth = parseIsoDate(initialMonthIso)
+
+  useLockPageScrollWhile(open, rootRef)
 
   useEffect(() => {
     if (!open) return
@@ -1252,7 +1116,7 @@ function DateSingleDropdown({
             selected={selected}
             defaultMonth={selected ?? initialMonth ?? new Date()}
             captionLayout="dropdown-years"
-            navLayout="after"
+            navLayout="around"
             fromYear={new Date().getFullYear()}
             toYear={new Date().getFullYear() + 10}
             startMonth={startOfToday()}
@@ -1547,17 +1411,36 @@ function CalendarDayHeaderCell({
         {weekdayShort ? <span className="itinerary-calendar-col-weekday">{weekdayShort}</span> : null}
         {dateLabel ? <span className="itinerary-calendar-col-date">{dateLabel}</span> : null}
       </button>
-      <div className="itinerary-calendar-acc-strip" title={staysForDay.map((s) => s.location).join(' · ') || undefined}>
-        {staysForDay.length === 0 ? (
-          <span className="itinerary-calendar-acc-strip-empty">No stay</span>
-        ) : (
-          staysForDay.map((s) => (
-            <span key={s.id} className="itinerary-calendar-acc-strip-chip">
+      <div
+        className="itinerary-calendar-acc-strip"
+        title={
+          staysForDay
+            .map((s) => {
+              const lodging = stayAccommodationForDate(s, dayIso)
+              return (lodging?.name || lodging?.confirmationRef || '').trim()
+            })
+            .filter(Boolean)
+            .join(' · ') || undefined
+        }
+      >
+        {(() => {
+          const lodgingChips = staysForDay
+            .map((s) => {
+              const lodging = stayAccommodationForDate(s, dayIso)
+              const label = (lodging?.name || lodging?.confirmationRef || '').trim()
+              return label ? { id: lodging?.id || s.id, label } : null
+            })
+            .filter((x): x is { id: string; label: string } => Boolean(x))
+          if (lodgingChips.length === 0) {
+            return <span className="itinerary-calendar-acc-strip-empty">No lodging</span>
+          }
+          return lodgingChips.map((chip) => (
+            <span key={chip.id} className="itinerary-calendar-acc-strip-chip">
               <BedDouble size={11} aria-hidden className="shrink-0 itinerary-calendar-acc-strip-icon" />
-              <span className="itinerary-calendar-acc-strip-text">{s.location}</span>
+              <span className="itinerary-calendar-acc-strip-text">{chip.label}</span>
             </span>
           ))
-        )}
+        })()}
       </div>
     </div>
   )
@@ -2490,9 +2373,6 @@ function ItineraryCalendarGrid({
             <ChevronRight size={18} />
           </button>
         </div>
-        <p className="itinerary-calendar-hint text-xs text-neutral-500 mt-2">
-          Click an activity to edit, or drag to move time or day. The day shows 12 hours at a time (scroll for the full 24h). With a mouse wheel, only the day columns scroll the hours—the time labels, scrollbar strip, and rest of the card scroll the page. Hold near the left or right edge while dragging to slide the visible week earlier or later (same step as the arrows). On a narrow screen, scroll vertically within the day columns. Click a day header to select it for recommendations below.
-        </p>
         {monthYearLabel ? (
           <div className="itinerary-calendar-month-banner">
             <span className="itinerary-calendar-month-year">{monthYearLabel}</span>
@@ -2610,13 +2490,14 @@ function sortKeyCancelledDesc(t: Trip): string {
 }
 
 export default function App() {
-  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
-    const saved = localStorage.getItem(THEME_KEY)
-    if (saved === 'dark') return true
-    if (saved === 'light') return false
-    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
-  })
-  const [displayCurrency] = useState(() => loadDisplayCurrency())
+  const displayCurrency = DEFAULT_DISPLAY_CURRENCY
+  const [budgetFxSnapshot, setBudgetFxSnapshot] = useState<FxSnapshot | null>(null)
+  const [budgetFromCurrency, setBudgetFromCurrency] = useState(DEFAULT_DISPLAY_CURRENCY)
+  const [budgetToCurrency, setBudgetToCurrency] = useState(DEFAULT_DISPLAY_CURRENCY)
+  const [budgetFromAmount, setBudgetFromAmount] = useState('1')
+  const [budgetToAmount, setBudgetToAmount] = useState('')
+  const [budgetFxLastEdited, setBudgetFxLastEdited] = useState<'from' | 'to'>('from')
+  const budgetPairSeededForTripRef = useRef<string | null>(null)
   const initialAppUrl = useMemo(() => readInitialAppUrl(), [])
   const [view, setView] = useState<View>(() => {
     if (isSupabaseConfigured() && !isDevAuthBypass() && initialAppUrl.shareToken) return 'dashboard'
@@ -2633,9 +2514,14 @@ export default function App() {
   )
   const shareUrlHandledRef = useRef(false)
   const [shareInviteBanner, setShareInviteBanner] = useState<string | null>(null)
-  const [expandedTripPanel, setExpandedTripPanel] = useState(true)
+  const [tripDatesCalendarOpen, setTripDatesCalendarOpen] = useState(false)
+  const onTripDatesCalendarOpenChange = useCallback((open: boolean) => {
+    setTripDatesCalendarOpen(open)
+  }, [])
   const [selectedTimelineDate, setSelectedTimelineDate] = useState('')
-  const [itineraryViewMode, setItineraryViewMode] = useState<'timeline' | 'calendar'>('timeline')
+  const [itineraryViewMode, setItineraryViewMode] = useState<'destinations' | 'calendar'>('destinations')
+  const [stopComposer, setStopComposer] = useState<{ stayId: string; date: string } | null>(null)
+  const [mapFocusStayId, setMapFocusStayId] = useState<string | null>(null)
   const [calendarWeekStartIndex, setCalendarWeekStartIndex] = useState(0)
   const [calendarDropError, setCalendarDropError] = useState<string | null>(null)
   const isMobileCalNarrow = useCalMobileNarrowViewport()
@@ -2664,20 +2550,36 @@ export default function App() {
   const [localImportDismissed, setLocalImportDismissed] = useState(false)
 
   const skipRemoteSaveRef = useRef(true)
+  /** Never push trips to PocketBase until a successful remote load (or local-cache fallback) finished. */
+  const tripsHydratedRef = useRef(false)
   const remoteFetchGenRef = useRef(0)
+  /** Bumped on every trips state change; in-flight saves with an older gen are ignored. */
+  const tripsSaveGenRef = useRef(0)
+  /** Next remote save may reduce stay count (intentional delete destination). */
+  const allowStayReductionRef = useRef(false)
 
   const [state, setState] = useState<TripsState>(() => {
-    if (isSupabaseConfigured() && !isDevAuthBypass()) return { trips: [], selectedTripId: null }
+    // Always seed from localStorage when possible — PocketBase restarts / Vite HMR
+    // used to start empty, then save that empty payload over good remote data.
     const s = isDevAuthBypass() ? DEV_BYPASS_SESSION : loadAuthSession()
-    const base = loadTripsState(s ? tripsStorageKey(s.email) : null)
+    let email = s?.email ?? null
+    if (!email && isSupabaseConfigured()) {
+      try {
+        const rec = getPocketBase().authStore.record as { email?: string } | null
+        if (typeof rec?.email === 'string') email = rec.email
+      } catch {
+        /* ignore */
+      }
+    }
+    const base = loadTripsState(email ? tripsStorageKey(email) : null)
     if (initialAppUrl.tripId && base.trips.some((t) => t.id === initialAppUrl.tripId)) {
       return { ...base, selectedTripId: initialAppUrl.tripId }
     }
     return base
   })
-  const [placeSearchInput, setPlaceSearchInput] = useState('')
-  const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false)
-  const [placeSuggestionIndex, setPlaceSuggestionIndex] = useState(-1)
+  const stateRef = useRef(state)
+  stateRef.current = state
+  const [showStayLocationSuggestions, setShowStayLocationSuggestions] = useState(false)
   const [packListTextInput, setPackListTextInput] = useState('')
   const [packListCategoryInput, setPackListCategoryInput] = useState<string>(PACK_LIST_CATEGORIES[0])
   const [showHomeSuggestions, setShowHomeSuggestions] = useState(false)
@@ -2696,16 +2598,34 @@ export default function App() {
   const [stayEndDate, setStayEndDate] = useState('')
   const [stayCheckInTimeInput, setStayCheckInTimeInput] = useState('')
   const [stayCheckOutTimeInput, setStayCheckOutTimeInput] = useState('')
+  const [stayLodgingCheckInDate, setStayLodgingCheckInDate] = useState('')
+  const [stayLodgingCheckOutDate, setStayLodgingCheckOutDate] = useState('')
   const [stayPriceInput, setStayPriceInput] = useState('')
   const [stayBookingUrlInput, setStayBookingUrlInput] = useState('')
   const [stayConfirmationRefInput, setStayConfirmationRefInput] = useState('')
+  const [stayLodgingNameInput, setStayLodgingNameInput] = useState('')
   const [stayError, setStayError] = useState<string | null>(null)
+  /** When editing lodging: id of StopAccommodation, or null for a new lodging on the stay. */
+  const [editingLodgingId, setEditingLodgingId] = useState<string | null>(null)
+  /** Destination this lodging is attached to (user-editable; may differ from the stay that opened the form). */
+  const [lodgingHostStayId, setLodgingHostStayId] = useState<string | null>(null)
   const [bookingsTab, setBookingsTab] = useState<BookingTab>('rentalCar')
-  const [bookingFilter, setBookingFilter] = useState<BookingFilter>('all')
-  const [bookingManagementExpanded, setBookingManagementExpanded] = useState(true)
+  const [pendingBookingImports, setPendingBookingImports] = useState<BookingImportRecord[]>([])
+  const [bookingImportBusyId, setBookingImportBusyId] = useState<string | null>(null)
+  const [bookingImportError, setBookingImportError] = useState<string | null>(null)
+  const [bookingPasteOpen, setBookingPasteOpen] = useState(false)
+  const [bookingPasteText, setBookingPasteText] = useState('')
+  const [bookingPasteBusy, setBookingPasteBusy] = useState(false)
+  const [bookingFromEmailInput, setBookingFromEmailInput] = useState('')
+  const [bookingFromEmailBusy, setBookingFromEmailBusy] = useState(false)
+  const [bookingFromEmailMessage, setBookingFromEmailMessage] = useState<string | null>(null)
+  const [bookingInboxCopied, setBookingInboxCopied] = useState(false)
   const [editingBookingForm, setEditingBookingForm] = useState<{ tab: BookingTab; id: string } | null>(null)
+  const [flightWizardOpen, setFlightWizardOpen] = useState(false)
+  const [editingFlightId, setEditingFlightId] = useState<string | null>(null)
   const [editingStayId, setEditingStayId] = useState<string | null>(null)
-  const [pinnedOverlapSourceId, setPinnedOverlapSourceId] = useState<string | null>(null)
+  /** Place stop vs lodging form inside the accommodation tab. */
+  const [stopFormMode, setStopFormMode] = useState<'place' | 'lodging'>('place')
   const [carCompanyInput, setCarCompanyInput] = useState('')
   const [carPickupLocationInput, setCarPickupLocationInput] = useState('')
   const [carDropoffLocationInput, setCarDropoffLocationInput] = useState('')
@@ -2720,6 +2640,11 @@ export default function App() {
   const [flightToIata, setFlightToIata] = useState('')
   const [flightToLabel, setFlightToLabel] = useState('')
   const [flightAirlineInput, setFlightAirlineInput] = useState('')
+  const [flightNumberInput, setFlightNumberInput] = useState('')
+  const [flightSeatInput, setFlightSeatInput] = useState('')
+  const [flightBookingStatusInput, setFlightBookingStatusInput] = useState('Booked')
+  const [flightDepartTerminalInput, setFlightDepartTerminalInput] = useState('')
+  const [flightNotesInput, setFlightNotesInput] = useState('')
   const [flightDepartInput, setFlightDepartInput] = useState('')
   const [flightDepartTimeInput, setFlightDepartTimeInput] = useState('')
   const [flightArriveDateInput, setFlightArriveDateInput] = useState('')
@@ -2735,19 +2660,25 @@ export default function App() {
   const [restaurantConfirmationInput, setRestaurantConfirmationInput] = useState('')
   const [restaurantCostInput, setRestaurantCostInput] = useState('')
   const [restaurantNotesInput, setRestaurantNotesInput] = useState('')
-  const [dismissedRecommendationKeys, setDismissedRecommendationKeys] = useState<string[]>([])
   const [activityDrafts, setActivityDrafts] = useState<
     Record<string, { name: string; time: string; confirmationRef: string; cost: string; notes: string }>
   >({})
   const [activityPlaceSearchInput, setActivityPlaceSearchInput] = useState('')
   const [draftPlaceMeta, setDraftPlaceMeta] = useState<Record<string, PlaceSuggestion>>({})
   const [activityMetaById, setActivityMetaById] = useState<Record<string, PlaceSuggestion>>({})
-  const [selectedDayAnchorCoords, setSelectedDayAnchorCoords] = useState<Array<{ lat: number; lon: number }>>([])
-  const [selectedDayRadiusPartial, setSelectedDayRadiusPartial] = useState(false)
   const [bookingError, setBookingError] = useState<string | null>(null)
   const [isBookingFormOpen, setIsBookingFormOpen] = useState(false)
   const [resolvedPointCoords, setResolvedPointCoords] = useState<Record<string, { lat: number; lon: number }>>({})
-  const [mapCategoryVisible, setMapCategoryVisible] = useState<Record<MapCategory, boolean>>(defaultMapCategoryVisibility)
+  const [mapCategoryVisible] = useState<Record<MapCategory, boolean>>(defaultMapCategoryVisibility)
+  const [mapGlobeChrome, setMapGlobeChrome] = useState(false)
+  /** After Map tab scrolls to the pinned sheet — unlocks the star bloom. */
+  const [mapSheetReady, setMapSheetReady] = useState(false)
+  /** Star burst sky lift 0–1 (black → near-black underlay). */
+  const [mapSkyLit, setMapSkyLit] = useState(0)
+  /** Map basemap — Streets retints page planets/moon to chrome blues. */
+  const [mapBasemap, setMapBasemap] = useState<'streets' | 'satellite'>('satellite')
+  const mapStarOriginRef = useRef<HTMLDivElement | null>(null)
+  const tripNavRef = useRef<HTMLElement | null>(null)
   /** Session-only hero; refetched when opening the dashboard so places are not stuck on one saved photo. */
   const [dashboardHeroUrl, setDashboardHeroUrl] = useState<string | null>(null)
   const [peakSeasonInfo, setPeakSeasonInfo] = useState<PeakSeasonInfo | null>(null)
@@ -2759,6 +2690,7 @@ export default function App() {
     variant?: 'default' | 'danger'
     onConfirm: () => void
   } | null>(null)
+  const [cancelLodgingPrompt, setCancelLodgingPrompt] = useState<{ lodgingId: string } | null>(null)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [shareModalBusy, setShareModalBusy] = useState(false)
   const [shareModalError, setShareModalError] = useState<string | null>(null)
@@ -2766,6 +2698,50 @@ export default function App() {
   const [shareModalLinkToken, setShareModalLinkToken] = useState<string | null>(null)
   const [shareModalDefaultPerm, setShareModalDefaultPerm] = useState<'viewer' | 'editor'>('viewer')
   const [shareModalCopied, setShareModalCopied] = useState(false)
+  /**
+   * CSS-only chrome (no React scroll state — stays smooth on slow machines):
+   * - Fixed hero + Trip to: stay put
+   * - Toolbar keeps a static hero crop so the image never goes black / never
+     reloads; cards can’t show through it
+   * - Sticky nav: truly transparent top (real hero shows through); Map leaves
+     the bottom clear for stars, other tabs use a solid black bottom half
+   */
+  const dashboardToolbarRef = useRef<HTMLElement | null>(null)
+  const dashboardTripToRef = useRef<HTMLElement | null>(null)
+  const [dashboardToolbarHeight, setDashboardToolbarHeight] = useState(64)
+  const [dashboardTripToHeight, setDashboardTripToHeight] = useState(320)
+  const [dashboardNavHeight, setDashboardNavHeight] = useState(102)
+
+  useEffect(() => {
+    if (view !== 'dashboard') return
+    const toolbar = dashboardToolbarRef.current
+    const tripTo = dashboardTripToRef.current
+    if (!toolbar || !tripTo) return
+    const measure = () => {
+      const th = toolbar.offsetHeight
+      const tth = tripTo.offsetHeight
+      if (th > 0) setDashboardToolbarHeight(th)
+      if (tth > 0) setDashboardTripToHeight(tth)
+      const nav = tripNavRef.current
+      if (nav && nav.offsetHeight > 0) setDashboardNavHeight(nav.offsetHeight)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(toolbar)
+    ro.observe(tripTo)
+    const nav = tripNavRef.current
+    if (nav) ro.observe(nav)
+    window.addEventListener('resize', measure)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [view])
+
+  const dashboardHeroBandHeight = dashboardToolbarHeight + dashboardTripToHeight
+  // Pull nav up so its clear top half overlaps the real hero (nav used to start
+  // exactly where the hero band ended, so “transparent” only ever showed black).
+  const dashboardNavHeroOverlap = Math.round(dashboardNavHeight * 0.5)
 
   const handleConfirmDialogAction = () => {
     if (!confirmDialog) return
@@ -2810,24 +2786,45 @@ export default function App() {
     if (isDevAuthBypass()) {
       if (!authSession) return
       setState(loadTripsState(tripsStorageKey(authSession.email)))
+      tripsHydratedRef.current = true
       skipRemoteSaveRef.current = false
       return
     }
     if (!authSession || !backendUserId) {
-      setState({ trips: [], selectedTripId: null })
+      // Don't blank in-memory trips on a brief auth blip — only clear on logout.
       skipRemoteSaveRef.current = true
+      tripsHydratedRef.current = false
       return
     }
     const gen = ++remoteFetchGenRef.current
     skipRemoteSaveRef.current = true
-    fetchMergedTripsState().then((s) => {
+    const localCache = loadTripsState(tripsStorageKey(authSession.email))
+    void fetchMergedTripsStateSafe().then((result) => {
       if (gen !== remoteFetchGenRef.current) return
-      setState(s)
+      if (!result.ok) {
+        // PocketBase was down (common during hook/container restarts). Keep the
+        // local cache and do not enable remote save until a good fetch lands —
+        // otherwise we'd write empty trips over the real data.
+        console.warn('trips load failed, keeping local cache:', result.error)
+        if (localCache.trips.length > 0) {
+          setState(localCache)
+          tripsHydratedRef.current = true
+          // Allow save once PB is back so the cache can re-upload.
+          requestAnimationFrame(() => {
+            skipRemoteSaveRef.current = false
+          })
+        }
+        return
+      }
+      const merged = mergeTripsPreferRicherStays(result.state, localCache)
+      setState(merged)
+      saveTripsState(merged, authSession.email)
+      tripsHydratedRef.current = true
       requestAnimationFrame(() => {
         skipRemoteSaveRef.current = false
       })
     })
-  }, [authReady, backendUserId])
+  }, [authReady, backendUserId, authSession?.email])
 
   useEffect(() => {
     if (!isSupabaseConfigured() || isDevAuthBypass()) return
@@ -2844,12 +2841,19 @@ export default function App() {
         skipRemoteSaveRef.current = false
         return
       }
-      const merged = await fetchMergedTripsState()
+      const loaded = await fetchMergedTripsStateSafe()
       if (gen !== remoteFetchGenRef.current) {
         skipRemoteSaveRef.current = false
         return
       }
-      setState({ ...merged, selectedTripId: r.sourceTripId })
+      if (!loaded.ok) {
+        setShareInviteBanner(loaded.error)
+        shareUrlHandledRef.current = false
+        skipRemoteSaveRef.current = false
+        return
+      }
+      setState({ ...loaded.state, selectedTripId: r.sourceTripId })
+      tripsHydratedRef.current = true
       setView('dashboard')
       shareTokenFromUrlRef.current = null
       setShareInviteBanner(null)
@@ -2865,17 +2869,27 @@ export default function App() {
 
   useEffect(() => {
     if (!authSession?.email) return
+    // Always mirror to localStorage so a PocketBase blip cannot erase the only copy.
+    saveTripsState(state, authSession.email)
     if (!isSupabaseConfigured() || isDevAuthBypass()) {
-      saveTripsState(state, authSession.email)
       return
     }
-    if (skipRemoteSaveRef.current) return
+    if (skipRemoteSaveRef.current || !tripsHydratedRef.current) return
     const t = window.setTimeout(() => {
+      const gen = ++tripsSaveGenRef.current
       void (async () => {
-        const personal = tripsStateForPersonalSave(state)
-        const pr = await upsertUserTrips(personal)
+        // Prefer latest state at flush time (not the effect closure) so rapid
+        // nights +/- don't upload an older snapshot after a newer edit.
+        const latest = stateRef.current
+        if (gen !== tripsSaveGenRef.current) return
+        const personal = tripsStateForPersonalSave(latest)
+        const allowStayReduction = allowStayReductionRef.current
+        allowStayReductionRef.current = false
+        const pr = await upsertUserTrips(personal, { allowStayReduction })
+        if (gen !== tripsSaveGenRef.current) return
         if (!pr.ok) console.warn('user_trips save:', pr.error)
-        for (const trip of state.trips) {
+        for (const trip of latest.trips) {
+          if (gen !== tripsSaveGenRef.current) return
           const sh = trip.sharing
           if (!sh || (sh.role !== 'owner' && sh.role !== 'editor')) continue
           const ur = await upsertSharedItineraryTrip(sh.sharedItineraryId, trip)
@@ -2956,8 +2970,10 @@ export default function App() {
     }
   }, [view, activeTab])
   useEffect(() => {
-    localStorage.setItem(THEME_KEY, isDarkMode ? 'dark' : 'light')
-  }, [isDarkMode])
+    document.documentElement.classList.add('dark')
+    document.documentElement.style.colorScheme = 'dark'
+    prefetchFxRates()
+  }, [])
   useEffect(() => {
     const id = window.setInterval(() => setItineraryClock(Date.now()), 30000)
     return () => window.clearInterval(id)
@@ -2968,7 +2984,121 @@ export default function App() {
     return state.trips.find((t) => t.id === state.selectedTripId) ?? null
   }, [state.selectedTripId, state.trips])
 
+  const budgetDestCurrency = useMemo(
+    () => currencyForCountry(selectedTrip?.country),
+    [selectedTrip?.country],
+  )
+
+  useEffect(() => {
+    if (!selectedTrip) {
+      budgetPairSeededForTripRef.current = null
+      return
+    }
+    if (budgetPairSeededForTripRef.current === selectedTrip.id) return
+    budgetPairSeededForTripRef.current = selectedTrip.id
+    setBudgetFromCurrency(budgetDestCurrency)
+    setBudgetToCurrency(DEFAULT_DISPLAY_CURRENCY)
+    setBudgetFromAmount('1')
+    setBudgetToAmount('')
+    setBudgetFxLastEdited('from')
+  }, [selectedTrip, budgetDestCurrency])
+
+  useEffect(() => {
+    if (activeTab !== 'budget') return
+    let cancelled = false
+    void getFxSnapshot().then((snap) => {
+      if (!cancelled) setBudgetFxSnapshot(snap)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeTab, selectedTrip?.id])
+
+  useEffect(() => {
+    if (!budgetFxSnapshot) return
+    const parseSide = (raw: string): number | 'empty' | 'partial' => {
+      const cleaned = raw.trim().replace(/,/g, '')
+      if (!cleaned) return 'empty'
+      // Allow in-progress typing like ".", "1.", "-0."
+      if (cleaned === '.' || cleaned === '-' || cleaned === '-.' || /^-?\d+\.$/.test(cleaned)) {
+        return 'partial'
+      }
+      if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return 'partial'
+      const n = Number(cleaned)
+      return Number.isFinite(n) ? n : 'partial'
+    }
+    if (budgetFxLastEdited === 'from') {
+      const amount = parseSide(budgetFromAmount)
+      if (amount === 'partial') return
+      if (amount === 'empty') {
+        setBudgetToAmount('')
+        return
+      }
+      setBudgetToAmount(
+        formatConverterAmount(
+          convertAmountWithSnapshot(amount, budgetFromCurrency, budgetToCurrency, budgetFxSnapshot),
+          budgetToCurrency,
+        ),
+      )
+    } else {
+      const amount = parseSide(budgetToAmount)
+      if (amount === 'partial') return
+      if (amount === 'empty') {
+        setBudgetFromAmount('')
+        return
+      }
+      setBudgetFromAmount(
+        formatConverterAmount(
+          convertAmountWithSnapshot(amount, budgetToCurrency, budgetFromCurrency, budgetFxSnapshot),
+          budgetFromCurrency,
+        ),
+      )
+    }
+  }, [
+    budgetFxSnapshot,
+    budgetFromAmount,
+    budgetToAmount,
+    budgetFromCurrency,
+    budgetToCurrency,
+    budgetFxLastEdited,
+  ])
+
   const tripIsReadOnly = useMemo(() => isTripReadOnly(selectedTrip), [selectedTrip])
+
+  const tripBudgetSummary = useMemo(
+    () => buildTripBudgetSummary(selectedTrip, budgetFxSnapshot),
+    [selectedTrip, budgetFxSnapshot],
+  )
+
+  const refreshBookingImports = async () => {
+    if (!isSupabaseConfigured() || isDevAuthBypass() || !authSession) {
+      setPendingBookingImports([])
+      return
+    }
+    try {
+      const rows = await listPendingBookingImports()
+      setPendingBookingImports(rows)
+    } catch (err) {
+      console.warn('booking_imports list:', err)
+    }
+  }
+
+  useEffect(() => {
+    void refreshBookingImports()
+  }, [authSession?.email, view])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured() || isDevAuthBypass() || !authSession) {
+      setBookingFromEmailInput('')
+      return
+    }
+    try {
+      const rec = getPocketBase().authStore.record as { booking_from_email?: unknown; email?: unknown } | null
+      setBookingFromEmailInput(bookingFromEmailFromAuthRecord(rec) || authSession.email)
+    } catch {
+      setBookingFromEmailInput(authSession.email)
+    }
+  }, [authSession?.email])
 
   useEffect(() => {
     if (!calendarActivityDetail) {
@@ -2996,12 +3126,27 @@ export default function App() {
         if (row?.trip_json == null) return
         const parsed = parseSingleTripFromUnknown(row.trip_json)
         if (!parsed) return
-        setState((prev) => ({
-          ...prev,
-          trips: prev.trips.map((t) =>
-            t.sharing?.sharedItineraryId === sid ? { ...parsed, sharing: t.sharing } : t,
-          ),
-        }))
+        setState((prev) => {
+          const local = prev.trips.find((t) => t.sharing?.sharedItineraryId === sid)
+          // Ignore stale save echoes: an older in-flight upsert can finish after
+          // newer local nights edits and would snap dates back.
+          if (local && (parsed.clientRev ?? 0) < (local.clientRev ?? 0)) {
+            return prev
+          }
+          return {
+            ...prev,
+            trips: prev.trips.map((t) =>
+              t.sharing?.sharedItineraryId === sid
+                ? {
+                    ...parsed,
+                    sharing: t.sharing,
+                    // Keep the higher rev if the echo omitted/lagged it.
+                    clientRev: Math.max(parsed.clientRev ?? 0, t.clientRev ?? 0),
+                  }
+                : t,
+            ),
+          }
+        })
       })
       .then((u) => {
         unsub = u
@@ -3044,270 +3189,6 @@ export default function App() {
       })
       .map(([category, items]) => [category, [...items].sort((a, b) => a.createdAt - b.createdAt)] as const)
   }, [packList])
-  const allStayActivities = useMemo(() => stays.flatMap((s) => s.activities ?? []), [stays])
-  const plannerActivitiesForBookingsTab = useMemo(() => {
-    const rows: { stayId: string; stayLocation: string; activity: StayActivity }[] = []
-    for (const s of stays) {
-      for (const a of s.activities ?? []) {
-        rows.push({ stayId: s.id, stayLocation: s.location, activity: a })
-      }
-    }
-    return rows.sort(
-      (x, y) =>
-        x.activity.date.localeCompare(y.activity.date) || (x.activity.time || '').localeCompare(y.activity.time || ''),
-    )
-  }, [stays])
-  const bookingManagementRows = useMemo(() => {
-    const rows: BookingManagementRow[] = []
-    const tsFromIso = (iso?: string, fallback = 0) => parseIsoDate(iso)?.getTime() ?? fallback
-    const dayStartTs = (iso?: string, fallback = 0) => parseIsoDate(iso)?.getTime() ?? fallback
-    const dayEndTs = (iso?: string, fallback = 0) => {
-      const d = parseIsoDate(iso)
-      if (!d) return fallback
-      d.setHours(23, 59, 59, 999)
-      return d.getTime()
-    }
-    const pointTs = (iso?: string, time?: string, fallback = 0) => {
-      const d = parseIsoDate(iso)
-      if (!d) return fallback
-      const mins = parseTimeToMinutes(time ?? '')
-      if (mins !== null) d.setHours(Math.floor(mins / 60), mins % 60, 0, 0)
-      return d.getTime()
-    }
-    const endExclusiveTs = (iso?: string, fallback = 0) => {
-      const d = parseIsoDate(iso)
-      if (!d) return fallback
-      return d.getTime() - 1
-    }
-
-    for (const b of bookings.rentalCars) {
-      if (!b.confirmation.trim()) continue
-      const pickupT = (b.pickupTime ?? '').trim()
-      const dropoffT = (b.dropoffTime ?? '').trim()
-      const endDate = b.dropoffDate || b.pickupDate
-      const overlapStartTs = b.pickupDate ? pointTs(b.pickupDate, pickupT, b.createdAt) : b.createdAt
-      const overlapEndTs = endDate
-        ? dropoffT
-          ? pointTs(endDate, dropoffT, b.createdAt)
-          : dayEndTs(endDate, b.createdAt)
-        : overlapStartTs
-      const pickupLabel = b.pickupDate
-        ? `${formatSingleDateLabel(b.pickupDate)}${pickupT ? ` · ${pickupT}` : ''}`
-        : 'No pickup date'
-      const dropoffLabel = endDate ? `${formatSingleDateLabel(endDate)}${dropoffT ? ` · ${dropoffT}` : ''}` : ''
-      rows.push({
-        id: `rental-${b.id}`,
-        kind: 'rentalCar',
-        kindLabel: 'Rental car',
-        filterKind: 'rentalCar',
-        sortTs: b.pickupDate ? pointTs(b.pickupDate, pickupT, b.createdAt) : b.createdAt,
-        overlapStartTs,
-        overlapEndTs,
-        dateText: dropoffLabel ? `${pickupLabel} → ${dropoffLabel}` : pickupLabel,
-        title: b.company,
-        subtitle: `${b.pickupLocation || 'Pickup'} -> ${b.dropoffLocation || 'Dropoff'}`,
-        meta: b.confirmation.trim() || undefined,
-        priceAmount: (() => {
-          const n = parseAmount(b.price)
-          return n > 0 ? n : undefined
-        })(),
-        removable: true,
-        removeId: b.id,
-        removeTab: 'rentalCar',
-      })
-    }
-    for (const b of bookings.flights) {
-      if (!b.confirmation.trim()) continue
-      const depT = (b.departTime ?? '').trim()
-      const arrT = (b.arriveTime ?? '').trim()
-      const arrDate = (b.arriveDate || b.departDate || '').trim()
-      const overlapStartTs = b.departDate
-        ? depT && parseTimeToMinutes(depT) !== null
-          ? pointTs(b.departDate, depT, b.createdAt)
-          : dayStartTs(b.departDate, b.createdAt)
-        : b.createdAt
-      const overlapEndTs = arrDate
-        ? arrT && parseTimeToMinutes(arrT) !== null
-          ? pointTs(arrDate, arrT, b.createdAt)
-          : dayEndTs(arrDate, b.createdAt)
-        : b.departDate
-          ? dayEndTs(b.departDate, b.createdAt)
-          : overlapStartTs
-      const routeDisp = buildFlightRouteDisplay(b.fromIata, b.toIata, b.route)
-      const depLabel = b.departDate
-        ? `${formatSingleDateLabel(b.departDate)}${depT ? ` · ${depT}` : ''}`
-        : 'No departure date'
-      const arrLabel = arrDate ? `${formatSingleDateLabel(arrDate)}${arrT ? ` · ${arrT}` : ''}` : ''
-      const scheduleLine = [b.airline?.trim(), [depLabel, arrLabel].filter(Boolean).join(' → ')].filter(Boolean).join(' · ')
-      rows.push({
-        id: `flight-${b.id}`,
-        kind: 'flight',
-        kindLabel: 'Flight',
-        filterKind: 'flight',
-        sortTs: b.departDate && depT && parseTimeToMinutes(depT) !== null ? pointTs(b.departDate, depT, b.createdAt) : tsFromIso(b.departDate, b.createdAt),
-        overlapStartTs,
-        overlapEndTs,
-        dateText: arrLabel ? `${depLabel} → ${arrLabel}` : depLabel,
-        title: routeDisp,
-        subtitle: scheduleLine || (b.confirmation ? `Confirmation: ${b.confirmation}` : 'Flight booking'),
-        meta: b.confirmation.trim() || undefined,
-        priceAmount: (() => {
-          const n = parseAmount(b.price)
-          return n > 0 ? n : undefined
-        })(),
-        flightBaggage: {
-          checked: b.checkedBags ?? 0,
-          carryOn: b.carryOnBags ?? 0,
-          personal: b.personalItem ?? false,
-        },
-        removable: true,
-        removeId: b.id,
-        removeTab: 'flight',
-      })
-    }
-    for (const b of bookings.restaurants) {
-      if (!b.confirmation.trim()) continue
-      const overlapStartTs = dayStartTs(b.reservationDate, b.createdAt)
-      const overlapEndTs = dayEndTs(b.reservationDate, b.createdAt)
-      rows.push({
-        id: `restaurant-${b.id}`,
-        kind: 'restaurant',
-        kindLabel: 'Dining',
-        filterKind: 'restaurant',
-        sortTs: tsFromIso(b.reservationDate, b.createdAt),
-        overlapStartTs,
-        overlapEndTs,
-        dateText: b.reservationDate ? formatSingleDateLabel(b.reservationDate) : 'No date',
-        title: b.name,
-        subtitle: b.notes || 'Dining booking',
-        meta: b.confirmation.trim() || undefined,
-        priceAmount: (() => {
-          const n = parseAmount(b.cost)
-          return n > 0 ? n : undefined
-        })(),
-        removable: true,
-        removeId: b.id,
-        removeTab: 'restaurant',
-      })
-    }
-    for (const { stayId, stayLocation, activity: a } of plannerActivitiesForBookingsTab) {
-      if (!a.confirmationRef.trim()) continue
-      const overlapPointTs = pointTs(a.date, a.time, a.createdAt)
-      rows.push({
-        id: `activity-${stayId}-${a.id}`,
-        kind: 'activity',
-        kindLabel: 'Activity',
-        filterKind: 'restaurant',
-        sortTs: tsFromIso(a.date, a.createdAt),
-        overlapStartTs: overlapPointTs,
-        overlapEndTs: overlapPointTs,
-        dateText: a.date ? formatSingleDateLabel(a.date) : 'No date',
-        title: a.name,
-        subtitle: stayLocation || 'Itinerary activity',
-        meta:
-          [a.time, a.confirmationRef ? `Conf. ${a.confirmationRef}` : ''].filter(Boolean).join(' · ') || undefined,
-        priceAmount: (() => {
-          const n = parseAmount(a.cost)
-          return n > 0 ? n : undefined
-        })(),
-        removable: true,
-        stayId,
-        activityId: a.id,
-      })
-    }
-    for (const s of stays) {
-      if (!s.confirmationRef.trim()) continue
-      const cinT = (s.checkInTime ?? '').trim()
-      const coutT = (s.checkOutTime ?? '').trim()
-      const hasCin = cinT.length > 0 && parseTimeToMinutes(cinT) !== null
-      const hasCout = coutT.length > 0 && parseTimeToMinutes(coutT) !== null
-      const overlapStartTs = s.startDate
-        ? hasCin
-          ? pointTs(s.startDate, cinT, s.createdAt)
-          : dayStartTs(s.startDate, s.createdAt)
-        : s.createdAt
-      const overlapEndTs = s.endDate
-        ? hasCout
-          ? pointTs(s.endDate, coutT, s.createdAt)
-          : endExclusiveTs(s.endDate, s.createdAt)
-        : s.startDate
-          ? hasCout
-            ? pointTs(s.startDate, coutT, s.createdAt)
-            : dayEndTs(s.startDate, s.createdAt)
-          : overlapStartTs
-      const rangeLabel = formatDateRangeLabel(s.startDate, s.endDate)
-      const dateParts = [rangeLabel]
-      if (hasCin) dateParts.push(`In ${normalizeHhMmTime(cinT)}`)
-      if (hasCout) dateParts.push(`Out ${normalizeHhMmTime(coutT)}`)
-      rows.push({
-        id: `stay-${s.id}`,
-        kind: 'accommodation',
-        kindLabel: 'Accommodation',
-        filterKind: 'accommodation',
-        sortTs: s.startDate && hasCin ? pointTs(s.startDate, cinT, s.createdAt) : tsFromIso(s.startDate, s.createdAt),
-        overlapStartTs,
-        overlapEndTs,
-        dateText: dateParts.join(' · '),
-        title: s.location || 'Accommodation',
-        subtitle: s.address || 'No address',
-        meta: s.confirmationRef.trim() || undefined,
-        priceAmount: (() => {
-          const n = parseAmount(s.price)
-          return n > 0 ? n : undefined
-        })(),
-        removable: true,
-        stayId: s.id,
-      })
-    }
-
-    return rows.sort((a, b) => a.sortTs - b.sortTs || a.kind.localeCompare(b.kind) || a.title.localeCompare(b.title))
-  }, [bookings.flights, bookings.rentalCars, bookings.restaurants, plannerActivitiesForBookingsTab, stays])
-  const visibleBookingRows = useMemo(
-    () => bookingManagementRows.filter((r) => bookingFilter === 'all' || r.filterKind === bookingFilter),
-    [bookingManagementRows, bookingFilter],
-  )
-  const bookingOverlapLinks = useMemo(() => {
-    const links = new Map<string, string[]>()
-    for (const row of visibleBookingRows) links.set(row.id, [])
-    for (let i = 0; i < visibleBookingRows.length; i++) {
-      const a = visibleBookingRows[i]
-      for (let j = i + 1; j < visibleBookingRows.length; j++) {
-        const b = visibleBookingRows[j]
-        if (a.kind !== b.kind) continue
-        if (a.overlapStartTs <= b.overlapEndTs && b.overlapStartTs <= a.overlapEndTs) {
-          links.get(a.id)?.push(b.id)
-          links.get(b.id)?.push(a.id)
-        }
-      }
-    }
-    return links
-  }, [visibleBookingRows])
-  const activeOverlapSourceId = pinnedOverlapSourceId
-  const activeOverlapIds = useMemo(() => {
-    if (!activeOverlapSourceId) return new Set<string>()
-    const ids = new Set<string>([activeOverlapSourceId])
-    for (const id of bookingOverlapLinks.get(activeOverlapSourceId) ?? []) ids.add(id)
-    return ids
-  }, [activeOverlapSourceId, bookingOverlapLinks])
-  const bookingKindChipClass: Record<BookingRowKind, string> = {
-    rentalCar: 'bg-indigo-100 text-indigo-700',
-    flight: 'bg-sky-100 text-sky-700',
-    restaurant: 'bg-amber-100 text-amber-700',
-    activity: 'bg-violet-100 text-violet-700',
-    accommodation: 'bg-emerald-100 text-emerald-700',
-  }
-  const budgetTotals = useMemo(() => {
-    const vehicle = bookings.rentalCars.reduce((sum, b) => sum + parseAmount(b.price), 0)
-    const flights = bookings.flights.reduce((sum, b) => sum + parseAmount(b.price), 0)
-    const accommodation = stays.reduce((sum, s) => sum + parseAmount(s.price), 0)
-    const food = bookings.restaurants.reduce((sum, b) => sum + parseAmount(b.cost), 0)
-    const activities =
-      visitPlaces.reduce((sum, p) => sum + parseAmount(p.cost), 0) +
-      allStayActivities.reduce((sum, a) => sum + parseAmount(a.cost), 0)
-    const total = vehicle + flights + accommodation + activities + food
-    return { vehicle, flights, accommodation, activities, food, total }
-  }, [allStayActivities, bookings.flights, bookings.rentalCars, bookings.restaurants, stays, visitPlaces])
-
   const tripBuckets = useMemo(() => {
     const todayIso = toIsoDate(new Date(itineraryClock))
     const active: Trip[] = []
@@ -3330,18 +3211,6 @@ export default function App() {
     if (!selectedTrip?.startDate || !selectedTrip?.endDate) return []
     return enumerateStayDays(selectedTrip.startDate, selectedTrip.endDate)
   }, [selectedTrip?.endDate, selectedTrip?.startDate])
-  const tripDayCount = timelineDays.length
-  const budgetPerDay = useMemo(() => {
-    if (tripDayCount <= 0) return null
-    return {
-      vehicle: budgetTotals.vehicle / tripDayCount,
-      flights: budgetTotals.flights / tripDayCount,
-      accommodation: budgetTotals.accommodation / tripDayCount,
-      activities: budgetTotals.activities / tripDayCount,
-      food: budgetTotals.food / tripDayCount,
-      total: budgetTotals.total / tripDayCount,
-    }
-  }, [budgetTotals, tripDayCount])
   const activitiesByDay = useMemo(() => {
     const map = new Map<string, CalendarDayItem[]>()
     const pushDay = (dayIso: string, item: CalendarDayItem) => {
@@ -3504,69 +3373,11 @@ export default function App() {
   const calendarMaxStart = Math.max(0, timelineDays.length - 7)
   const canPrevCalendar = calendarWeekStartIndex > 0
   const canNextCalendar = calendarWeekStartIndex < calendarMaxStart
-  const placeSearch = usePlaceSuggestions(placeSearchInput)
-  const normalizeRecommendationLabel = (label: string) => label.split(',')[0]?.trim().toLowerCase() || label.trim().toLowerCase()
-  const plannedActivityNames = useMemo(() => new Set(stays.flatMap((s) => (s.activities ?? []).map((a) => a.name.trim().toLowerCase())).filter(Boolean)), [stays])
-  const recommendationSeeds = useMemo(() => {
-    if (!selectedTrip) return []
-    const seedList: string[] = []
-    for (const s of stays) {
-      const addr = s.address.trim()
-      const loc = s.location.trim()
-      if (addr) seedList.push(addr)
-      if (loc) seedList.push(loc)
-    }
-    return seedList.length > 0 ? seedList : [selectedTrip.country]
-  }, [selectedTrip, stays])
-  const recommendedPlaces = useCachedRecommendations(
-    selectedTrip?.id,
-    recommendationSeeds,
-    selectedTrip?.country ?? '',
-  )
-  const visibleRecommendations = useMemo(() => {
-    return recommendedPlaces.recommendations
-      .filter((r) => !dismissedRecommendationKeys.includes(r.key))
-      .filter((r) => !plannedActivityNames.has(normalizeRecommendationLabel(r.label)))
-      .slice(0, 8)
-  }, [dismissedRecommendationKeys, plannedActivityNames, recommendedPlaces.recommendations])
+  const stayLocationSearch = usePlaceSuggestions(stayLocationInput)
   const selectedDayPrimaryStay = useMemo(() => {
     if (!selectedTimelineDate) return null
     return (staysByDay.get(selectedTimelineDate) ?? [])[0] ?? null
   }, [selectedTimelineDate, staysByDay])
-  const selectedDayNumber = useMemo(() => {
-    if (!selectedTimelineDate) return null
-    const idx = timelineDays.indexOf(selectedTimelineDate)
-    return idx >= 0 ? idx + 1 : null
-  }, [selectedTimelineDate, timelineDays])
-  const selectedDayActivities = useMemo(
-    () => activitiesByDay.get(selectedTimelineDate) ?? EMPTY_CALENDAR_DAY_ITEMS,
-    [activitiesByDay, selectedTimelineDate],
-  )
-  const dayRecommendationRadius = useMemo(() => {
-    const base = recommendedPlaces.recommendations
-      .filter((rec) => !dismissedRecommendationKeys.includes(rec.key))
-      .filter((rec) => !plannedActivityNames.has(normalizeRecommendationLabel(rec.label)))
-
-    const within10km = base.filter((rec) => {
-      if (selectedDayAnchorCoords.length === 0) return true
-      if (typeof rec.lat !== 'number' || typeof rec.lon !== 'number') return selectedDayRadiusPartial
-      return selectedDayAnchorCoords.some((anchor) => haversineKm(anchor, { lat: rec.lat!, lon: rec.lon! }) <= 10)
-    })
-
-    const within20km = base.filter((rec) => {
-      if (selectedDayAnchorCoords.length === 0) return true
-      if (typeof rec.lat !== 'number' || typeof rec.lon !== 'number') return selectedDayRadiusPartial
-      return selectedDayAnchorCoords.some((anchor) => haversineKm(anchor, { lat: rec.lat!, lon: rec.lon! }) <= 20)
-    })
-
-    const isUsing20kmFallback = within10km.length < 4 && within20km.length > within10km.length
-    const selected = (isUsing20kmFallback ? within20km : within10km)
-      .slice(0, 4)
-      .map((rec) => ({ ...rec, category: resolveRecommendationCategory(rec.category, rec.label, rec.primaryType, rec.types) }))
-
-    return { selected, isUsing20kmFallback, within10Count: within10km.length }
-  }, [dismissedRecommendationKeys, plannedActivityNames, selectedDayAnchorCoords, selectedDayRadiusPartial, recommendedPlaces.recommendations])
-  const visibleSelectedDayRecommendations = dayRecommendationRadius.selected
   const activityPlaceSearch = usePlaceSuggestions(activityPlaceSearchInput)
   const homeSearch = useDestinationSuggestions(newTripDestination)
   const mapPoints = useMemo(
@@ -3597,39 +3408,6 @@ export default function App() {
     const d = new Date(itineraryClock)
     return d.getHours() * 60 + d.getMinutes()
   }, [itineraryClock])
-  const activeSoonItem = useMemo((): CalendarDayItem | null => {
-    if (!selectedTimelineDate || selectedTimelineDate !== todayIso) return null
-    /** Next event must start within this many minutes (inclusive of its start minute). */
-    const soonEnd = nowMinutes + 30
-    const items = activitiesByDay.get(selectedTimelineDate) ?? []
-    const candidates = items
-      .filter(({ activity: a }) => {
-        const m = parseTimeToMinutes(a.time)
-        if (m === null) return false
-        return m >= nowMinutes && m <= soonEnd
-      })
-      .sort((x, y) => (parseTimeToMinutes(x.activity.time) ?? 0) - (parseTimeToMinutes(y.activity.time) ?? 0))
-    return candidates[0] ?? null
-  }, [selectedTimelineDate, todayIso, nowMinutes, activitiesByDay])
-  const activeSoonActivity = activeSoonItem?.activity ?? null
-  const activeSoonDirectionsDestination = useMemo(
-    () => directionsDestinationForScheduleItem(activeSoonItem ?? undefined),
-    [activeSoonItem],
-  )
-  const currentStay = useMemo(
-    () => stays.find((s) => s.startDate && s.endDate && s.startDate <= todayIso && todayIso < s.endDate) ?? null,
-    [stays, todayIso],
-  )
-  const overallTripProgressPct = useMemo(() => {
-    if (!selectedTrip?.startDate || !selectedTrip.endDate) return null
-    const start = parseIsoDate(selectedTrip.startDate)
-    const end = parseIsoDate(selectedTrip.endDate)
-    if (!start || !end || end < start) return null
-    const totalDays = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000) + 1)
-    const elapsedDays = Math.round((startOfToday().getTime() - start.getTime()) / 86400000) + 1
-    const clamped = Math.min(totalDays, Math.max(0, elapsedDays))
-    return Math.round((clamped / totalDays) * 100)
-  }, [selectedTrip?.endDate, selectedTrip?.startDate])
   const sideQuestCountdown = useMemo(() => {
     const now = new Date(itineraryClock)
     const start = parseIsoDate(selectedTrip?.startDate)
@@ -3657,10 +3435,6 @@ export default function App() {
     }
   }, [itineraryClock, selectedTrip?.startDate, selectedTrip?.endDate])
   useEffect(() => {
-    setPlaceSuggestionIndex(-1)
-  }, [placeSearchInput, showPlaceSuggestions])
-
-  useEffect(() => {
     setHomeSuggestionIndex(-1)
   }, [newTripDestination, showHomeSuggestions])
 
@@ -3676,10 +3450,9 @@ export default function App() {
       let changed = false
       const trips = prev.trips.map((trip) => {
         const filtered = trip.bookings.accommodations.filter((x) => x.confirmation.trim().length > 0)
-        const filteredStays = trip.stays.filter((s) => s.confirmationRef.trim().length > 0)
-        if (filtered.length === trip.bookings.accommodations.length && filteredStays.length === trip.stays.length) return trip
+        if (filtered.length === trip.bookings.accommodations.length) return trip
         changed = true
-        return { ...trip, stays: filteredStays, bookings: { ...trip.bookings, accommodations: filtered } }
+        return { ...trip, bookings: { ...trip.bookings, accommodations: filtered } }
       })
       return changed ? { ...prev, trips } : prev
     })
@@ -3689,11 +3462,8 @@ export default function App() {
     setTripStartDateInput(selectedTrip?.startDate ?? '')
     setTripEndDateInput(selectedTrip?.endDate ?? '')
     setTripDateError(null)
+    setTripDatesCalendarOpen(false)
   }, [selectedTrip?.id, selectedTrip?.startDate, selectedTrip?.endDate])
-
-  useEffect(() => {
-    setDismissedRecommendationKeys([])
-  }, [selectedTrip?.id, recommendationSeeds.join('|')])
 
   useEffect(() => {
     if (!selectedTrip?.id) {
@@ -3723,31 +3493,6 @@ export default function App() {
   }, [selectedTrip?.id])
 
   useEffect(() => {
-    const stay = selectedDayPrimaryStay
-    if (!selectedTimelineDate || (!stay && selectedDayActivities.length === 0)) {
-      setSelectedDayAnchorCoords([])
-      setSelectedDayRadiusPartial(false)
-      return
-    }
-    const coords: Array<{ lat: number; lon: number }> = []
-    let unresolved = 0
-    if (typeof stay?.lat === 'number' && typeof stay?.lon === 'number') {
-      coords.push({ lat: stay.lat, lon: stay.lon })
-    }
-    for (const a of selectedDayActivities.slice(0, 5)) {
-      if (typeof a.activity.lat === 'number' && typeof a.activity.lon === 'number') {
-        coords.push({ lat: a.activity.lat, lon: a.activity.lon })
-      } else {
-        unresolved += 1
-      }
-    }
-    const dedup = Array.from(new Map(coords.map((c) => [`${c.lat.toFixed(5)}:${c.lon.toFixed(5)}`, c])).values())
-    setSelectedDayAnchorCoords(dedup)
-    setSelectedDayRadiusPartial(unresolved > 0 || dedup.length === 0)
-  }, [selectedDayActivities, selectedDayPrimaryStay, selectedTimelineDate])
-
-
-  useEffect(() => {
     const destination = newTripDestination.trim()
     if (!destination) {
       setPeakSeasonInfo(null)
@@ -3756,6 +3501,215 @@ export default function App() {
     const indicatorMonthDate = newTripRange?.from ?? parseIsoDate(newTripStartDate) ?? new Date()
     setPeakSeasonInfo(getPeakSeasonInfoFromLocalDb(destination, indicatorMonthDate))
   }, [newTripDestination, newTripRange?.from, newTripStartDate])
+
+  useEffect(() => {
+    if (activeTab !== 'map') {
+      setMapGlobeChrome(false)
+      setMapSheetReady(false)
+      setMapSkyLit(0)
+    }
+  }, [activeTab])
+
+  // Map tab: pin sheet under toolbar, lock page scroll through the star bloom, then unlock
+  // so the user can scroll up to the hero. Map canvas zoom + Recenter stay available.
+  // Do NOT set overflow:hidden on html/body — that breaks position:sticky / hides the toolbar.
+  // Flat / no globe chrome never blooms — unlock as soon as the sheet is pinned.
+  const mapScrollUnlocked = mapSkyLit >= 1 || (mapSheetReady && !mapGlobeChrome)
+  const mapPinScrollYRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (activeTab !== 'map') {
+      mapPinScrollYRef.current = null
+      return
+    }
+
+    let cancelled = false
+    let finished = false
+    let settleTimer: number | null = null
+    let pollTimer: number | null = null
+    let pendingTargetY = 0
+
+    const onScrollEnd = () => {
+      if (cancelled || finished) return
+      finishPin(pendingTargetY)
+    }
+
+    const clearSettleWatch = () => {
+      if (settleTimer != null) {
+        window.clearTimeout(settleTimer)
+        settleTimer = null
+      }
+      if (pollTimer != null) {
+        window.clearInterval(pollTimer)
+        pollTimer = null
+      }
+      window.removeEventListener('scrollend', onScrollEnd)
+    }
+
+    const finishPin = (targetY: number) => {
+      if (cancelled || finished) return
+      finished = true
+      clearSettleWatch()
+      const y = Math.max(0, targetY)
+      mapPinScrollYRef.current = y
+      if (Math.abs(window.scrollY - y) > 1) {
+        window.scrollTo({ top: y, behavior: 'auto' })
+      }
+      setMapSheetReady(true)
+    }
+
+    const pinNow = () => {
+      if (cancelled) return
+      const nav = tripNavRef.current
+      if (!nav) {
+        setMapSheetReady(true)
+        return
+      }
+      // Sticky nav's getBoundingClientRect() is the stuck visual top — not document flow.
+      // Measure the in-flow spacer above the nav so a deep scroll on Planner/etc. doesn't
+      // lock the Map tab at the wrong (too-high) Y.
+      const flowAnchor =
+        (nav.previousElementSibling instanceof HTMLElement ? nav.previousElementSibling : null) ?? nav
+      const navFlowTop =
+        flowAnchor === nav
+          ? nav.offsetTop
+          : flowAnchor.getBoundingClientRect().bottom + window.scrollY
+      const targetY = Math.max(0, Math.round(navFlowTop - dashboardToolbarHeight))
+      pendingTargetY = targetY
+
+      const reduceMotion =
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      const alreadyThere = Math.abs(window.scrollY - targetY) <= 2
+
+      // Keep mapPinScrollYRef null until settle so the scroll-lock effect doesn't snap mid-animation.
+      if (reduceMotion || alreadyThere) {
+        window.scrollTo({ top: targetY, behavior: 'auto' })
+        finishPin(targetY)
+        return
+      }
+
+      window.addEventListener('scrollend', onScrollEnd)
+      window.scrollTo({ top: targetY, behavior: 'smooth' })
+
+      // scrollend is not everywhere — poll + timeout so bloom still starts after settle.
+      pollTimer = window.setInterval(() => {
+        if (cancelled || finished) return
+        if (Math.abs(window.scrollY - targetY) <= 2) finishPin(targetY)
+      }, 50)
+      settleTimer = window.setTimeout(() => {
+        if (cancelled || finished) return
+        finishPin(targetY)
+      }, 900)
+    }
+
+    const id = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(pinNow)
+    })
+
+    return () => {
+      cancelled = true
+      clearSettleWatch()
+      window.cancelAnimationFrame(id)
+      setMapSheetReady(false)
+    }
+  }, [activeTab, dashboardToolbarHeight])
+
+  // Mobile/tablet map: fill from the shell's top edge to the bottom of the viewport.
+  useEffect(() => {
+    if (activeTab !== 'map') {
+      document.documentElement.style.removeProperty('--waypoint-map-top')
+      return
+    }
+
+    const sync = () => {
+      const el = mapStarOriginRef.current
+      if (!el) return
+      const top = Math.max(0, Math.round(el.getBoundingClientRect().top))
+      document.documentElement.style.setProperty('--waypoint-map-top', `${top}px`)
+    }
+
+    sync()
+    const id = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(sync)
+    })
+    window.addEventListener('resize', sync)
+    window.addEventListener('scroll', sync, { passive: true })
+    const ro = new ResizeObserver(sync)
+    if (tripNavRef.current) ro.observe(tripNavRef.current)
+    return () => {
+      window.cancelAnimationFrame(id)
+      window.removeEventListener('resize', sync)
+      window.removeEventListener('scroll', sync)
+      ro.disconnect()
+      document.documentElement.style.removeProperty('--waypoint-map-top')
+    }
+  }, [activeTab, mapSheetReady, dashboardToolbarHeight])
+
+  // During bloom: hard-lock to the pin. After bloom: allow scrolling up to the hero,
+  // but never past the original pin (no further down than before).
+  useEffect(() => {
+    if (activeTab !== 'map') return
+
+    const allowMapGesture = (target: EventTarget | null) => {
+      const el = target instanceof Element ? target : null
+      if (!el) return false
+      return Boolean(
+        el.closest('.maplibregl-canvas-container, .maplibregl-canvas, .waypoint-map-root'),
+      )
+    }
+
+    const maxY = () => mapPinScrollYRef.current
+
+    const onWheel = (e: WheelEvent) => {
+      if (allowMapGesture(e.target)) return
+      const pin = maxY()
+      if (pin == null) {
+        e.preventDefault()
+        return
+      }
+      if (!mapScrollUnlocked) {
+        e.preventDefault()
+        return
+      }
+      // Unlocked: block only downward page scroll past the pin.
+      if (e.deltaY > 0 && window.scrollY >= pin - 1) {
+        e.preventDefault()
+      }
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      if (allowMapGesture(e.target)) return
+      const pin = maxY()
+      if (pin == null || !mapScrollUnlocked) {
+        e.preventDefault()
+        return
+      }
+      // After unlock, allow upward pans; clamp is enforced on scroll.
+    }
+    const onScroll = () => {
+      const pin = maxY()
+      if (pin == null) return
+      if (!mapScrollUnlocked) {
+        if (Math.abs(window.scrollY - pin) > 1) {
+          window.scrollTo({ top: pin, behavior: 'auto' })
+        }
+        return
+      }
+      if (window.scrollY > pin + 1) {
+        window.scrollTo({ top: pin, behavior: 'auto' })
+      }
+    }
+
+    window.addEventListener('wheel', onWheel, { passive: false })
+    window.addEventListener('touchmove', onTouchMove, { passive: false })
+    window.addEventListener('scroll', onScroll, { passive: true })
+
+    return () => {
+      window.removeEventListener('wheel', onWheel)
+      window.removeEventListener('touchmove', onTouchMove)
+      window.removeEventListener('scroll', onScroll)
+    }
+  }, [activeTab, mapScrollUnlocked])
 
   useEffect(() => {
     if (activeTab !== 'map' || !selectedTrip) return
@@ -3878,6 +3832,93 @@ export default function App() {
     if (priceMatch && !flightPriceInput) setFlightPriceInput(priceMatch[1])
   }
 
+  const applyBookingImport = async (row: BookingImportRecord) => {
+    if (tripIsReadOnly) return
+    setBookingImportError(null)
+    setBookingImportBusyId(row.id)
+    try {
+      const targetTripId =
+        state.selectedTripId ||
+        row.trip_id ||
+        suggestTripIdForParsed(row.parsed, state.trips) ||
+        null
+      if (!targetTripId) {
+        throw new Error('Select a trip first, then apply this import')
+      }
+      const parsed = await withDisplayCurrency(row.parsed, displayCurrency)
+      setState((prev) => ({
+        ...prev,
+        selectedTripId: targetTripId,
+        trips: prev.trips.map((t) => (t.id === targetTripId ? applyParsedBookingToTrip(t, parsed) : t)),
+      }))
+      await updateBookingImportStatus(row.id, 'applied', { trip_id: targetTripId })
+      setPendingBookingImports((prev) => prev.filter((x) => x.id !== row.id))
+      const kind = parsed.kind
+      if (kind === 'flight' || kind === 'rentalCar' || kind === 'restaurant' || kind === 'accommodation') {
+        setBookingsTab(kind === 'accommodation' ? 'accommodation' : kind)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setBookingImportError(msg)
+      // Keep the import pending so the user can fix dates/address and retry.
+    } finally {
+      setBookingImportBusyId(null)
+    }
+  }
+
+  const dismissBookingImport = async (row: BookingImportRecord) => {
+    setBookingImportBusyId(row.id)
+    setBookingImportError(null)
+    try {
+      await updateBookingImportStatus(row.id, 'dismissed')
+      setPendingBookingImports((prev) => prev.filter((x) => x.id !== row.id))
+    } catch (err) {
+      setBookingImportError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBookingImportBusyId(null)
+    }
+  }
+
+  const saveBookingFromEmail = async () => {
+    setBookingFromEmailMessage(null)
+    setBookingFromEmailBusy(true)
+    try {
+      const result = await upsertBookingFromEmail(bookingFromEmailInput)
+      if (!result.ok) {
+        setBookingFromEmailMessage(result.error)
+        return
+      }
+      setBookingFromEmailMessage('Saved — forward confirmations from this address.')
+    } finally {
+      setBookingFromEmailBusy(false)
+    }
+  }
+
+  const submitBookingPaste = async () => {
+    if (tripIsReadOnly) return
+    const text = bookingPasteText.trim()
+    if (!text) {
+      setBookingImportError('Paste a confirmation email first')
+      return
+    }
+    setBookingPasteBusy(true)
+    setBookingImportError(null)
+    try {
+      await pasteBookingEmail({
+        text,
+        tripId: state.selectedTripId || undefined,
+        subject: 'Pasted confirmation',
+      })
+      setBookingPasteText('')
+      setBookingPasteOpen(false)
+      await refreshBookingImports()
+    } catch (err) {
+      setBookingImportError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBookingPasteBusy(false)
+    }
+  }
+
   const addBooking = () => {
     if (!state.selectedTripId) return false
     if (tripIsReadOnly) return false
@@ -3967,6 +4008,11 @@ export default function App() {
                       fromLabel: flightFromLabel.trim(),
                       toLabel: flightToLabel.trim(),
                       airline: flightAirlineInput.trim(),
+                      flightNumber: flightNumberInput.trim().replace(/[^0-9A-Za-z]/g, '').toUpperCase(),
+                      bookingStatus: flightBookingStatusInput.trim() || 'Booked',
+                      departTerminal: flightDepartTerminalInput.trim(),
+                      seat: flightSeatInput.trim().toUpperCase(),
+                      notes: flightNotesInput.trim(),
                       departDate: flightDepartInput,
                       departTime,
                       arriveDate,
@@ -3990,6 +4036,11 @@ export default function App() {
       setFlightToIata('')
       setFlightToLabel('')
       setFlightAirlineInput('')
+      setFlightNumberInput('')
+      setFlightSeatInput('')
+      setFlightBookingStatusInput('Booked')
+      setFlightDepartTerminalInput('')
+      setFlightNotesInput('')
       setFlightDepartInput('')
       setFlightDepartTimeInput('')
       setFlightArriveDateInput('')
@@ -4081,6 +4132,8 @@ export default function App() {
 
   const openEditBookingForm = (tab: BookingTab, id: string) => {
     if (tripIsReadOnly) return
+    // Form body is driven by bookingsTab — keep it in sync with the edit target.
+    setBookingsTab(tab)
     if (tab === 'rentalCar') {
       const b = bookings.rentalCars.find((x) => x.id === id)
       if (!b) return
@@ -4118,6 +4171,11 @@ export default function App() {
       setFlightToIata(ti)
       setFlightToLabel(tl)
       setFlightAirlineInput(b.airline ?? '')
+      setFlightNumberInput(b.flightNumber ?? '')
+      setFlightSeatInput(b.seat ?? '')
+      setFlightBookingStatusInput(b.bookingStatus?.trim() || 'Booked')
+      setFlightDepartTerminalInput(b.departTerminal ?? '')
+      setFlightNotesInput(b.notes ?? '')
       setFlightDepartInput(b.departDate)
       setFlightDepartTimeInput(b.departTime ?? '')
       setFlightArriveDateInput(b.arriveDate ?? '')
@@ -4148,16 +4206,93 @@ export default function App() {
     const s = stays.find((x) => x.id === stayId)
     if (!s) return
     setStayLocationInput(s.location)
-    setStayAddressInput(s.address)
     setStayStartDate(s.startDate)
     setStayEndDate(s.endDate)
-    setStayCheckInTimeInput(s.checkInTime ?? '')
-    setStayCheckOutTimeInput(s.checkOutTime ?? '')
-    setStayPriceInput(s.price)
-    setStayBookingUrlInput(s.bookingUrl)
-    setStayConfirmationRefInput(s.confirmationRef)
+    setStayAddressInput('')
+    setStayCheckInTimeInput('')
+    setStayCheckOutTimeInput('')
+    setStayLodgingCheckInDate('')
+    setStayLodgingCheckOutDate('')
+    setStayPriceInput('')
+    setStayBookingUrlInput('')
+    setStayConfirmationRefInput('')
+    setStayLodgingNameInput('')
+    setEditingLodgingId(null)
+    setLodgingHostStayId(null)
     setStayError(null)
     setBookingError(null)
+    setStopFormMode('place')
+    setBookingsTab('accommodation')
+    setEditingBookingForm(null)
+    setEditingStayId(stayId)
+    setIsBookingFormOpen(true)
+  }
+
+  const openAddAccommodationForStay = (stayId: string, lodgingId?: string | 'new') => {
+    if (tripIsReadOnly) return
+    const s = stays.find((x) => x.id === stayId)
+    if (!s) return
+    const list = stayAccommodations(s)
+    const coverage = stayLodgingCoverage(s)
+    const wantNew = lodgingId === 'new' || (!lodgingId && list.length === 0)
+    const existing =
+      !wantNew && lodgingId && lodgingId !== 'new'
+        ? list.find((a) => a.id === lodgingId) || null
+        : !wantNew
+          ? stayPrimaryAccommodation(s)
+          : null
+    setLodgingHostStayId(stayId)
+    setStayLocationInput(s.location)
+    setStayStartDate(s.startDate)
+    setStayEndDate(s.endDate)
+    if (existing) {
+      setEditingLodgingId(existing.id)
+      setStayAddressInput(existing.address ?? '')
+      setStayCheckInTimeInput(existing.checkInTime ?? '')
+      setStayCheckOutTimeInput(existing.checkOutTime ?? '')
+      setStayLodgingCheckInDate(existing.checkIn || s.startDate)
+      setStayLodgingCheckOutDate(existing.checkOut || s.endDate)
+      setStayPriceInput(existing.price ?? '')
+      setStayBookingUrlInput(existing.bookingUrl ?? '')
+      setStayConfirmationRefInput(existing.confirmationRef ?? '')
+      setStayLodgingNameInput(existing.name ?? '')
+    } else {
+      setEditingLodgingId(null)
+      setStayAddressInput('')
+      setStayCheckInTimeInput('')
+      setStayCheckOutTimeInput('')
+      const gapStart = coverage.uncoveredNights[0] || s.startDate
+      const gapEnd =
+        coverage.uncoveredNights.length > 0
+          ? (() => {
+              const nights = coverage.uncoveredNights
+              // Exclusive end = day after last contiguous uncovered night from gapStart.
+              let end = gapStart
+              for (const n of nights) {
+                if (n < gapStart) continue
+                if (n === end || n === gapStart) {
+                  // advance exclusive end by 1 from this night
+                  const [y, m, d] = n.split('-').map(Number)
+                  const dt = new Date(Date.UTC(y, m - 1, d))
+                  dt.setUTCDate(dt.getUTCDate() + 1)
+                  end = dt.toISOString().slice(0, 10)
+                  continue
+                }
+                break
+              }
+              return end
+            })()
+          : s.endDate
+      setStayLodgingCheckInDate(gapStart)
+      setStayLodgingCheckOutDate(gapEnd || s.endDate)
+      setStayPriceInput('')
+      setStayBookingUrlInput('')
+      setStayConfirmationRefInput('')
+      setStayLodgingNameInput('')
+    }
+    setStayError(null)
+    setBookingError(null)
+    setStopFormMode('lodging')
     setBookingsTab('accommodation')
     setEditingBookingForm(null)
     setEditingStayId(stayId)
@@ -4179,6 +4314,11 @@ export default function App() {
     setFlightToIata('')
     setFlightToLabel('')
     setFlightAirlineInput('')
+    setFlightNumberInput('')
+    setFlightSeatInput('')
+    setFlightBookingStatusInput('Booked')
+    setFlightDepartTerminalInput('')
+    setFlightNotesInput('')
     setFlightDepartInput('')
     setFlightDepartTimeInput('')
     setFlightArriveDateInput('')
@@ -4200,9 +4340,14 @@ export default function App() {
     setStayEndDate('')
     setStayCheckInTimeInput('')
     setStayCheckOutTimeInput('')
+    setStayLodgingCheckInDate('')
+    setStayLodgingCheckOutDate('')
     setStayPriceInput('')
     setStayBookingUrlInput('')
     setStayConfirmationRefInput('')
+    setStayLodgingNameInput('')
+    setEditingLodgingId(null)
+    setLodgingHostStayId(null)
     setBookingError(null)
     setStayError(null)
   }
@@ -4250,6 +4395,11 @@ export default function App() {
         fromLabel: flightFromLabel.trim(),
         toLabel: flightToLabel.trim(),
         airline: flightAirlineInput.trim(),
+        flightNumber: flightNumberInput.trim().replace(/[^0-9A-Za-z]/g, '').toUpperCase(),
+        bookingStatus: flightBookingStatusInput.trim() || 'Booked',
+        departTerminal: flightDepartTerminalInput.trim(),
+        seat: flightSeatInput.trim().toUpperCase(),
+        notes: flightNotesInput.trim(),
         departDate: flightDepartInput,
         departTime,
         arriveDate,
@@ -4286,26 +4436,91 @@ export default function App() {
     if (!editingStayId || !state.selectedTripId || !selectedTrip) return false
     if (tripIsReadOnly) return false
     const location = stayLocationInput.trim()
+    if (stopFormMode === 'place') {
+      if (!location || !stayStartDate || !stayEndDate) {
+        setStayError('Please enter a place and dates.')
+        return false
+      }
+      if (stayEndDate < stayStartDate) {
+        setStayError('End date cannot be before start date.')
+        return false
+      }
+      if (selectedTrip.startDate && stayStartDate < selectedTrip.startDate) {
+        setStayError(`Place starts before trip starts (${selectedTrip.startDate}).`)
+        return false
+      }
+      if (selectedTrip.endDate && stayEndDate > selectedTrip.endDate) {
+        setStayError(`Place ends after trip ends (${selectedTrip.endDate}).`)
+        return false
+      }
+      setState((prev) => ({
+        ...prev,
+        trips: prev.trips.map((trip) =>
+          trip.id !== prev.selectedTripId
+            ? trip
+            : {
+                ...trip,
+                stays: trip.stays.map((s) =>
+                  s.id !== editingStayId
+                    ? s
+                    : { ...s, location, startDate: stayStartDate, endDate: stayEndDate },
+                ),
+              },
+        ),
+      }))
+      setStayError(null)
+      return true
+    }
+
     const confirmationRef = stayConfirmationRefInput.trim()
-    if (!location || !stayStartDate || !stayEndDate) {
-      setStayError('Please enter location, check-in, and check-out dates.')
-      return false
-    }
+    const lodgingName =
+      stayLodgingNameInput.trim() ||
+      stayAddressInput.trim().split(',')[0]?.trim() ||
+      'Accommodation'
     if (!confirmationRef) {
-      setStayError('Booking confirmation number is required.')
+      setStayError('Booking confirmation number is required for accommodation.')
       return false
     }
-    if (stayEndDate < stayStartDate) {
-      setStayError('Check-out date cannot be before check-in.')
+    const hostId = lodgingHostStayId || editingStayId
+    const host = stays.find((s) => s.id === hostId)
+    if (!host || !hostId) return false
+    const checkIn = (stayLodgingCheckInDate || host.startDate || '').trim()
+    const checkOut = (stayLodgingCheckOutDate || host.endDate || '').trim()
+    if (!checkIn || !checkOut) {
+      setStayError('Check-in and check-out dates are required.')
       return false
     }
-    if (selectedTrip.startDate && stayStartDate < selectedTrip.startDate) {
-      setStayError(`Stay starts before trip starts (${selectedTrip.startDate}).`)
+    if (checkOut <= checkIn) {
+      setStayError('Check-out must be after check-in.')
       return false
     }
-    if (selectedTrip.endDate && stayEndDate > selectedTrip.endDate) {
-      setStayError(`Stay ends after trip ends (${selectedTrip.endDate}).`)
-      return false
+    const prevLodging = editingLodgingId
+      ? stayAccommodations(host).find((a) => a.id === editingLodgingId) ||
+        stays.flatMap((s) => stayAccommodations(s)).find((a) => a.id === editingLodgingId) ||
+        null
+      : null
+    const lodging: StopAccommodation = {
+      id: editingLodgingId || uid(),
+      name: lodgingName,
+      address: stayAddressInput.trim(),
+      checkIn,
+      checkOut,
+      checkInTime: stayCheckInTimeInput.trim(),
+      checkOutTime: stayCheckOutTimeInput.trim(),
+      price: stayPriceInput.trim(),
+      bookingUrl: stayBookingUrlInput.trim() ? normalizeBookingUrl(stayBookingUrlInput) : '',
+      confirmationRef,
+      ...(prevLodging?.amountPaid ? { amountPaid: prevLodging.amountPaid } : {}),
+      ...(prevLodging?.amountOwing ? { amountOwing: prevLodging.amountOwing } : {}),
+      ...(prevLodging?.priceOriginal ? { priceOriginal: prevLodging.priceOriginal } : {}),
+      ...(prevLodging?.amountPaidOriginal
+        ? { amountPaidOriginal: prevLodging.amountPaidOriginal }
+        : {}),
+      ...(prevLodging?.amountOwingOriginal
+        ? { amountOwingOriginal: prevLodging.amountOwingOriginal }
+        : {}),
+      ...(prevLodging?.currency ? { currency: prevLodging.currency } : {}),
+      ...(prevLodging?.photoUrl ? { photoUrl: prevLodging.photoUrl } : {}),
     }
     setState((prev) => ({
       ...prev,
@@ -4314,277 +4529,334 @@ export default function App() {
           ? trip
           : {
               ...trip,
-              stays: trip.stays.map((s) =>
-                s.id !== editingStayId
-                  ? s
-                  : {
-                      ...s,
-                      location,
-                      address: stayAddressInput.trim(),
-                      startDate: stayStartDate,
-                      endDate: stayEndDate,
-                      checkInTime: stayCheckInTimeInput.trim(),
-                      checkOutTime: stayCheckOutTimeInput.trim(),
-                      price: stayPriceInput.trim(),
-                      bookingUrl: stayBookingUrlInput.trim() ? normalizeBookingUrl(stayBookingUrlInput) : '',
-                      confirmationRef,
-                    },
-              ),
+              clientRev: (trip.clientRev ?? 0) + 1,
+              // Move lodging onto the chosen destination; remove from every other stay.
+              stays: trip.stays.map((s) => {
+                const current = stayAccommodations(s).filter((a) => a.id !== lodging.id)
+                if (s.id !== hostId) return { ...s, accommodations: current }
+                return { ...s, accommodations: [...current, lodging] }
+              }),
             },
       ),
     }))
+    setStayError(null)
     return true
   }
 
-  const removeStay = (stayId: string) => {
-    if (!state.selectedTripId) return
+  const removeLodgingBooking = (lodgingId: string) => {
     if (tripIsReadOnly) return
-    setState((prev) => ({
-      ...prev,
-      trips: prev.trips.map((trip) =>
-        trip.id !== prev.selectedTripId ? trip : { ...trip, stays: trip.stays.filter((s) => s.id !== stayId) },
-      ),
-    }))
-  }
-
-  const addVisitPlace = (label: string, coords?: { lat: number; lon: number }) => {
-    const t = label.trim()
-    if (!t || !state.selectedTripId) return
-    if (tripIsReadOnly) return
+    const conf = stays
+      .flatMap((s) => stayAccommodations(s))
+      .find((a) => a.id === lodgingId)
+      ?.confirmationRef.trim()
+      .toLowerCase()
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) => {
         if (trip.id !== prev.selectedTripId) return trip
-        if (trip.visitPlaces.some((p) => p.label.toLowerCase() === t.toLowerCase())) return trip
-        const place: VisitPlace = {
-          id: uid(),
-          label: t,
-          cost: '',
-          createdAt: Date.now(),
-          ...(coords ? { lat: coords.lat, lon: coords.lon } : {}),
+        return {
+          ...trip,
+          clientRev: (trip.clientRev ?? 0) + 1,
+          stays: trip.stays.map((s) => ({
+            ...s,
+            accommodations: stayAccommodations(s).filter((a) => {
+              if (a.id === lodgingId) return false
+              if (conf && a.confirmationRef.trim().toLowerCase() === conf) return false
+              return true
+            }),
+          })),
+          bookings: {
+            ...trip.bookings,
+            accommodations: (trip.bookings?.accommodations || []).filter((row) => {
+              if (!conf) return true
+              return row.confirmation.trim().toLowerCase() !== conf
+            }),
+          },
         }
-        return { ...trip, visitPlaces: [...trip.visitPlaces, place] }
       }),
     }))
-    setPlaceSearchInput('')
-    setShowPlaceSuggestions(false)
   }
 
-  const removeVisitPlace = (placeId: string) => {
-    if (!state.selectedTripId) return
-    if (tripIsReadOnly) return
+  const removeStay = (stayId: string) => {
+    if (!state.selectedTripId || tripIsReadOnly) return
+    const trip = selectedTrip
+    const plan = planDestinationDelete(stays, stayId, trip?.startDate)
+    if (!plan) return
+    const shiftById = new Map(plan.shifts.map((p) => [p.id, p]))
+    allowStayReductionRef.current = true
     setState((prev) => ({
       ...prev,
-      trips: prev.trips.map((trip) =>
-        trip.id === prev.selectedTripId ? { ...trip, visitPlaces: trip.visitPlaces.filter((p) => p.id !== placeId) } : trip,
+      trips: prev.trips.map((t) =>
+        t.id !== prev.selectedTripId
+          ? t
+          : {
+              ...t,
+              stays: t.stays
+                .filter((s) => s.id !== plan.removeId)
+                .map((s) => {
+                  const patch = shiftById.get(s.id)
+                  return patch ? { ...s, startDate: patch.startDate, endDate: patch.endDate } : s
+                }),
+            },
       ),
     }))
   }
 
-  const updateVisitPlaceCost = (placeId: string, cost: string) => {
-    if (!state.selectedTripId) return
+  const updateStayDates = (patches: Array<{ id: string; startDate: string; endDate: string }>) => {
+    if (tripIsReadOnly || patches.length === 0) return
+    setState((prev) => {
+      const trip = prev.trips.find((t) => t.id === prev.selectedTripId)
+      if (!trip) return prev
+      const tripStart = trip.startDate
+      const tripEnd = trip.endDate
+      const allValid = patches.every((p) => {
+        if (!p.startDate || !p.endDate || p.endDate <= p.startDate) return false
+        if (tripStart && p.startDate < tripStart) return false
+        if (tripEnd && p.endDate > tripEnd) return false
+        return true
+      })
+      if (!allValid) return prev
+      const byId = new Map(patches.map((p) => [p.id, p]))
+      return {
+        ...prev,
+        trips: prev.trips.map((t) =>
+          t.id !== prev.selectedTripId
+            ? t
+            : {
+                ...t,
+                clientRev: (t.clientRev ?? 0) + 1,
+                stays: t.stays.map((s) => {
+                  const patch = byId.get(s.id)
+                  return patch ? { ...s, startDate: patch.startDate, endDate: patch.endDate } : s
+                }),
+              },
+        ),
+      }
+    })
+  }
+
+  /** Nights +/- from latest trip stays — avoids stale props / remote echoes snapping back. */
+  const adjustStayNights = (stayId: string, delta: number) => {
     if (tripIsReadOnly) return
+    setState((prev) => {
+      const trip = prev.trips.find((t) => t.id === prev.selectedTripId)
+      if (!trip) return prev
+      const patches = planNightAdjust(trip.stays, stayId, delta, trip.startDate, trip.endDate)
+      if (!patches) return prev
+      const byId = new Map(patches.map((p) => [p.id, p]))
+      return {
+        ...prev,
+        trips: prev.trips.map((t) =>
+          t.id !== prev.selectedTripId
+            ? t
+            : {
+                ...t,
+                clientRev: (t.clientRev ?? 0) + 1,
+                stays: t.stays.map((s) => {
+                  const patch = byId.get(s.id)
+                  return patch ? { ...s, startDate: patch.startDate, endDate: patch.endDate } : s
+                }),
+              },
+        ),
+      }
+    })
+  }
+
+  const [plannerDestinationPromptToken, setPlannerDestinationPromptToken] = useState(0)
+
+  const openAddStayFromPlanner = () => {
+    if (tripIsReadOnly) return
+    setPlannerDestinationPromptToken((n) => n + 1)
+  }
+
+  const createDestinationFromPlanner = (input: {
+    location: string
+    lat?: number
+    lon?: number
+    beforeStayId?: string
+  }) => {
+    if (!state.selectedTripId || !selectedTrip || tripIsReadOnly) return
+    const location = input.location.trim()
+    if (!location) return
+    const plan = planDestinationInsert(
+      stays,
+      selectedTrip.startDate,
+      selectedTrip.endDate,
+      input.beforeStayId,
+    )
+    if (!plan) {
+      setConfirmDialog({
+        title: 'No free nights left',
+        description: 'This trip’s dates are fully covered. Extend the trip dates or shorten an existing place first.',
+        confirmLabel: 'OK',
+        cancelLabel: 'Close',
+        variant: 'default',
+        onConfirm: () => {},
+      })
+      return
+    }
+    const stayId = uid()
+    const country = selectedTrip.country
+    const shiftById = new Map(plan.shifts.map((p) => [p.id, p]))
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) =>
         trip.id === prev.selectedTripId
           ? {
               ...trip,
-              visitPlaces: trip.visitPlaces.map((p) => (p.id === placeId ? { ...p, cost } : p)),
+              stays: [
+                ...trip.stays.map((s) => {
+                  const patch = shiftById.get(s.id)
+                  return patch ? { ...s, startDate: patch.startDate, endDate: patch.endDate } : s
+                }),
+                {
+                  id: stayId,
+                  location,
+                  startDate: plan.window.startDate,
+                  endDate: plan.window.endDate,
+                  activities: [],
+                  createdAt: Date.now(),
+                  accommodations: [],
+                  lat: input.lat,
+                  lon: input.lon,
+                },
+              ],
             }
           : trip,
       ),
     }))
-  }
 
-  const addRecommendedActivity = (rec: PlaceSuggestion) => {
-    const recName = rec.label.split(',')[0]?.trim() || rec.label.trim()
-    if (plannedActivityNames.has(recName.toLowerCase())) return
-    addVisitPlace(
-      rec.label,
-      typeof rec.lat === 'number' && typeof rec.lon === 'number' ? { lat: rec.lat, lon: rec.lon } : undefined,
-    )
-    if (!state.selectedTripId || !selectedTrip) return
-    const ranked = stays.map((s) => {
-      const base = (rec.seedLabel ?? '').toLowerCase()
-      const address = s.address.toLowerCase()
-      const loc = s.location.toLowerCase()
-      let score = 0
-      if (base && (address.includes(base) || loc.includes(base))) score += 3
-      if (rec.label.toLowerCase().includes(loc)) score += 1
-      return { stay: s, score }
-    })
-    ranked.sort((a, b) => b.score - a.score)
-    const best = ranked[0]
-    const candidateDays = best ? enumerateStayDays(best.stay.startDate, best.stay.endDate) : []
-
-    let targetStayId = best?.stay.id ?? stays[0]?.id ?? ''
-    let targetDate = candidateDays[0] ?? enumerateStayDays(stays[0]?.startDate ?? '', stays[0]?.endDate ?? '')[0] ?? ''
-    if (!targetStayId || !targetDate) return
-    const createdId = uid()
-    setState((prev) => ({
-      ...prev,
-      trips: prev.trips.map((trip) => {
-        if (trip.id !== prev.selectedTripId) return trip
-        return {
-          ...trip,
-          stays: trip.stays.map((s) =>
-            s.id === targetStayId
-              ? {
-                  ...s,
-                  activities: [
-                    ...(s.activities ?? []),
-                    {
-                      id: createdId,
-                      date: targetDate,
-                      name: rec.label,
-                      time: '',
-                      confirmationRef: '',
-                      cost: '',
-                      notes: '',
-                      photoUrl: rec.photoUrl,
-                      googleMapsUri: placeGoogleUrl(rec),
-                      placeLabel: rec.label,
-                      category: resolveRecommendationCategory(rec.category, rec.label, rec.primaryType, rec.types),
-                      primaryType: rec.primaryType,
-                      types: rec.types,
-                      createdAt: Date.now(),
-                    },
-                  ],
-                }
-              : s,
-          ),
-        }
-      }),
-    }))
-    setActivityMetaById((prev) => ({
-      ...prev,
-      [createdId]: {
-        ...rec,
-        googleMapsUri: placeGoogleUrl(rec),
-        category: resolveRecommendationCategory(rec.category, rec.label, rec.primaryType, rec.types),
-      },
-    }))
-  }
-
-  const addRecommendationToSelectedDay = (rec: PlaceSuggestion) => {
-    if (!state.selectedTripId || !selectedTimelineDate) return
-    const storageStayId = resolveStayIdForActivityStorage(stays, selectedTimelineDate)
-    if (!storageStayId) return
-    const targetStay = stays.find((s) => s.id === storageStayId)
-    if (!targetStay) return
-    const recName = rec.label.split(',')[0]?.trim() || rec.label.trim()
-    if (!recName) return
-    const addressHint = rec.label.includes(',') ? rec.label.split(',').slice(1).join(',').trim() : ''
-    const createdId = uid()
-
-    setState((prev) => ({
-      ...prev,
-      trips: prev.trips.map((trip) => {
-        if (trip.id !== prev.selectedTripId) return trip
-        const duplicateExists = trip.stays.some((s) =>
-          (s.activities ?? []).some((a) => a.date === selectedTimelineDate && a.name.trim().toLowerCase() === recName.toLowerCase()),
-        )
-        if (duplicateExists) return trip
-
-        return {
-          ...trip,
-          stays: trip.stays.map((s) =>
-            s.id !== targetStay.id
-              ? s
+    if (
+      (typeof input.lat !== 'number' || typeof input.lon !== 'number') &&
+      isSupabaseConfigured() &&
+      !isDevAuthBypass()
+    ) {
+      const q = [location, country].filter(Boolean).join(', ')
+      void geocodeQuery(q).then((hit) => {
+        if (!hit) return
+        setState((prev) => ({
+          ...prev,
+          trips: prev.trips.map((trip) =>
+            trip.id !== prev.selectedTripId
+              ? trip
               : {
-                  ...s,
-                  activities: [
-                    ...(s.activities ?? []),
-                    {
-                      id: createdId,
-                      date: selectedTimelineDate,
-                      name: recName,
-                      time: '',
-                      confirmationRef: '',
-                      cost: '',
-                      notes: addressHint || rec.label,
-                      photoUrl: rec.photoUrl,
-                      googleMapsUri: placeGoogleUrl(rec),
-                      placeLabel: rec.label,
-                      category: resolveRecommendationCategory(rec.category, rec.label, rec.primaryType, rec.types),
-                      primaryType: rec.primaryType,
-                      types: rec.types,
-                      createdAt: Date.now(),
-                    },
-                  ],
+                  ...trip,
+                  stays: trip.stays.map((s) =>
+                    s.id === stayId ? { ...s, lat: hit.lat, lon: hit.lon } : s,
+                  ),
                 },
           ),
-        }
-      }),
-    }))
-    setActivityMetaById((prev) => ({
-      ...prev,
-      [createdId]: {
-        ...rec,
-        category: resolveRecommendationCategory(rec.category, rec.label, rec.primaryType, rec.types),
-        googleMapsUri: placeGoogleUrl(rec),
-      },
-    }))
+        }))
+      })
+    }
   }
 
-  const saveTripDates = () => {
-    if (!selectedTrip || !state.selectedTripId) return
+  const openAddFlightFromPlanner = () => {
     if (tripIsReadOnly) return
-    if (!tripStartDateInput || !tripEndDateInput) {
-      setTripDateError('Please set both trip start and end dates.')
+    resetBookingFormInputs()
+    setEditingBookingForm(null)
+    setEditingStayId(null)
+    setIsBookingFormOpen(false)
+    setFlightWizardOpen(true)
+  }
+
+  const saveFlightFromWizard = (draft: Omit<FlightBooking, 'id' | 'createdAt'>) => {
+    if (!state.selectedTripId || tripIsReadOnly) return
+    setState((prev) => ({
+      ...prev,
+      trips: prev.trips.map((t) =>
+        t.id === prev.selectedTripId
+          ? {
+              ...t,
+              bookings: {
+                ...t.bookings,
+                flights: [
+                  ...t.bookings.flights,
+                  {
+                    ...draft,
+                    id: uid(),
+                    createdAt: Date.now(),
+                  },
+                ],
+              },
+            }
+          : t,
+      ),
+    }))
+    setFlightWizardOpen(false)
+  }
+
+  const openAddCarFromPlanner = () => {
+    if (tripIsReadOnly) return
+    resetBookingFormInputs()
+    setEditingBookingForm(null)
+    setEditingStayId(null)
+    setBookingsTab('rentalCar')
+    setIsBookingFormOpen(true)
+  }
+
+  const openEditCarFromPlanner = (carId?: string) => {
+    if (tripIsReadOnly) return
+    if (carId) {
+      openEditBookingForm('rentalCar', carId)
       return
     }
-    if (tripEndDateInput < tripStartDateInput) {
+    openAddCarFromPlanner()
+  }
+
+  const saveTripDates = (startDate = tripStartDateInput, endDate = tripEndDateInput) => {
+    if (!selectedTrip || !state.selectedTripId) return false
+    if (tripIsReadOnly) return false
+    if (!startDate || !endDate) {
+      setTripDateError('Please set both trip start and end dates.')
+      return false
+    }
+    if (endDate < startDate) {
       setTripDateError('Trip end date cannot be before trip start date.')
-      return
+      return false
     }
 
     const violatingStay = (selectedTrip.stays ?? []).find(
-      (s) => s.startDate < tripStartDateInput || s.endDate > tripEndDateInput,
+      (s) => s.startDate < startDate || s.endDate > endDate,
     )
     if (violatingStay) {
       setTripDateError(`Stay "${violatingStay.location}" is outside the selected trip dates.`)
-      return
+      return false
     }
 
     setState((prev) => ({
       ...prev,
       trips: prev.trips.map((trip) =>
-        trip.id === prev.selectedTripId ? { ...trip, startDate: tripStartDateInput, endDate: tripEndDateInput } : trip,
+        trip.id === prev.selectedTripId ? { ...trip, startDate, endDate } : trip,
       ),
     }))
     setTripDateError(null)
+    setTripDatesCalendarOpen(false)
+    return true
   }
 
   const addStay = () => {
     if (!state.selectedTripId || !selectedTrip) return false
     if (tripIsReadOnly) return false
     const location = stayLocationInput.trim()
-    const confirmationRef = stayConfirmationRefInput.trim()
     if (!location || !stayStartDate || !stayEndDate) {
-      setStayError('Please enter location, check-in, and check-out dates.')
-      return false
-    }
-    if (!confirmationRef) {
-      setStayError('Booking confirmation number is required.')
+      setStayError('Please enter a place and dates.')
       return false
     }
     if (stayEndDate < stayStartDate) {
-      setStayError('Check-out date cannot be before check-in.')
+      setStayError('End date cannot be before start date.')
       return false
     }
     if (selectedTrip.startDate && stayStartDate < selectedTrip.startDate) {
-      setStayError(`Stay starts before trip starts (${selectedTrip.startDate}).`)
+      setStayError(`Place starts before trip starts (${selectedTrip.startDate}).`)
       return false
     }
     if (selectedTrip.endDate && stayEndDate > selectedTrip.endDate) {
-      setStayError(`Stay ends after trip ends (${selectedTrip.endDate}).`)
+      setStayError(`Place ends after trip ends (${selectedTrip.endDate}).`)
       return false
     }
 
     const stayId = uid()
-    const address = stayAddressInput.trim()
     const country = selectedTrip.country
     setState((prev) => ({
       ...prev,
@@ -4597,16 +4869,11 @@ export default function App() {
                 {
                   id: stayId,
                   location,
-                  address,
                   startDate: stayStartDate,
                   endDate: stayEndDate,
-                  checkInTime: stayCheckInTimeInput.trim(),
-                  checkOutTime: stayCheckOutTimeInput.trim(),
-                  price: stayPriceInput.trim(),
-                  bookingUrl: stayBookingUrlInput.trim() ? normalizeBookingUrl(stayBookingUrlInput) : '',
-                  confirmationRef,
                   activities: [],
                   createdAt: Date.now(),
+                  accommodations: [],
                 },
               ],
             }
@@ -4620,13 +4887,15 @@ export default function App() {
     setStayEndDate('')
     setStayCheckInTimeInput('')
     setStayCheckOutTimeInput('')
+    setStayLodgingCheckInDate('')
+    setStayLodgingCheckOutDate('')
     setStayPriceInput('')
     setStayBookingUrlInput('')
     setStayConfirmationRefInput('')
+    setEditingLodgingId(null)
 
-    // Geocode once and persist (Nominatim via PocketBase cache) — never on every map open.
     if (isSupabaseConfigured() && !isDevAuthBypass()) {
-      const q = [address || location, country].filter(Boolean).join(', ')
+      const q = [location, country].filter(Boolean).join(', ')
       void geocodeQuery(q).then((hit) => {
         if (!hit) return
         setState((prev) => ({
@@ -4673,7 +4942,7 @@ export default function App() {
                       date,
                       name,
                       time: draft?.time ?? '',
-                      confirmationRef: (draft?.confirmationRef ?? '').trim() || (stays.find((x) => x.id === stayId)?.confirmationRef ?? '').trim(),
+                      confirmationRef: (draft?.confirmationRef ?? '').trim(),
                       cost: draft?.cost ?? '',
                       notes: draft?.notes ?? '',
                       photoUrl: selectedMeta?.photoUrl,
@@ -4695,6 +4964,7 @@ export default function App() {
     }))
     setActivityDrafts((prev) => ({ ...prev, [draftKey]: { name: '', time: '', confirmationRef: '', cost: '', notes: '' } }))
     setActivityPlaceSearchInput('')
+    setStopComposer(null)
     if (selectedMeta) {
       setActivityMetaById((prev) => ({
         ...prev,
@@ -4766,7 +5036,7 @@ export default function App() {
     if (tripIsReadOnly) return
     const targetStayId = resolveStayIdForActivityStorage(stays, targetDayIso)
     if (!targetStayId) {
-      setCalendarDropError('Add at least one accommodation on the trip before scheduling activities.')
+      setCalendarDropError('Add at least one destination on the trip before scheduling stops.')
       return
     }
     setCalendarDropError(null)
@@ -4798,7 +5068,7 @@ export default function App() {
     if (tripIsReadOnly) return
     const targetStayId = resolveStayIdForActivityStorage(stays, dayIso)
     if (!targetStayId) {
-      setCalendarDropError('Add at least one accommodation on the trip before scheduling activities.')
+      setCalendarDropError('Add at least one destination on the trip before scheduling stops.')
       return
     }
     setCalendarDropError(null)
@@ -4874,27 +5144,6 @@ export default function App() {
           ? (trips.find((t) => !t.cancelled)?.id ?? trips[0]?.id ?? null)
           : prev.selectedTripId
       return { trips, selectedTripId: nextSelected }
-    })
-  }
-
-  const moveTripToCancelled = () => {
-    if (!selectedTrip || selectedTrip.cancelled) return
-    if (tripIsReadOnly) return
-    const trip = selectedTrip
-    setConfirmDialog({
-      title: 'Cancel trip?',
-      description: `Move "${trip.country}" to Cancelled? You can restore it from the home screen or delete it permanently.`,
-      confirmLabel: 'Cancel Trip',
-      cancelLabel: 'Keep trip',
-      variant: 'danger',
-      onConfirm: () => {
-        const id = trip.id
-        setState((prev) => {
-          const trips = prev.trips.map((t) => (t.id === id ? { ...t, cancelled: true } : t))
-          return { trips, selectedTripId: null }
-        })
-        setView('home')
-      },
     })
   }
 
@@ -5246,41 +5495,30 @@ export default function App() {
           variant={confirmDialog?.variant ?? 'default'}
           onConfirm={handleConfirmDialogAction}
         />
-        <div
-          className={`min-h-screen overflow-x-hidden bg-gradient-to-br from-sky-100/90 via-white to-indigo-50/80 dark:from-neutral-950 dark:via-neutral-900 dark:to-sky-950/40 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}
-        >
-        <div className="sticky top-0 z-40 border-b border-white/40 dark:border-neutral-800/80 bg-white/75 dark:bg-neutral-950/80 backdrop-blur-md">
+        <div className="dark min-h-screen overflow-x-hidden bg-gradient-to-br from-neutral-950 via-neutral-900 to-sky-950/40 font-sans text-neutral-100">
+        <div className="sticky top-0 z-40 border-b border-neutral-800/80 bg-neutral-950/80 backdrop-blur-md">
           <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3 min-w-0">
-            <a href="/" className="min-w-0 shrink inline-flex items-center gap-2.5 text-neutral-900 dark:text-white no-underline">
+            <a href="/" className="min-w-0 shrink inline-flex items-center gap-2.5 text-white no-underline">
               <BrandLogo className="h-8 w-8 shrink-0" />
               <span className="text-lg font-serif font-semibold tracking-tight truncate">{BRAND_NAME}</span>
             </a>
             <div className="flex min-w-0 items-center gap-2 flex-wrap justify-end">
               {authSession ? (
                 <>
-                  <span className="hidden sm:inline-flex items-center gap-1.5 text-sm text-neutral-600 dark:text-neutral-300 max-w-[200px] truncate">
+                  <span className="hidden sm:inline-flex items-center gap-1.5 text-sm text-neutral-300 max-w-[200px] truncate">
                     <User size={16} className="shrink-0 opacity-70" aria-hidden />
                     {authSession.name}
                   </span>
                   <button
                     type="button"
                     onClick={handleLogout}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 text-sm font-medium hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-neutral-600 text-sm font-medium hover:bg-neutral-800"
                   >
                     <LogOut size={16} aria-hidden />
                     Log out
                   </button>
                 </>
               ) : null}
-              <button
-                type="button"
-                onClick={() => setIsDarkMode((v) => !v)}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 bg-white/90 dark:bg-neutral-900 text-sm font-medium shadow-sm hover:bg-neutral-50 dark:hover:bg-neutral-800"
-                aria-label="Toggle dark mode"
-              >
-                {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
-                {isDarkMode ? 'Light' : 'Dark'}
-              </button>
             </div>
           </div>
         </div>
@@ -5349,7 +5587,7 @@ export default function App() {
                     setVerificationResendMessage(null)
                   }}
                   className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-colors ${
-                    authMode === 'login' ? 'bg-white dark:bg-neutral-700 shadow text-neutral-900 dark:text-white' : 'text-neutral-500'
+                    authMode === 'login' ? 'bg-white dark:bg-neutral-700 shadow text-neutral-900 dark:text-white' : 'text-slate-300'
                   }`}
                 >
                   Log in
@@ -5364,7 +5602,7 @@ export default function App() {
                     setVerificationResendMessage(null)
                   }}
                   className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-colors ${
-                    authMode === 'register' ? 'bg-white dark:bg-neutral-700 shadow text-neutral-900 dark:text-white' : 'text-neutral-500'
+                    authMode === 'register' ? 'bg-white dark:bg-neutral-700 shadow text-neutral-900 dark:text-white' : 'text-slate-300'
                   }`}
                 >
                   Create account
@@ -5639,7 +5877,7 @@ export default function App() {
                       selected={newTripRange}
                       defaultMonth={newTripRange?.from ?? new Date()}
                       captionLayout="dropdown-years"
-                      navLayout="after"
+                      navLayout="around"
                       fromYear={new Date().getFullYear()}
                       toYear={new Date().getFullYear() + 10}
                       startMonth={startOfToday()}
@@ -5915,7 +6153,16 @@ export default function App() {
           </div>
         </div>
       ) : null}
-    <div className={`min-h-screen bg-gradient-to-b from-sky-50 via-white to-neutral-100 text-neutral-900 font-sans ${isDarkMode ? 'dark' : ''}`}>
+    <div className="dark min-h-screen bg-neutral-950 font-sans text-neutral-100">
+      {/* Dark sheet for the whole Map visit — on before chrome goes transparent, so no hero flash. */}
+      <MapSheetUnderlay active={activeTab === 'map'} navRef={tripNavRef} skyLit={mapSkyLit} />
+      <PageStarfield
+        active={activeTab === 'map' && mapGlobeChrome && mapSheetReady}
+        originRef={mapStarOriginRef}
+        navRef={tripNavRef}
+        onSkyLit={setMapSkyLit}
+        streetsMode={mapBasemap === 'streets'}
+      />
 
       {calendarActivityDetail ? (() => {
         const calPayload = calendarActivityDetail
@@ -6053,11 +6300,13 @@ export default function App() {
                       ) : null}
                       {calModalHostStay ? (
                         <div>
-                          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Accommodation</p>
+                          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Place</p>
                           <p className="text-neutral-900 dark:text-neutral-100 font-medium">{calModalHostStay.location}</p>
-                          {calModalHostStay.address?.trim() ? (
+                          {stayHasAccommodation(calModalHostStay) ? (
                             <p className="text-neutral-600 dark:text-neutral-300 text-xs mt-0.5">
-                              {calModalHostStay.address.trim()}
+                              {[stayAccommodationLabel(calModalHostStay), stayLodgingAddress(calModalHostStay)]
+                                .filter(Boolean)
+                                .join(' · ')}
                             </p>
                           ) : null}
                         </div>
@@ -6215,7 +6464,6 @@ export default function App() {
                             setCalendarActivityDetail(null)
                             setActiveTab('planner')
                             setBookingsTab(br.tab)
-                            setBookingFilter(br.tab)
                             openEditBookingForm(br.tab, br.id)
                           } else {
                             setCalendarActivityDetailEditing(true)
@@ -6235,458 +6483,583 @@ export default function App() {
         )
       })() : null}
 
-      {/* Hero stays put; planner content below scrolls up over it */}
-      <div className="sticky top-0 z-0 w-full">
-        <div className="relative h-[min(48vh,560px)] min-h-[300px] max-sm:h-[min(44vh,480px)] max-sm:min-h-[280px] w-full overflow-hidden">
-          <div className="pointer-events-none absolute inset-x-0 top-0 z-20 px-3 pt-3 sm:px-4 sm:pt-4">
-            <div
-              className="pointer-events-auto flex flex-row flex-wrap items-center justify-between gap-x-2 gap-y-2"
-            >
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setView('home')}
-                  className="inline-flex shrink-0 items-center gap-2 px-3 py-2 sm:px-4 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
-                >
-                  Back to Home
-                </button>
-                {authSession ? (
-                  <>
-                    <span className="hidden min-[380px]:inline-flex max-w-[140px] sm:max-w-[160px] items-center gap-1.5 truncate px-3 py-2 rounded-xl border border-white/25 bg-black/25 backdrop-blur-md text-white text-xs">
-                      <User size={14} className="shrink-0 opacity-90" aria-hidden />
-                      {authSession.name}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={handleLogout}
-                      aria-label="Log out"
-                      className="inline-flex shrink-0 items-center gap-1.5 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
-                    >
-                      <LogOut size={16} aria-hidden />
-                      <span className="hidden sm:inline">Log out</span>
-                    </button>
-                  </>
-                ) : null}
-              </div>
-              <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsDarkMode((v) => !v)}
-                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/40 bg-black/35 backdrop-blur-md text-white text-sm font-medium shadow-lg hover:bg-black/45"
-                  aria-label="Toggle dark mode"
-                >
-                  {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
-                  <span className="hidden sm:inline">{isDarkMode ? 'Light' : 'Dark'}</span>
-                </button>
-              </div>
-            </div>
+      {/* Still hero — never resized/clipped on scroll */}
+      <div
+        className="pointer-events-none fixed inset-x-0 top-0 z-0 overflow-hidden"
+        style={{ height: dashboardHeroBandHeight }}
+        aria-hidden
+      >
+        <img
+          src={dashboardHeroUrl || DEFAULT_HERO_IMAGE}
+          className="absolute inset-0 h-full w-full object-cover object-top"
+          alt=""
+          decoding="async"
+          fetchPriority="high"
+        />
+        <div className="absolute inset-0 bg-gradient-to-b from-black/50 via-black/35 to-black/70" />
+      </div>
+
+      {/*
+        Toolbar: static hero crop (same image, top-aligned) so mountain stays
+        visible and cards never bleed through — no scroll-driven updates.
+      */}
+      <header
+        ref={dashboardToolbarRef}
+        className="sticky top-0 z-50 overflow-hidden px-3 pt-3 sm:px-4 sm:pt-4"
+      >
+        <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden>
+          <div className="absolute inset-x-0 top-0" style={{ height: dashboardHeroBandHeight }}>
+            <img
+              src={dashboardHeroUrl || DEFAULT_HERO_IMAGE}
+              className="absolute inset-0 h-full w-full object-cover object-top"
+              alt=""
+              decoding="async"
+            />
+            <div className="absolute inset-0 bg-gradient-to-b from-black/50 via-black/35 to-black/70" />
           </div>
-          <img
-            src={dashboardHeroUrl || DEFAULT_HERO_IMAGE}
-            className="absolute inset-0 h-full w-full object-cover"
-            alt="Hero"
-          />
-          <div
-            className="absolute inset-0 bg-gradient-to-b from-black/50 via-black/35 to-black/60 flex flex-col items-center justify-center gap-2.5 sm:gap-3.5 pt-[4.5rem] sm:pt-20 pb-12 max-sm:pb-14 text-white px-3 text-center sm:px-4 overflow-hidden"
-          >
-            <h1 className="text-3xl sm:text-4xl md:text-5xl font-serif font-bold drop-shadow-md px-1 flex flex-wrap items-center justify-center gap-3">
-              {selectedTrip?.sharing ? <Users className="shrink-0 text-white/90" size={40} aria-hidden /> : null}
-              {!selectedTrip ? <BrandLogo className="h-10 w-10 sm:h-12 sm:w-12 shrink-0 drop-shadow-md" /> : null}
-              <span>{selectedTrip ? `Trip to: ${selectedTrip.country}` : BRAND_NAME}</span>
-            </h1>
-            <p className="text-sm sm:text-base md:text-lg max-w-2xl opacity-95 px-1">{BRAND_DASHBOARD_SUBTITLE}</p>
-            {shareInviteBanner ? (
-              <p className="text-sm text-amber-200 max-w-xl rounded-lg bg-black/25 px-3 py-2 border border-amber-400/40">
-                {shareInviteBanner}
-              </p>
+        </div>
+        <div className="relative z-10 flex flex-row flex-wrap items-center justify-between gap-x-2 gap-y-2 pb-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setView('home')}
+              className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/40 bg-black/35 px-3 py-2 text-sm font-medium text-white shadow-lg backdrop-blur-md hover:bg-black/45 sm:px-4"
+            >
+              Back to Home
+            </button>
+            {authSession ? (
+              <>
+                <span className="hidden min-[380px]:inline-flex max-w-[140px] items-center gap-1.5 truncate rounded-xl border border-white/25 bg-black/25 px-3 py-2 text-xs text-white backdrop-blur-md sm:max-w-[160px]">
+                  <User size={14} className="shrink-0 opacity-90" aria-hidden />
+                  {authSession.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  aria-label="Log out"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-white/40 bg-black/35 px-3 py-2 text-sm font-medium text-white shadow-lg backdrop-blur-md hover:bg-black/45"
+                >
+                  <LogOut size={16} aria-hidden />
+                  <span className="hidden sm:inline">Log out</span>
+                </button>
+              </>
             ) : null}
-            {tripIsReadOnly ? (
-              <p className="text-sm text-white/95 max-w-xl rounded-lg bg-black/35 px-3 py-2 border border-white/25">
-                View-only access: you can browse this shared itinerary but cannot edit it.
-              </p>
+          </div>
+        </div>
+      </header>
+
+      {/* Trip to: fixed; covered by opaque nav/cards as they rise */}
+      <section
+        ref={dashboardTripToRef}
+        className={`fixed inset-x-0 flex min-h-[min(36vh,400px)] flex-col items-center justify-center gap-2.5 px-3 pb-10 pt-4 text-center text-white max-sm:min-h-[min(32vh,340px)] sm:gap-3 sm:px-4 sm:pb-12 ${
+          tripDatesCalendarOpen ? 'z-50' : 'z-[1]'
+        }`}
+        style={{ top: dashboardToolbarHeight }}
+      >
+        <h1 className="flex flex-wrap items-center justify-center gap-3 px-1 font-serif text-3xl font-bold drop-shadow-md sm:text-4xl md:text-5xl">
+          {selectedTrip?.sharing ? <Users className="shrink-0 text-white/90" size={40} aria-hidden /> : null}
+          {!selectedTrip ? <BrandLogo className="h-10 w-10 shrink-0 drop-shadow-md sm:h-12 sm:w-12" /> : null}
+          <span>{selectedTrip ? `Trip to: ${selectedTrip.country}` : BRAND_NAME}</span>
+        </h1>
+        <p className="max-w-2xl px-1 text-sm opacity-95 sm:text-base md:text-lg">{BRAND_DASHBOARD_SUBTITLE}</p>
+        {shareInviteBanner ? (
+          <p className="max-w-xl rounded-lg border border-amber-400/40 bg-black/25 px-3 py-2 text-sm text-amber-200">
+            {shareInviteBanner}
+          </p>
+        ) : null}
+        {tripIsReadOnly ? (
+          <p className="max-w-xl rounded-lg border border-white/25 bg-black/35 px-3 py-2 text-sm text-white/95">
+            View-only access: you can browse this shared itinerary but cannot edit it.
+          </p>
+        ) : null}
+        {isSupabaseConfigured() && !isDevAuthBypass() && authSession && selectedTrip && !tripIsReadOnly ? (
+          <div className="flex flex-wrap justify-center gap-2">
+            {selectedTrip.sharing?.role === 'owner' ? (
+              <button
+                type="button"
+                onClick={() => void openShareModal()}
+                className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
+              >
+                <Users size={16} aria-hidden />
+                Manage sharing
+              </button>
+            ) : !selectedTrip.sharing ? (
+              <button
+                type="button"
+                onClick={() => void openShareModal()}
+                className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
+              >
+                <Link2 size={16} aria-hidden />
+                Share trip
+              </button>
             ) : null}
-            {isSupabaseConfigured() && !isDevAuthBypass() && authSession && selectedTrip && !tripIsReadOnly ? (
-              <div className="flex flex-wrap justify-center gap-2">
-                {selectedTrip.sharing?.role === 'owner' ? (
-                  <button
-                    type="button"
-                    onClick={() => void openShareModal()}
-                    className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
-                  >
-                    <Users size={16} aria-hidden />
-                    Manage sharing
-                  </button>
-                ) : !selectedTrip.sharing ? (
-                  <button
-                    type="button"
-                    onClick={() => void openShareModal()}
-                    className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-black/35 px-4 py-2 text-sm font-semibold text-white backdrop-blur-md hover:bg-black/50"
-                  >
-                    <Link2 size={16} aria-hidden />
-                    Share trip
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-            <div className="flex gap-3 flex-wrap justify-center text-sm font-medium">
-              <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
-                {selectedTrip ? `Current: ${selectedTrip.country}` : 'No trip selected'}
-              </span>
-              <span className="bg-white/20 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/30 shadow-lg">
+          </div>
+        ) : null}
+        <div className="relative z-20 flex w-full max-w-xl flex-col items-center gap-2 px-1">
+          <div className="flex flex-wrap justify-center gap-3 text-sm font-medium">
+            <span className="rounded-full border border-white/30 bg-white/20 px-4 py-1.5 shadow-lg backdrop-blur-md">
+              {selectedTrip ? `Current: ${selectedTrip.country}` : 'No trip selected'}
+            </span>
+            {selectedTrip && !tripIsReadOnly ? (
+              <DateRangeDropdown
+                startDate={tripStartDateInput}
+                endDate={tripEndDateInput}
+                onChange={(start, end) => {
+                  setTripStartDateInput(start)
+                  setTripEndDateInput(end)
+                  setTripDateError(null)
+                  if (start && end) saveTripDates(start, end)
+                }}
+                open={tripDatesCalendarOpen}
+                onOpenChange={(open) => {
+                  if (open) {
+                    setTripStartDateInput(selectedTrip.startDate ?? '')
+                    setTripEndDateInput(selectedTrip.endDate ?? '')
+                    setTripDateError(null)
+                  }
+                  onTripDatesCalendarOpenChange(open)
+                }}
+                buttonLabel={
+                  selectedTrip.startDate || selectedTrip.endDate
+                    ? formatDateRangeWithYear(selectedTrip.startDate, selectedTrip.endDate)
+                    : 'Set trip dates'
+                }
+                placeholder="Set trip dates"
+                initialMonthIso={selectedTrip.startDate}
+                title="Edit trip dates"
+                className="shrink-0"
+                triggerClassName="rounded-full border border-white/30 bg-white/20 px-4 py-1.5 shadow-md hover:bg-white/30"
+                popoverClassName="left-1/2 -translate-x-1/2"
+              />
+            ) : (
+              <span className="rounded-full border border-white/30 bg-white/20 px-4 py-1.5 shadow-lg backdrop-blur-md">
                 {selectedTrip?.startDate || selectedTrip?.endDate
                   ? formatDateRangeWithYear(selectedTrip?.startDate, selectedTrip?.endDate)
-                  : `Side-Quests remaining: ${remaining}`}
+                  : selectedTrip
+                    ? 'Set trip dates'
+                    : `Side-Quests remaining: ${remaining}`}
               </span>
-            </div>
-            <div className="w-full max-w-md rounded-2xl border border-white/30 bg-black/25 backdrop-blur-md px-5 py-2.5 text-center shadow-lg">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-100">{sideQuestCountdown.title}</p>
-              <p className="mt-0.5 text-lg md:text-xl font-bold leading-tight text-white">{sideQuestCountdown.subtitle}</p>
+            )}
+          </div>
+          {tripDateError ? <p className="text-xs text-rose-200">{tripDateError}</p> : null}
+        </div>
+        <div className="relative isolate z-10 w-full max-w-md rounded-2xl border border-white/30 bg-black/25 px-5 py-2.5 text-center shadow-lg backdrop-blur-md">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-100">{sideQuestCountdown.title}</p>
+          <p className="mt-0.5 text-lg font-bold leading-tight text-white md:text-xl">{sideQuestCountdown.subtitle}</p>
+        </div>
+      </section>
+
+      {/* In-flow spacer — nav overlaps the lower hero by half its height */}
+      <div
+        style={{ height: Math.max(0, dashboardTripToHeight - dashboardNavHeroOverlap) }}
+        aria-hidden
+      />
+
+      {/*
+        Sticky trip tabs — pins under toolbar. No hero “snapshot” crops in the nav:
+        top half stays truly transparent so the real fixed hero shows through.
+        Map: bottom half also clear (stars start at mid-nav).
+        Other tabs: solid black bottom half only.
+      */}
+      <nav
+        ref={tripNavRef}
+        className="sticky z-40 px-3 py-4 sm:px-4 bg-transparent"
+        style={{ top: dashboardToolbarHeight }}
+        aria-label="Trip sections"
+      >
+        {!(activeTab === 'map' && mapGlobeChrome) ? (
+          <div
+            className="pointer-events-none absolute inset-0"
+            aria-hidden
+            style={{
+              background:
+                'linear-gradient(to bottom, transparent 0%, transparent 50%, #0a0a0a 50%, #0a0a0a 100%)',
+            }}
+          />
+        ) : null}
+        <div className="relative z-10 mx-auto max-w-5xl">
+          <div className="overflow-x-auto overscroll-x-contain rounded-2xl border border-white/70 bg-white/90 p-1.5 shadow-2xl backdrop-blur-md [scrollbar-width:thin] dark:border-neutral-700/80 dark:bg-neutral-900/90 sm:p-2.5">
+            <div className="flex w-max flex-nowrap gap-1 sm:w-full sm:flex-wrap sm:gap-1">
+              <button
+                onClick={() => setActiveTab('planner')}
+                className={`flex min-h-11 min-w-[5.25rem] flex-none items-center justify-center gap-1.5 rounded-lg px-1 py-3 transition-colors duration-150 active:opacity-90 sm:min-h-0 sm:flex-1 sm:gap-2 sm:py-3 ${
+                  activeTab === 'planner' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                }`}
+              >
+                <Calendar size={18} className="shrink-0" />
+                <span className="whitespace-nowrap text-xs font-semibold sm:text-base">Planner</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('itinerary')}
+                className={`flex min-h-11 min-w-[5.25rem] flex-none items-center justify-center gap-1.5 rounded-lg px-1 py-3 transition-colors duration-150 active:opacity-90 sm:min-h-0 sm:flex-1 sm:gap-2 sm:py-3 ${
+                  activeTab === 'itinerary' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                }`}
+              >
+                <Calendar size={18} className="shrink-0" />
+                <span className="whitespace-nowrap text-xs font-semibold sm:text-base">Itinerary</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('budget')}
+                className={`flex min-h-11 min-w-[5.25rem] flex-none items-center justify-center gap-1.5 rounded-lg px-1 py-3 transition-colors duration-150 active:opacity-90 sm:min-h-0 sm:flex-1 sm:gap-2 sm:py-3 ${
+                  activeTab === 'budget' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                }`}
+              >
+                <DollarSign size={18} className="shrink-0" />
+                <span className="whitespace-nowrap text-xs font-semibold sm:text-base">Budget</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('tips')}
+                className={`flex min-h-11 min-w-[5.25rem] flex-none items-center justify-center gap-1.5 rounded-lg px-1 py-3 transition-colors duration-150 active:opacity-90 sm:min-h-0 sm:flex-1 sm:gap-2 sm:py-3 ${
+                  activeTab === 'tips' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                }`}
+              >
+                <Compass size={18} className="shrink-0" />
+                <span className="whitespace-nowrap text-xs font-semibold sm:text-base">Tips</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('map')}
+                className={`flex min-h-11 min-w-[5.25rem] flex-none items-center justify-center gap-1.5 rounded-lg px-1 py-3 transition-colors duration-150 active:opacity-90 sm:min-h-0 sm:flex-1 sm:gap-2 sm:py-3 ${
+                  activeTab === 'map' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                }`}
+              >
+                <MapIcon size={18} className="shrink-0" />
+                <span className="whitespace-nowrap text-xs font-semibold sm:text-base">Map</span>
+              </button>
             </div>
           </div>
         </div>
-      </div>
+      </nav>
 
-      {/* Tabs + main scroll over the sticky hero; hero peeks behind the upper half of the tab bar */}
-      <div className="relative z-10">
-        <div className="relative z-20 mx-auto max-w-5xl px-3 sm:px-4 -mt-9">
-          <div className="overflow-x-auto overscroll-x-contain rounded-2xl border border-white/70 bg-white/90 p-1.5 shadow-2xl backdrop-blur-md dark:border-neutral-700/80 dark:bg-neutral-900/90 sm:p-2.5 [scrollbar-width:thin]">
-          <div className="flex w-max flex-nowrap gap-1 sm:w-full sm:flex-wrap sm:gap-1">
-          <button
-            onClick={() => setActiveTab('planner')}
-            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'planner' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
-            }`}
-          >
-            <Calendar size={18} className="shrink-0" />
-            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Planner</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('itinerary')}
-            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'itinerary' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
-            }`}
-          >
-            <Calendar size={18} className="shrink-0" />
-            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Itinerary</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('budget')}
-            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'budget' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
-            }`}
-          >
-            <DollarSign size={18} className="shrink-0" />
-            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Budget</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('tips')}
-            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'tips' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
-            }`}
-          >
-            <Compass size={18} className="shrink-0" />
-            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Tips</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('map')}
-            className={`flex min-h-11 min-w-[5.25rem] flex-none sm:min-h-0 sm:flex-1 items-center justify-center gap-1.5 sm:gap-2 py-3 sm:py-3 px-1 rounded-lg transition-colors duration-150 active:opacity-90 ${
-              activeTab === 'map' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
-            }`}
-          >
-            <MapIcon size={18} className="shrink-0" />
-            <span className="font-semibold text-xs sm:text-base whitespace-nowrap">Map</span>
-          </button>
-        </div>
-      </div>
-      </div>
-
-        {/* Sheet starts mid-tab so the hero shows behind the upper half of the tab bar */}
-        <div className="relative z-10 -mt-[2.25rem] bg-gradient-to-b from-sky-50 via-white to-neutral-100 pt-[3.75rem] dark:from-neutral-950 dark:via-neutral-900 dark:to-sky-950/40">
-        <main className="max-w-5xl mx-auto px-3 sm:px-4 pb-12 max-sm:pb-[max(3rem,env(safe-area-inset-bottom,0px))]">
+      <div
+        className={`relative z-20 ${
+          activeTab === 'map' && mapGlobeChrome ? 'bg-transparent' : 'bg-neutral-950'
+        }`}
+      >
+        <main
+          className={
+            activeTab === 'map'
+              ? 'mx-auto max-w-5xl px-3 pb-12 pt-2 sm:px-4 max-lg:px-0 max-lg:pb-0 max-lg:pt-0'
+              : 'mx-auto max-w-5xl px-3 pb-12 pt-2 sm:px-4 max-sm:pb-[max(3rem,env(safe-area-inset-bottom,0px))]'
+          }
+        >
         {activeTab === 'planner' && (
           <div
             className={`space-y-8 animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
           >
-            {/* Bookings */}
-            <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setBookingManagementExpanded((v) => !v)}
-                className="w-full flex items-center justify-between gap-4 px-4 py-4 sm:px-7 sm:py-5 hover:bg-neutral-50 transition-colors text-left"
-                aria-expanded={bookingManagementExpanded}
-                aria-controls="booking-management-panel"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <Calendar className="text-blue-600 shrink-0" size={20} aria-hidden />
+            {BOOKING_EMAIL_IMPORTS_ENABLED && authSession && isSupabaseConfigured() && !isDevAuthBypass() ? (
+              <div className="rounded-2xl border border-blue-200/80 bg-blue-50/70 p-4 dark:border-blue-900/60 dark:bg-blue-950/40">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h2 className="text-2xl font-serif font-bold">Booking management</h2>
-                    <p className="text-neutral-500 text-sm">
-                      {bookingManagementExpanded
-                        ? 'One timeline for all bookings, filterable by type.'
-                        : `${bookingManagementRows.length} booking${bookingManagementRows.length !== 1 ? 's' : ''} · ${
-                            bookingFilter === 'all'
-                              ? 'All types'
-                              : bookingFilter === 'rentalCar'
-                                ? 'Rental car'
-                                : bookingFilter === 'flight'
-                                  ? 'Flight'
-                                  : bookingFilter === 'restaurant'
-                                    ? 'Dining & activities'
-                                    : 'Accommodation'
-                          }`}
+                    <p className="text-sm font-semibold text-blue-950 dark:text-blue-100">Email imports</p>
+                    <p className="mt-0.5 text-xs text-blue-900/80 dark:text-blue-200/80">
+                      Forward confirmations to{' '}
+                      <button
+                        type="button"
+                        title="Copy address"
+                        onClick={() => {
+                          void navigator.clipboard.writeText('bookings@inbound.savige.me').then(() => {
+                            setBookingInboxCopied(true)
+                            window.setTimeout(() => setBookingInboxCopied(false), 1600)
+                          })
+                        }}
+                        className="font-mono underline decoration-blue-400/80 underline-offset-2 hover:text-blue-950 dark:hover:text-white"
+                      >
+                        bookings@inbound.savige.me
+                      </button>
+                      {bookingInboxCopied ? (
+                        <span className="ml-1.5 font-sans text-emerald-700 dark:text-emerald-300">Copied</span>
+                      ) : null}
+                      , or paste the email below.
                     </p>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setBookingPasteOpen((v) => !v)}
+                    className="shrink-0 rounded-xl bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-500"
+                  >
+                    {bookingPasteOpen ? 'Hide paste' : 'Paste email'}
+                  </button>
                 </div>
-                {bookingManagementExpanded ? <ChevronUp size={20} className="shrink-0 text-neutral-500" /> : <ChevronDown size={20} className="shrink-0 text-neutral-500" />}
-              </button>
-
-              {bookingManagementExpanded ? (
-              <div id="booking-management-panel" className="px-4 pb-6 sm:px-7 sm:pb-7">
-              <div className="flex flex-nowrap gap-2 overflow-x-auto overscroll-x-contain pb-1 -mx-1 px-1 sm:grid sm:grid-cols-5 sm:overflow-visible sm:pb-0 sm:px-0 sm:mx-0">
-                <button
-                  type="button"
-                  onClick={() => setBookingFilter('all')}
-                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
-                >
-                  All
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBookingsTab('rentalCar')
-                    setBookingFilter('rentalCar')
-                  }}
-                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'rentalCar' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
-                >
-                  Rental Car
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBookingsTab('flight')
-                    setBookingFilter('flight')
-                  }}
-                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'flight' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
-                >
-                  Flight
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBookingsTab('restaurant')
-                    setBookingFilter('restaurant')
-                  }}
-                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'restaurant' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
-                >
-                  Dining & activities
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBookingsTab('accommodation')
-                    setBookingFilter('accommodation')
-                  }}
-                  className={`shrink-0 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap ${bookingFilter === 'accommodation' ? 'bg-blue-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}
-                >
-                  Accommodation
-                </button>
-              </div>
-
-              <ul className="mt-4 space-y-2">
-                {visibleBookingRows.length === 0 ? (
-                  <li className="text-sm text-neutral-700 dark:text-neutral-300">No matching bookings yet.</li>
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <div className="min-w-0 flex-1">
+                    <label className="mb-1 block text-xs font-medium text-blue-950/80 dark:text-blue-100/80">
+                      Send-from email (the address you forward with)
+                    </label>
+                    <input
+                      type="email"
+                      value={bookingFromEmailInput}
+                      onChange={(e) => {
+                        setBookingFromEmailInput(e.target.value)
+                        setBookingFromEmailMessage(null)
+                      }}
+                      placeholder={authSession?.email}
+                      disabled={tripIsReadOnly || bookingFromEmailBusy}
+                      className="w-full rounded-xl border border-blue-200 bg-white px-3 py-2 text-sm dark:border-blue-800 dark:bg-neutral-950"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void saveBookingFromEmail()}
+                    disabled={tripIsReadOnly || bookingFromEmailBusy || !bookingFromEmailInput.trim()}
+                    className="shrink-0 rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                  >
+                    {bookingFromEmailBusy ? 'Saving…' : 'Save email'}
+                  </button>
+                </div>
+                {bookingFromEmailMessage ? (
+                  <p
+                    className={`mt-1.5 text-xs ${
+                      bookingFromEmailMessage.startsWith('Saved')
+                        ? 'text-emerald-700 dark:text-emerald-300'
+                        : 'text-rose-700 dark:text-rose-300'
+                    }`}
+                  >
+                    {bookingFromEmailMessage}
+                  </p>
+                ) : null}
+                {bookingPasteOpen ? (
+                  <div className="mt-3 space-y-2">
+                    <textarea
+                      value={bookingPasteText}
+                      onChange={(e) => setBookingPasteText(e.target.value)}
+                      rows={5}
+                      placeholder="Paste a flight, car, hotel, or restaurant confirmation email…"
+                      className="w-full rounded-xl border border-blue-200 bg-white px-3 py-2 text-sm dark:border-blue-800 dark:bg-neutral-950"
+                      disabled={tripIsReadOnly || bookingPasteBusy}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void submitBookingPaste()}
+                      disabled={tripIsReadOnly || bookingPasteBusy || !bookingPasteText.trim()}
+                      className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                    >
+                      {bookingPasteBusy ? 'Parsing…' : 'Parse & queue import'}
+                    </button>
+                  </div>
+                ) : null}
+                {bookingImportError ? (
+                  <p className="mt-2 text-sm text-rose-700 dark:text-rose-300">{bookingImportError}</p>
+                ) : null}
+                {pendingBookingImports.length === 0 ? (
+                  <p className="mt-3 text-xs text-blue-900/70 dark:text-blue-200/70">No pending email imports.</p>
                 ) : (
-                  visibleBookingRows.map((row) => {
-                    const overlapTargets = bookingOverlapLinks.get(row.id) ?? []
-                    const isOverlap = overlapTargets.length > 0
-                    const isOverlapHighlighted = activeOverlapIds.has(row.id)
-                    const canEditBookingRow =
-                      (row.kind !== 'activity' && row.kind !== 'accommodation' && !!row.removeId && !!row.removeTab) ||
-                      (row.kind === 'accommodation' && !!row.stayId)
-                    return (
+                  <ul className="mt-3 space-y-2">
+                    {pendingBookingImports.map((row) => (
                       <li
                         key={row.id}
-                        id={`booking-row-${row.id}`}
-                        className={`px-3 py-2.5 rounded-xl border !opacity-100 !text-neutral-950 dark:!text-neutral-100 ${isOverlap ? '!border-red-400 !bg-red-50 dark:!border-red-500/70 dark:!bg-red-950/30' : '!border-neutral-200 !bg-white dark:!border-neutral-700 dark:!bg-neutral-900/70'} ${isOverlapHighlighted ? '!ring-2 !ring-red-500 !border-red-500 dark:!ring-red-400 dark:!border-red-400' : ''}`}
+                        className="rounded-xl border border-blue-200/80 bg-white/90 px-3 py-2.5 dark:border-blue-900 dark:bg-neutral-950/80"
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-xs font-semibold !text-neutral-950 dark:!text-neutral-200">{row.dateText}</p>
-                          <div className="flex items-center gap-2">
-                            {isOverlap ? (
-                              <button
-                                type="button"
-                                onClick={() => setPinnedOverlapSourceId((prev) => (prev === row.id ? null : row.id))}
-                                className={`inline-flex items-center gap-1 text-[11px] font-semibold uppercase px-2 py-0.5 rounded-full border ${activeOverlapSourceId === row.id ? '!bg-red-600 !text-white !border-red-600 dark:!bg-red-500 dark:!border-red-400 dark:!text-white' : '!bg-red-100 !text-red-900 !border-red-500 dark:!bg-red-900/50 dark:!text-red-200 dark:!border-red-500/70'}`}
-                                title="Click to highlight overlaps"
-                              >
-                                <TriangleAlert className="h-3 w-3" aria-hidden />
-                                Overlap
-                              </button>
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold capitalize text-neutral-900 dark:text-neutral-100">
+                              {row.kind === 'rentalCar' ? 'Rental car' : row.kind}
+                              {row.parsed.confirmation ? (
+                                <span className="ml-2 font-mono text-xs font-normal text-neutral-500">
+                                  #{row.parsed.confirmation}
+                                </span>
+                              ) : null}
+                            </p>
+                            <p className="truncate text-xs text-neutral-600 dark:text-neutral-400">
+                              {row.subject || row.from_email || 'Imported confirmation'}
+                            </p>
+                            <p className="mt-0.5 text-[11px] text-neutral-500">
+                              Confidence {Math.round((row.parsed.confidence || 0) * 100)}%
+                              {row.parsed.airline || row.parsed.company || row.parsed.name
+                                ? ` · ${row.parsed.airline || row.parsed.company || row.parsed.name}`
+                                : ''}
+                            </p>
+                            {row.parsed.address ? (
+                              <p className="mt-0.5 truncate text-[11px] text-neutral-500">{row.parsed.address}</p>
+                            ) : row.kind === 'accommodation' ? (
+                              <p className="mt-0.5 text-[11px] text-amber-700 dark:text-amber-300">
+                                Missing address — re-forward or paste a fuller confirmation
+                              </p>
                             ) : null}
-                            <span className={`text-[11px] font-semibold uppercase px-2 py-0.5 rounded-full ${bookingKindChipClass[row.kind]}`}>
-                              {row.kind === 'rentalCar'
-                                ? 'Rental car'
-                                : row.kind === 'flight'
-                                  ? 'Flight'
-                                  : row.kind === 'restaurant'
-                                    ? 'Dining'
-                                    : row.kind === 'accommodation'
-                                      ? 'Accommodation'
-                                      : 'Activity'}
-                            </span>
+                            {(row.parsed.price || row.parsed.amountPaid || row.parsed.amountOwing) ? (
+                              <p className="mt-0.5 text-[11px] text-neutral-500">
+                                {[
+                                  row.parsed.price
+                                    ? `Total ${formatMoneyWithOriginal(
+                                        formatMoneyAmount(
+                                          convertMoneyToDisplaySync(row.parsed.price, displayCurrency),
+                                          displayCurrency,
+                                        ),
+                                        row.parsed.currency &&
+                                          row.parsed.currency.toUpperCase() !== displayCurrency.toUpperCase()
+                                          ? row.parsed.price
+                                          : row.parsed.priceOriginal || null,
+                                      )}`
+                                    : null,
+                                  row.parsed.amountPaid
+                                    ? `Paid ${formatMoneyWithOriginal(
+                                        formatMoneyAmount(
+                                          convertMoneyToDisplaySync(row.parsed.amountPaid, displayCurrency),
+                                          displayCurrency,
+                                        ),
+                                        row.parsed.amountPaidOriginal ||
+                                          (row.parsed.currency &&
+                                          row.parsed.currency.toUpperCase() !== displayCurrency.toUpperCase()
+                                            ? row.parsed.amountPaid
+                                            : null),
+                                      )}`
+                                    : null,
+                                  row.parsed.amountOwing
+                                    ? `Owing ${formatMoneyWithOriginal(
+                                        formatMoneyAmount(
+                                          convertMoneyToDisplaySync(row.parsed.amountOwing, displayCurrency),
+                                          displayCurrency,
+                                        ),
+                                        row.parsed.amountOwingOriginal ||
+                                          (row.parsed.currency &&
+                                          row.parsed.currency.toUpperCase() !== displayCurrency.toUpperCase()
+                                            ? row.parsed.amountOwing
+                                            : null),
+                                      )}`
+                                    : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')}
+                              </p>
+                            ) : null}
+                            {row.parsed.photoUrl &&
+                            !/\/static\/img\/|\/fb\/|bstatic\.com\/static\/|checkmark|cdn\.snaptravel\.com\/(?:checkmark|badge|icon)|airbnbplatformassets|muscache\.com\/ac\/|muscache\.com(?!.*\/im\/pictures\/)/i.test(
+                              row.parsed.photoUrl,
+                            ) ? (
+                              <img
+                                src={row.parsed.photoUrl}
+                                alt=""
+                                className="mt-2 h-16 w-24 rounded-lg object-cover"
+                                loading="lazy"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : null}
                           </div>
-                        </div>
-                        <p className="mt-1 text-sm font-semibold !text-neutral-950 dark:!text-neutral-100">{row.title}</p>
-                        <p className="text-xs !text-neutral-900 dark:!text-neutral-300">{row.subtitle}</p>
-                        {row.meta || (row.priceAmount != null && row.priceAmount > 0) ? (
-                          <div className="mt-0.5 flex items-start justify-between gap-3">
-                            {row.meta ? (
-                              <p className="text-xs !text-neutral-900 dark:!text-neutral-300 flex-1 min-w-0">{row.meta}</p>
-                            ) : (
-                              <span className="flex-1" />
-                            )}
-                            {row.priceAmount != null && row.priceAmount > 0 ? (
-                              <span className="text-sm font-semibold tabular-nums text-neutral-900 dark:text-neutral-100 shrink-0">
-                                {formatMoneyAmount(row.priceAmount, displayCurrency)}
-                              </span>
-                            ) : null}
-                          </div>
-                        ) : null}
-                        {row.kind === 'flight' && row.flightBaggage ? (
-                          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-neutral-600 dark:text-neutral-400">
-                            {row.flightBaggage.checked > 0 ? (
-                              <span className="inline-flex items-center gap-1" title="Checked bags">
-                                <Luggage size={15} strokeWidth={1.75} aria-hidden />
-                                <span>×{row.flightBaggage.checked}</span>
-                              </span>
-                            ) : null}
-                            {row.flightBaggage.carryOn > 0 ? (
-                              <span className="inline-flex items-center gap-1" title="Carry-on bags">
-                                <Briefcase size={15} strokeWidth={1.75} aria-hidden />
-                                <span>×{row.flightBaggage.carryOn}</span>
-                              </span>
-                            ) : null}
-                            {row.flightBaggage.personal ? (
-                              <span className="inline-flex items-center gap-1" title="Personal item">
-                                <ShoppingBag size={15} strokeWidth={1.75} aria-hidden />
-                                <span>Personal</span>
-                              </span>
-                            ) : null}
-                          </div>
-                        ) : null}
-                        <div className="mt-2 flex items-center justify-between">
-                          <p className="text-[11px] !text-neutral-900 dark:!text-neutral-300">
-                            {row.kind === 'activity' ? 'Removable from booking management.' : 'Editable/removable from booking management.'}
-                          </p>
-                          <div className="flex items-center gap-2">
+                          <div className="flex shrink-0 gap-2">
                             <button
                               type="button"
-                              onClick={() => {
-                                if (row.kind !== 'activity' && row.kind !== 'accommodation' && row.removeId && row.removeTab) {
-                                  openEditBookingForm(row.removeTab, row.removeId)
-                                } else if (row.kind === 'accommodation' && row.stayId) {
-                                  openEditStayForm(row.stayId)
-                                }
-                              }}
-                              disabled={!canEditBookingRow}
-                              title={canEditBookingRow ? 'Edit booking' : 'This item is not editable from this card'}
-                              className="inline-flex items-center justify-center h-6 w-6 rounded-md border border-neutral-300 text-neutral-800 hover:text-neutral-950 hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed dark:border-neutral-600 dark:text-neutral-200 dark:hover:text-white dark:hover:bg-neutral-800"
-                              aria-label={canEditBookingRow ? 'Edit booking' : 'Read-only item'}
+                              disabled={tripIsReadOnly || bookingImportBusyId === row.id}
+                              onClick={() => void applyBookingImport(row)}
+                              className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
                             >
-                              <Ellipsis size={14} />
+                              {selectedTrip &&
+                              row.parsed.confirmation &&
+                              tripHasConfirmation(selectedTrip, row.parsed.confirmation)
+                                ? 'Update booking'
+                                : 'Apply to trip'}
                             </button>
-                            {row.kind === 'activity' && row.stayId && row.activityId ? (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const stayId = row.stayId!
-                                  const activityId = row.activityId!
-                                  setConfirmDialog({
-                                    title: 'Delete booking?',
-                                    description: 'Are you sure you want to permanently delete this booking?',
-                                    confirmLabel: 'Delete',
-                                    cancelLabel: 'Cancel',
-                                    variant: 'danger',
-                                    onConfirm: () => removeStayActivity(stayId, activityId),
-                                  })
-                                }}
-                                className="text-xs text-rose-700 border border-rose-300 rounded-md px-2 py-1 hover:bg-rose-50"
-                              >
-                                Remove
-                              </button>
-                            ) : null}
-                            {row.kind === 'accommodation' && row.stayId ? (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const stayId = row.stayId!
-                                  setConfirmDialog({
-                                    title: 'Delete booking?',
-                                    description: 'Are you sure you want to permanently delete this booking?',
-                                    confirmLabel: 'Delete',
-                                    cancelLabel: 'Cancel',
-                                    variant: 'danger',
-                                    onConfirm: () => removeStay(stayId),
-                                  })
-                                }}
-                                className="text-xs text-rose-700 border border-rose-300 rounded-md px-2 py-1 hover:bg-rose-50"
-                              >
-                                Remove
-                              </button>
-                            ) : null}
-                            {row.kind !== 'activity' && row.kind !== 'accommodation' && row.removeId && row.removeTab ? (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const tab = row.removeTab!
-                                  const id = row.removeId!
-                                  setConfirmDialog({
-                                    title: 'Delete booking?',
-                                    description: 'Are you sure you want to permanently delete this booking?',
-                                    confirmLabel: 'Delete',
-                                    cancelLabel: 'Cancel',
-                                    variant: 'danger',
-                                    onConfirm: () => removeBooking(tab, id),
-                                  })
-                                }}
-                                className="text-xs text-rose-700 border border-rose-300 rounded-md px-2 py-1 hover:bg-rose-50"
-                              >
-                                Remove
-                              </button>
-                            ) : null}
+                            <button
+                              type="button"
+                              disabled={bookingImportBusyId === row.id}
+                              onClick={() => void dismissBookingImport(row)}
+                              className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-700 dark:border-neutral-600 dark:text-neutral-200"
+                            >
+                              Dismiss
+                            </button>
                           </div>
                         </div>
                       </li>
-                    )
-                  })
+                    ))}
+                  </ul>
                 )}
-              </ul>
+              </div>
+            ) : null}
 
-              <div className="mt-4 flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    resetBookingFormInputs()
-                    setEditingBookingForm(null)
-                    setEditingStayId(null)
-                    setIsBookingFormOpen(true)
-                  }}
-                  disabled={!selectedTrip}
-                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold disabled:opacity-50"
-                >
-                  Add booking
-                </button>
-                <p className="text-xs text-neutral-700 dark:text-neutral-300">Only items with confirmation numbers are shown in this list.</p>
-              </div>
-              </div>
-              ) : null}
-            </div>
-            {isBookingFormOpen ? (
-              <div className="fixed inset-0 z-[70] bg-black/40 flex items-center justify-center p-4">
+            <TripRoutePlanner
+              tripStartDate={selectedTrip?.startDate}
+              tripEndDate={selectedTrip?.endDate}
+              tripCountry={selectedTrip?.country}
+              stays={stays}
+              flights={bookings.flights}
+              rentalCars={bookings.rentalCars}
+              readOnly={tripIsReadOnly}
+              openDestinationPromptToken={plannerDestinationPromptToken}
+              onOpenStay={openEditStayForm}
+              onCreateDestination={createDestinationFromPlanner}
+              onAddAccommodation={openAddAccommodationForStay}
+              onDeleteStay={(stayId) => {
+                const s = stays.find((x) => x.id === stayId)
+                setConfirmDialog({
+                  title: 'Delete place?',
+                  description: `Remove "${s?.location || 'this place'}" and its activities from the route?`,
+                  confirmLabel: 'Delete',
+                  cancelLabel: 'Cancel',
+                  variant: 'danger',
+                  onConfirm: () => removeStay(stayId),
+                })
+              }}
+              onAddFlight={openAddFlightFromPlanner}
+              onOpenCar={openEditCarFromPlanner}
+              onUpdateStayDates={updateStayDates}
+              onAdjustStayNights={adjustStayNights}
+              onOpenFlight={(id) => setEditingFlightId(id)}
+            />
+
+            {flightWizardOpen
+              ? createPortal(
+                  <AddFlightWizard
+                    open={flightWizardOpen}
+                    defaultDepartDate={selectedTrip?.startDate || ''}
+                    onClose={() => setFlightWizardOpen(false)}
+                    onSave={saveFlightFromWizard}
+                  />,
+                  document.body,
+                )
+              : null}
+
+            {editingFlightId
+              ? (() => {
+                  const flight = bookings.flights.find((f) => f.id === editingFlightId)
+                  if (!flight) return null
+                  return createPortal(
+                    <FlightDetailsModal
+                      open
+                      flight={flight}
+                      stays={stays}
+                      readOnly={tripIsReadOnly}
+                      onClose={() => setEditingFlightId(null)}
+                      onSave={(patch) => {
+                        updateBooking('flight', flight.id, (x: FlightBooking) => ({ ...x, ...patch }))
+                      }}
+                      onDelete={() => {
+                        setConfirmDialog({
+                          title: 'Delete flight?',
+                          description: 'Remove this flight from the trip route?',
+                          confirmLabel: 'Delete',
+                          cancelLabel: 'Cancel',
+                          variant: 'danger',
+                          onConfirm: () => {
+                            removeBooking('flight', flight.id)
+                            setEditingFlightId(null)
+                          },
+                        })
+                      }}
+                    />,
+                    document.body,
+                  )
+                })()
+              : null}
+
+            {isBookingFormOpen
+              ? createPortal(
+              <div className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-4">
                 <div className="w-[min(100%,42rem)] max-h-[85vh] overflow-auto bg-white rounded-2xl shadow-2xl p-6 border border-neutral-200">
                   <div className="flex items-center justify-between gap-3">
                     <h3 className="text-lg font-semibold">
-                      {editingBookingForm || editingStayId ? 'Edit' : 'Add'} {bookingsTab === 'rentalCar' ? 'rental car' : bookingsTab === 'flight' ? 'flight' : bookingsTab === 'restaurant' ? 'dining/activity' : 'accommodation'}
+                      {bookingsTab === 'accommodation'
+                        ? stopFormMode === 'lodging'
+                          ? editingLodgingId
+                            ? 'Edit accommodation'
+                            : 'Add accommodation'
+                          : editingStayId
+                            ? 'Edit destination'
+                            : 'Add destination'
+                        : `${editingBookingForm ? 'Edit' : 'Add'} ${
+                            bookingsTab === 'rentalCar'
+                              ? 'rental car'
+                              : bookingsTab === 'flight'
+                                ? 'flight'
+                                : 'dining/activity'
+                          }`}
                     </h3>
                     <button
                       type="button"
@@ -6823,15 +7196,74 @@ export default function App() {
                             />
                           </div>
                         </div>
-                        <div className="mt-3">
-                          <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Airline</label>
-                          <input
-                            value={flightAirlineInput}
-                            onChange={(e) => setFlightAirlineInput(e.target.value)}
-                            disabled={!selectedTrip}
-                            placeholder="e.g. United, Delta"
-                            className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
-                          />
+                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Airline</label>
+                            <input
+                              value={flightAirlineInput}
+                              onChange={(e) => setFlightAirlineInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              placeholder="e.g. United, Delta"
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Flight number</label>
+                            <input
+                              value={flightNumberInput}
+                              onChange={(e) => setFlightNumberInput(e.target.value.replace(/[^0-9A-Za-z]/g, '').toUpperCase())}
+                              disabled={!selectedTrip}
+                              placeholder="e.g. 248"
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Confirmation / PNR</label>
+                            <input
+                              value={flightConfirmationInput}
+                              onChange={(e) => setFlightConfirmationInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              placeholder="Booking code"
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Seat</label>
+                            <input
+                              value={flightSeatInput}
+                              onChange={(e) => setFlightSeatInput(e.target.value.toUpperCase())}
+                              disabled={!selectedTrip}
+                              placeholder="e.g. 12A"
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Booking status</label>
+                            <select
+                              value={flightBookingStatusInput}
+                              onChange={(e) => setFlightBookingStatusInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            >
+                              {['Booked', 'Hold', 'Standby', 'Cancelled'].map((s) => (
+                                <option key={s} value={s}>
+                                  {s}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Departure terminal</label>
+                            <input
+                              value={flightDepartTerminalInput}
+                              onChange={(e) => setFlightDepartTerminalInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              placeholder="e.g. Terminal 2"
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
                         </div>
                         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div>
@@ -6927,20 +7359,27 @@ export default function App() {
                             </label>
                           </div>
                         </div>
-                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <input
-                            value={flightConfirmationInput}
-                            onChange={(e) => setFlightConfirmationInput(e.target.value)}
+                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Price</label>
+                            <input
+                              value={flightPriceInput}
+                              onChange={(e) => setFlightPriceInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              placeholder="e.g. $420"
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-3">
+                          <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Notes</label>
+                          <textarea
+                            value={flightNotesInput}
+                            onChange={(e) => setFlightNotesInput(e.target.value)}
                             disabled={!selectedTrip}
-                            placeholder="Confirmation #"
-                            className="px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
-                          />
-                          <input
-                            value={flightPriceInput}
-                            onChange={(e) => setFlightPriceInput(e.target.value)}
-                            disabled={!selectedTrip}
-                            placeholder="Price"
-                            className="px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            rows={2}
+                            placeholder="Gate changes, meal prefs, etc."
+                            className="w-full resize-y px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
                           />
                         </div>
                         <input
@@ -6971,51 +7410,174 @@ export default function App() {
                       </div>
                     ) : null}
 
-                    {bookingsTab === 'accommodation' ? (
+                    {bookingsTab === 'accommodation' && stopFormMode === 'place' ? (
                       <>
-                        <p className="text-sm text-neutral-600 mb-3">Accommodation entries are managed in stays. Address is optional and can be added later.</p>
-                        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-start">
-                          <input value={stayLocationInput} onChange={(e) => setStayLocationInput(e.target.value)} disabled={!selectedTrip} placeholder={selectedTrip ? 'Stay location (hotel/city)' : 'Select a trip first'} className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200" />
-                          <input value={stayAddressInput} onChange={(e) => setStayAddressInput(e.target.value)} disabled={!selectedTrip} placeholder="Accommodation address (optional)" className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200" />
-                          <DateRangeDropdown
-                            startDate={stayStartDate}
-                            endDate={stayEndDate}
-                            onChange={(start, end) => {
-                              setStayStartDate(start)
-                              setStayEndDate(end)
-                            }}
+                        <p className="text-sm text-neutral-600 dark:text-neutral-300 mb-3">
+                          Add a destination (town or city) for this stretch of the trip. You can attach accommodation later.
+                        </p>
+                        <div className="grid grid-cols-1 gap-3">
+                          <div className="relative">
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Place</label>
+                            <input
+                              value={stayLocationInput}
+                              onChange={(e) => {
+                                setStayLocationInput(e.target.value)
+                                setShowStayLocationSuggestions(true)
+                              }}
+                              onFocus={() => setShowStayLocationSuggestions(true)}
+                              onBlur={() => setTimeout(() => setShowStayLocationSuggestions(false), 150)}
+                              disabled={!selectedTrip}
+                              placeholder={selectedTrip ? 'e.g. Wellington' : 'Select a trip first'}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200"
+                              autoComplete="off"
+                            />
+                            {showStayLocationSuggestions && stayLocationSearch.suggestions.length > 0 ? (
+                              <div className="absolute left-0 right-0 mt-1 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl shadow-xl z-20 overflow-hidden max-h-48 overflow-y-auto">
+                                {stayLocationSearch.suggestions.slice(0, 6).map((sug) => (
+                                  <button
+                                    key={sug.key}
+                                    type="button"
+                                    onMouseDown={(e) => {
+                                      e.preventDefault()
+                                      const placeName = sug.label.split(',')[0]?.trim() || sug.label
+                                      setStayLocationInput(placeName)
+                                      setShowStayLocationSuggestions(false)
+                                    }}
+                                    className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 dark:hover:bg-neutral-800"
+                                  >
+                                    {sug.label}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Dates</label>
+                            <DateRangeDropdown
+                              startDate={stayStartDate}
+                              endDate={stayEndDate}
+                              onChange={(start, end) => {
+                                setStayStartDate(start)
+                                setStayEndDate(end)
+                              }}
+                              disabled={!selectedTrip}
+                              placeholder="Select dates for this place"
+                              initialMonthIso={selectedTrip?.startDate}
+                            />
+                          </div>
+                        </div>
+                        {stayError ? <p className="mt-2 text-xs text-rose-700">{stayError}</p> : null}
+                      </>
+                    ) : null}
+
+                    {bookingsTab === 'accommodation' && stopFormMode === 'lodging' ? (
+                      <>
+                        <p className="text-sm text-neutral-600 dark:text-neutral-300 mb-3">
+                          {editingLodgingId ? 'Edit' : 'Add'} lodging — pick which destination it belongs to.
+                        </p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          <div className="md:col-span-2">
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">
+                              Destination
+                            </label>
+                            <select
+                              value={lodgingHostStayId || editingStayId || ''}
+                              disabled={!selectedTrip}
+                              onChange={(e) => {
+                                const nextId = e.target.value
+                                setLodgingHostStayId(nextId)
+                                const next = stays.find((s) => s.id === nextId)
+                                if (next) {
+                                  setStayLocationInput(next.location)
+                                  setStayStartDate(next.startDate)
+                                  setStayEndDate(next.endDate)
+                                }
+                              }}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            >
+                              {stays.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.location || 'Untitled place'} ({s.startDate} → {s.endDate})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <input
+                            value={stayLodgingNameInput}
+                            onChange={(e) => setStayLodgingNameInput(e.target.value)}
                             disabled={!selectedTrip}
-                            placeholder="Select check-in and check-out dates."
-                            initialMonthIso={selectedTrip?.startDate}
-                            className="md:col-span-2"
+                            placeholder="Hotel / Airbnb name"
+                            className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200"
                           />
-                          <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                            <div>
-                              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Check-in time</label>
-                              <input
-                                type="time"
-                                value={stayCheckInTimeInput}
-                                onChange={(e) => setStayCheckInTimeInput(e.target.value)}
-                                disabled={!selectedTrip}
-                                className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Check-out time</label>
-                              <input
-                                type="time"
-                                value={stayCheckOutTimeInput}
-                                onChange={(e) => setStayCheckOutTimeInput(e.target.value)}
-                                disabled={!selectedTrip}
-                                className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
-                              />
-                            </div>
+                          <input
+                            value={stayAddressInput}
+                            onChange={(e) => setStayAddressInput(e.target.value)}
+                            disabled={!selectedTrip}
+                            placeholder="Address"
+                            className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200"
+                          />
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Check-in date</label>
+                            <input
+                              type="date"
+                              value={stayLodgingCheckInDate}
+                              onChange={(e) => setStayLodgingCheckInDate(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
                           </div>
-                          <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2 self-start">
-                            <input value={stayPriceInput} onChange={(e) => setStayPriceInput(e.target.value)} disabled={!selectedTrip} placeholder="Price" className="px-3 py-2 rounded-xl border border-neutral-200" />
-                            <input value={stayConfirmationRefInput} onChange={(e) => setStayConfirmationRefInput(e.target.value)} disabled={!selectedTrip} placeholder="Confirmation #" className="px-3 py-2 rounded-xl border border-neutral-200" />
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Check-out date</label>
+                            <input
+                              type="date"
+                              value={stayLodgingCheckOutDate}
+                              min={stayLodgingCheckInDate || undefined}
+                              onChange={(e) => setStayLodgingCheckOutDate(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
                           </div>
-                          <input value={stayBookingUrlInput} onChange={(e) => setStayBookingUrlInput(e.target.value)} disabled={!selectedTrip} placeholder="Booking link" className="md:col-span-4 px-3 py-2 rounded-xl border border-neutral-200" />
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Check-in time</label>
+                            <input
+                              type="time"
+                              value={stayCheckInTimeInput}
+                              onChange={(e) => setStayCheckInTimeInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400 mb-1">Check-out time</label>
+                            <input
+                              type="time"
+                              value={stayCheckOutTimeInput}
+                              onChange={(e) => setStayCheckOutTimeInput(e.target.value)}
+                              disabled={!selectedTrip}
+                              className="w-full px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-600 dark:bg-neutral-900"
+                            />
+                          </div>
+                          <input
+                            value={stayConfirmationRefInput}
+                            onChange={(e) => setStayConfirmationRefInput(e.target.value)}
+                            disabled={!selectedTrip}
+                            placeholder="Confirmation #"
+                            className="px-3 py-2 rounded-xl border border-neutral-200"
+                          />
+                          <input
+                            value={stayPriceInput}
+                            onChange={(e) => setStayPriceInput(e.target.value)}
+                            disabled={!selectedTrip}
+                            placeholder="Price"
+                            className="px-3 py-2 rounded-xl border border-neutral-200"
+                          />
+                          <input
+                            value={stayBookingUrlInput}
+                            onChange={(e) => setStayBookingUrlInput(e.target.value)}
+                            disabled={!selectedTrip}
+                            placeholder="Booking link"
+                            className="md:col-span-2 px-3 py-2 rounded-xl border border-neutral-200"
+                          />
                         </div>
                         {stayError ? <p className="mt-2 text-xs text-rose-700">{stayError}</p> : null}
                       </>
@@ -7024,7 +7586,29 @@ export default function App() {
 
                   {bookingError ? <p className="mt-3 text-xs text-rose-700">{bookingError}</p> : null}
 
-                  <div className="mt-4 flex items-center justify-end gap-2">
+                  <div className="mt-4 flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      {bookingsTab === 'accommodation' &&
+                      stopFormMode === 'lodging' &&
+                      editingLodgingId &&
+                      !tripIsReadOnly ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const lodgingId = editingLodgingId
+                            setIsBookingFormOpen(false)
+                            setEditingBookingForm(null)
+                            setEditingStayId(null)
+                            setEditingLodgingId(null)
+                            setCancelLodgingPrompt({ lodgingId })
+                          }}
+                          className="px-3 py-2 rounded-lg border border-rose-300 text-sm font-medium text-rose-700 dark:text-rose-400 dark:border-rose-800"
+                        >
+                          Cancel booking
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="flex items-center gap-2 ml-auto">
                     <button
                       type="button"
                       onClick={() => {
@@ -7034,13 +7618,14 @@ export default function App() {
                       }}
                       className="px-3 py-2 rounded-lg border border-neutral-200 text-sm"
                     >
-                      Cancel
+                      Close
                     </button>
                     {bookingsTab === 'accommodation' ? (
                       <button
                         type="button"
                         onClick={() => {
-                          const ok = editingStayId ? saveStayFormEdit() : addStay()
+                          const ok =
+                            stopFormMode === 'lodging' || editingStayId ? saveStayFormEdit() : addStay()
                           if (ok) {
                             setIsBookingFormOpen(false)
                             setEditingBookingForm(null)
@@ -7050,7 +7635,13 @@ export default function App() {
                         disabled={!selectedTrip}
                         className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold disabled:opacity-50"
                       >
-                        {editingStayId ? 'Save changes' : 'Add stay'}
+                        {stopFormMode === 'lodging'
+                          ? editingLodgingId
+                            ? 'Save accommodation'
+                            : 'Add accommodation'
+                          : editingStayId
+                            ? 'Save destination'
+                            : 'Add destination'}
                       </button>
                     ) : (
                       <button
@@ -7068,380 +7659,459 @@ export default function App() {
                         {editingBookingForm ? 'Save changes' : 'Add booking'}
                       </button>
                     )}
+                    </div>
                   </div>
+                </div>
+              </div>,
+              document.body,
+            )
+              : null}
+
+            {cancelLodgingPrompt
+              ? (() => {
+                  const lodging =
+                    stays
+                      .flatMap((s) => stayAccommodations(s))
+                      .find((a) => a.id === cancelLodgingPrompt.lodgingId) || null
+                  return (
+                    <CancelAccommodationDialog
+                      open
+                      lodging={lodging}
+                      onClose={() => setCancelLodgingPrompt(null)}
+                      onConfirm={() => {
+                        removeLodgingBooking(cancelLodgingPrompt.lodgingId)
+                        setCancelLodgingPrompt(null)
+                        setIsBookingFormOpen(false)
+                        setEditingBookingForm(null)
+                        setEditingStayId(null)
+                        setEditingLodgingId(null)
+                      }}
+                    />
+                  )
+                })()
+              : null}
+          </div>
+        )}
+
+        {activeTab === 'itinerary' && (
+          <div
+            className={`animate-in fade-in duration-200${itineraryViewMode === 'calendar' ? ' max-sm:overflow-x-hidden' : ''}${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
+          >
+            <div
+              className={`bg-white rounded-3xl shadow-lg border border-neutral-100 p-4 sm:p-7 dark:border-neutral-800 dark:bg-neutral-900${
+                itineraryViewMode === 'calendar' && isMobileCalNarrow
+                  ? ' max-sm:bg-transparent max-sm:shadow-none max-sm:border-0 max-sm:p-0 max-sm:rounded-none'
+                  : ''
+              }`}
+            >
+              <div
+                className={`flex items-center justify-between gap-4 flex-wrap${
+                  itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4 max-sm:pb-2' : ''
+                }`}
+              >
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                    Journey
+                  </p>
+                  <h2 className="text-2xl font-serif font-bold">Itinerary</h2>
+                  <p
+                    className={`text-neutral-500 text-sm${itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:hidden' : ''}`}
+                  >
+                    Your path through the destinations — add stops along the way.
+                  </p>
+                </div>
+                <div className="flex shrink-0 rounded-full border border-neutral-200 bg-neutral-50 p-1 dark:border-neutral-600 dark:bg-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => setItineraryViewMode('destinations')}
+                    className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
+                      itineraryViewMode === 'destinations'
+                        ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-950 dark:text-neutral-100'
+                        : 'text-neutral-600 dark:text-neutral-300'
+                    }`}
+                  >
+                    Destinations
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setItineraryViewMode('calendar')}
+                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-semibold ${
+                      itineraryViewMode === 'calendar'
+                        ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-950 dark:text-neutral-100'
+                        : 'text-neutral-600 dark:text-neutral-300'
+                    }`}
+                  >
+                    <Calendar size={14} aria-hidden />
+                    Calendar
+                  </button>
                 </div>
               </div>
-            ) : null}
 
-            {/* Places to visit */}
-            <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setExpandedTripPanel((v) => !v)}
-                className="w-full flex items-center justify-between px-4 py-4 sm:px-7 sm:py-5 hover:bg-neutral-50 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <MapPin className="text-blue-600" size={18} />
-                  <div className="text-left">
-                    <div className="font-bold">Places to visit</div>
-                    <div className="text-xs text-neutral-500">Search by name or address</div>
-                  </div>
-                </div>
-                {expandedTripPanel ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-              </button>
-
-              {expandedTripPanel && (
-                <div className="px-4 pb-6 sm:px-7 sm:pb-7">
-                  <div className="flex flex-col sm:flex-row gap-3 mb-6 items-start sm:items-center">
-                    <div className="flex-1 min-w-0 px-4 py-3 rounded-xl border border-neutral-200 bg-neutral-50 text-sm text-neutral-700 shadow-sm">
-                      {selectedTrip ? `Current trip: ${selectedTrip.country}` : 'No trip selected'}
-                    </div>
-                    {selectedTrip?.cancelled ? (
-                      <div className="flex flex-wrap gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => setTripCancelledFlag(selectedTrip.id, false)}
-                          className="px-4 py-3 rounded-xl border border-neutral-200 text-neutral-700 hover:bg-neutral-50"
-                        >
-                          Restore trip
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const t = selectedTrip
-                            setConfirmDialog({
-                              title: 'Delete trip permanently?',
-                              description: `Permanently delete "${t.country}"? This cannot be undone.`,
-                              confirmLabel: 'Delete permanently',
-                              cancelLabel: 'Cancel',
-                              variant: 'danger',
-                              onConfirm: () => permanentlyRemoveTrip(t.id),
-                            })
-                          }}
-                          className="px-4 py-3 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900/50 dark:text-rose-400 dark:hover:bg-rose-950/40"
-                        >
-                          Delete permanently
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={!selectedTrip}
-                        onClick={moveTripToCancelled}
-                        className="px-4 py-3 rounded-xl border border-neutral-200 text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 disabled:hover:bg-transparent shrink-0"
-                      >
-                        Cancel Trip
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="mb-6">
-                    <label className="block text-sm font-medium text-neutral-700 mb-2">Trip dates</label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <DateRangeDropdown
-                        startDate={tripStartDateInput}
-                        endDate={tripEndDateInput}
-                        onChange={(start, end) => {
-                          setTripStartDateInput(start)
-                          setTripEndDateInput(end)
-                        }}
-                        disabled={!selectedTrip}
-                        placeholder="Select trip dates"
-                        initialMonthIso={selectedTrip?.startDate}
-                        className="sm:col-span-2"
-                      />
-                      <button
-                        type="button"
-                        onClick={saveTripDates}
-                        disabled={!selectedTrip}
-                        className="px-4 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold hover:from-blue-500 hover:to-indigo-500 transition-colors disabled:opacity-50 shadow-sm"
-                      >
-                        Save dates
-                      </button>
-                    </div>
-                    {tripDateError ? <p className="mt-2 text-xs text-rose-700">{tripDateError}</p> : null}
-                  </div>
-
-                  <div className="relative">
-                    <label className="block text-sm font-medium text-neutral-700 mb-2">Add a place</label>
-                    <div className="flex gap-2 flex-col sm:flex-row">
-                      <div className="flex-1 relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" size={18} />
-                        <input
-                          value={placeSearchInput}
-                          onChange={(e) => {
-                            setPlaceSearchInput(e.target.value)
-                            setShowPlaceSuggestions(true)
-                          }}
-                          onFocus={() => setShowPlaceSuggestions(true)}
-                          onKeyDown={(e) => {
-                            const items = placeSearch.suggestions
-                            if (e.key === 'Escape') {
-                              e.preventDefault()
-                              setShowPlaceSuggestions(false)
-                              return
-                            }
-                            if (!selectedTrip) return
-
-                            if (showPlaceSuggestions && items.length > 0) {
-                              if (e.key === 'ArrowDown') {
-                                e.preventDefault()
-                                setPlaceSuggestionIndex((prev) => (prev + 1) % items.length)
-                                return
-                              }
-                              if (e.key === 'ArrowUp') {
-                                e.preventDefault()
-                                setPlaceSuggestionIndex((prev) => (prev <= 0 ? items.length - 1 : prev - 1))
-                                return
-                              }
-                              if (e.key === 'Enter') {
-                                e.preventDefault()
-                                const pick =
-                                  placeSuggestionIndex >= 0 && placeSuggestionIndex < items.length
-                                    ? items[placeSuggestionIndex]
-                                    : null
-                                if (pick) {
-                                  addVisitPlace(
-                                    pick.label,
-                                    typeof pick.lat === 'number' && typeof pick.lon === 'number'
-                                      ? { lat: pick.lat, lon: pick.lon }
-                                      : undefined,
-                                  )
-                                }
-                                else if (placeSearchInput.trim()) addVisitPlace(placeSearchInput.trim())
-                                return
-                              }
-                            }
-
-                            if (e.key === 'Enter' && placeSearchInput.trim()) {
-                              e.preventDefault()
-                              addVisitPlace(placeSearchInput.trim())
-                            }
-                          }}
-                          onBlur={() => {
-                            setTimeout(() => setShowPlaceSuggestions(false), 150)
-                          }}
-                          disabled={!selectedTrip}
-                          placeholder={selectedTrip ? 'Search address or place name…' : 'Select a trip first'}
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-200 focus:outline-none focus:ring-2 focus:ring-blue-500/30 shadow-sm disabled:bg-neutral-50 disabled:text-neutral-400"
-                        />
-
-                        {showPlaceSuggestions && selectedTrip && placeSearch.suggestions.length > 0 ? (
-                          <div className="absolute left-0 right-0 mt-2 bg-white border border-neutral-200 rounded-xl shadow-xl z-20 overflow-hidden max-h-60 overflow-y-auto">
-                            {placeSearch.suggestions.map((sug, idx) => (
-                              <button
-                                key={sug.key}
-                                type="button"
-                                onMouseDown={(e) => {
-                                  e.preventDefault()
-                                  addVisitPlace(
-                                    sug.label,
-                                    typeof sug.lat === 'number' && typeof sug.lon === 'number'
-                                      ? { lat: sug.lat, lon: sug.lon }
-                                      : undefined,
-                                  )
-                                }}
-                                className={`w-full text-left px-4 py-2.5 text-sm ${
-                                  idx === placeSuggestionIndex ? 'bg-blue-100' : 'hover:bg-blue-50'
-                                }`}
-                              >
-                                {sug.label}
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                      <button
-                        type="button"
-                        disabled={!selectedTrip || !placeSearchInput.trim()}
-                        onClick={() => addVisitPlace(placeSearchInput.trim())}
-                        className="px-5 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold hover:from-blue-500 hover:to-indigo-500 transition-colors shadow-sm disabled:opacity-50 sm:self-end"
-                      >
-                        Add
-                      </button>
-                    </div>
-                  </div>
-
-                  {placeSearch.autocompleteError ? (
-                    <p className="mt-2 text-xs text-rose-700">Search error: {placeSearch.autocompleteError}</p>
-                  ) : null}
-
-                  <div className="mt-5">
-                    <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
-                      <div className="min-w-0">
-                        <h3 className="text-sm font-semibold text-neutral-800">Recommended places</h3>
-                        <p className="text-xs text-neutral-500">
-                          {selectedTrip
-                            ? 'Cached on your NAS. Refresh only when you want new ideas (free Overpass/OSM — no Google).'
-                            : 'Select a trip to see recommendations.'}
-                        </p>
-                        {recommendedPlaces.fetchedAt ? (
-                          <p className="text-[11px] text-neutral-400 mt-1">
-                            Last refreshed {new Date(recommendedPlaces.fetchedAt).toLocaleString()}
-                            {recommendedPlaces.source ? ` · ${recommendedPlaces.source}` : ''}
-                          </p>
-                        ) : selectedTrip ? (
-                          <p className="text-[11px] text-neutral-400 mt-1">No cached recommendations yet.</p>
-                        ) : null}
-                      </div>
-                      {selectedTrip && isSupabaseConfigured() && !isDevAuthBypass() ? (
-                        <button
-                          type="button"
-                          disabled={recommendedPlaces.refreshing || recommendedPlaces.loading}
-                          onClick={() => void recommendedPlaces.refresh()}
-                          className="shrink-0 px-3 py-1.5 rounded-lg border border-neutral-200 bg-white text-xs font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
-                        >
-                          {recommendedPlaces.refreshing ? 'Refreshing…' : 'Refresh recommendations'}
-                        </button>
-                      ) : null}
-                    </div>
-                    {!selectedTrip ? null : recommendedPlaces.loading ? (
-                      <p className="text-sm text-neutral-500">Loading cached recommendations...</p>
-                    ) : recommendedPlaces.error ? (
-                      <p className="text-xs text-rose-700">{recommendedPlaces.error}</p>
-                    ) : visibleRecommendations.length > 0 ? (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {visibleRecommendations.map((rec) => {
-                          const googleUrl =
-                            rec.googleMapsUri || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(rec.label)}`
-                          const imageUrl = rec.photoUrl || DEFAULT_HERO_IMAGE
-                          const primaryTitle = rec.label.split(',')[0]?.trim() || rec.label
-                          const addressTail = rec.label.split(',').slice(1).join(',').trim()
-                          return (
-                            <div
-                              key={rec.key}
-                              className="text-left px-3 py-3 rounded-xl border border-neutral-200 bg-white hover:bg-blue-50/50 transition-colors"
-                            >
-                              <div className="flex gap-3 items-start sm:items-center">
-                                <img
-                                  src={imageUrl}
-                                  alt=""
-                                  loading="lazy"
-                                  className="w-[92px] h-[58px] rounded-lg object-cover border border-neutral-200 shrink-0 bg-neutral-100"
-                                />
-                                <div className="min-w-0 flex-1 flex flex-col gap-2">
-                                  <p className="sm:hidden text-sm text-neutral-800 font-medium break-words w-full">{primaryTitle}</p>
-                                  <div className="sm:hidden flex w-full items-center justify-between gap-2 flex-wrap">
-                                    <a
-                                      href={googleUrl}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-xs text-blue-700 hover:underline inline-flex items-center gap-1 shrink-0"
-                                    >
-                                      <ExternalLink size={12} />
-                                      Google
-                                    </a>
-                                    <div className="flex items-center gap-2 shrink-0">
-                                      <button
-                                        type="button"
-                                        onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
-                                        className="p-1 rounded-md text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
-                                        aria-label={`Dismiss recommendation ${rec.label}`}
-                                      >
-                                        <X size={14} />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => addRecommendedActivity(rec)}
-                                        className="px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold text-xs hover:from-blue-500 hover:to-indigo-500 transition-colors shadow-sm whitespace-nowrap"
-                                      >
-                                        Add
-                                      </button>
-                                    </div>
-                                  </div>
-                                  <div className="hidden sm:flex sm:flex-row sm:items-center sm:gap-3 w-full min-w-0">
-                                    <div className="min-w-0 flex-1 flex flex-col gap-1">
-                                      <p className="text-sm text-neutral-800 font-medium break-words">{primaryTitle}</p>
-                                      {addressTail ? (
-                                        <p className="text-xs text-neutral-500 break-words">{addressTail}</p>
-                                      ) : null}
-                                    </div>
-                                    <div className="flex items-center gap-2 shrink-0">
-                                      <a
-                                        href={googleUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-xs text-blue-700 hover:underline inline-flex items-center gap-1"
-                                      >
-                                        <ExternalLink size={12} />
-                                        Google
-                                      </a>
-                                      <button
-                                        type="button"
-                                        onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
-                                        className="p-1 rounded-md text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
-                                        aria-label={`Dismiss recommendation ${rec.label}`}
-                                      >
-                                        <X size={14} />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => addRecommendedActivity(rec)}
-                                        className="px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold text-xs hover:from-blue-500 hover:to-indigo-500 transition-colors shadow-sm whitespace-nowrap"
-                                      >
-                                        Add
-                                      </button>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-neutral-500">No recommendations found yet.</p>
-                    )}
-                  </div>
-
-                  <div className="mt-6">
-                    <h3 className="text-sm font-semibold text-neutral-800 mb-3">Saved for this trip</h3>
-                    {selectedTrip && visitPlaces.length > 0 ? (
-                      <ul className="space-y-2">
-                        {visitPlaces.map((p) => (
-                          <li
-                            key={p.id}
-                            className="flex items-start gap-3 px-4 py-3 rounded-xl border border-neutral-100 bg-neutral-50/80"
-                          >
-                            <MapPin className="text-blue-600 shrink-0 mt-0.5" size={16} />
-                            <div className="flex-1 min-w-0">
-                              <span className="text-sm text-neutral-800 block break-words">{p.label}</span>
-                              <input
-                                value={p.cost ?? ''}
-                                onChange={(e) => updateVisitPlaceCost(p.id, e.target.value)}
-                                disabled={!selectedTrip}
-                                placeholder="Activity cost (optional)"
-                                className="mt-2 w-full sm:w-56 px-3 py-1.5 rounded-lg border border-neutral-200 text-xs"
-                              />
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => removeVisitPlace(p.id)}
-                              className="p-1 rounded-lg text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
-                              aria-label={`Remove ${p.label}`}
-                            >
-                              <X size={18} />
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="text-sm text-neutral-500">
-                        {selectedTrip ? 'No places yet.' : 'Select a trip to add places.'}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="mt-4 p-4 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-100 rounded-2xl flex gap-3">
-                    <Info className="text-emerald-600 shrink-0" size={18} />
-                    <p className="text-sm text-emerald-800">
-                      Trips, places, and side-quests are saved locally in your browser. Refresh-safe.
+              {!selectedTrip ? (
+                <p className="mt-6 text-sm text-neutral-500">Select a trip to plan stops.</p>
+              ) : timelineDays.length === 0 ? (
+                <p className="mt-6 text-sm text-neutral-500">
+                  Set trip dates and add destinations in Planner to build your itinerary.
+                </p>
+              ) : itineraryViewMode === 'destinations' ? (
+                <ItineraryDestinationsView
+                  stays={stays}
+                  readOnly={tripIsReadOnly}
+                  tripCountry={selectedTrip.country}
+                  stopComposer={stopComposer}
+                  onOpenStopComposer={(stayId, date) => {
+                    setStopComposer({ stayId, date })
+                    setActivityPlaceSearchInput('')
+                    setSelectedTimelineDate(date)
+                  }}
+                  onCloseStopComposer={() => setStopComposer(null)}
+                  activityDrafts={activityDrafts}
+                  setActivityDrafts={setActivityDrafts}
+                  draftPlaceMeta={draftPlaceMeta}
+                  setDraftPlaceMeta={setDraftPlaceMeta}
+                  activityPlaceSearchInput={activityPlaceSearchInput}
+                  setActivityPlaceSearchInput={setActivityPlaceSearchInput}
+                  activityPlaceSuggestions={activityPlaceSearch.suggestions}
+                  activityPlaceSearchError={activityPlaceSearch.autocompleteError}
+                  placeGoogleUrl={placeGoogleUrl}
+                  resolveRecommendationCategory={resolveRecommendationCategory}
+                  onAddStop={addStayActivity}
+                  onRemoveStop={removeStayActivity}
+                  onOpenStop={(stayId, activity, stayLocation) =>
+                    setCalendarActivityDetail({
+                      stayId,
+                      activity,
+                      stayLocation,
+                    })
+                  }
+                  onOpenPlanner={() => {
+                    setActiveTab('planner')
+                    openAddStayFromPlanner()
+                  }}
+                  onOpenOnMap={(stayId) => {
+                    setMapFocusStayId(stayId)
+                    setActiveTab('map')
+                  }}
+                  formatDayLabel={formatSingleDateLabel}
+                  formatStayRange={(start, end) => formatDateRangeLabel(start, end)}
+                />
+              ) : (
+                <div
+                  className={`mt-5${
+                    isMobileCalNarrow ? ' max-sm:mt-3 max-sm:px-0' : ''
+                  }`}
+                >
+                  {calendarDropError ? (
+                    <p className={`text-sm text-rose-600 mb-2${isMobileCalNarrow ? ' max-sm:px-4' : ''}`}>
+                      {calendarDropError}
                     </p>
+                  ) : null}
+                  {isMobileCalNarrow ? (
+                    <div className="max-sm:px-4 max-sm:pt-1 max-sm:mb-3">
+                      <div className="rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 dark:border-neutral-700 dark:bg-neutral-800/60">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                          Lodging
+                        </p>
+                        {selectedDayPrimaryStay ? (
+                          <div className="mt-1.5 min-w-0">
+                            {(() => {
+                              const dayLodging = stayAccommodationForDate(
+                                selectedDayPrimaryStay,
+                                selectedTimelineDate,
+                              )
+                              const label = dayLodging
+                                ? (dayLodging.name || dayLodging.confirmationRef || '').trim()
+                                : ''
+                              const addr = stayLodgingAddress(
+                                selectedDayPrimaryStay,
+                                selectedTimelineDate,
+                              )
+                              return (
+                                <>
+                                  <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate flex items-center gap-1.5">
+                                    <BedDouble size={14} className="shrink-0 opacity-70" aria-hidden />
+                                    {label || selectedDayPrimaryStay.location || 'No lodging'}
+                                  </p>
+                                  {addr ? (
+                                    <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400 line-clamp-2">
+                                      {addr}
+                                    </p>
+                                  ) : null}
+                                </>
+                              )
+                            })()}
+                          </div>
+                        ) : (
+                          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+                            Add destinations in Planner to see lodging by day.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className={isMobileCalNarrow ? 'itinerary-calendar-viewport-breakout' : ''}>
+                    <div className="itinerary-calendar-mode itinerary-calendar-mobile-bleed">
+                      <ItineraryCalendarGrid
+                        visibleDays={visibleCalendarDays}
+                        timelineDays={timelineDays}
+                        activitiesByDay={activitiesByDay}
+                        stays={stays}
+                        staysByDay={staysByDay}
+                        todayIso={todayIso}
+                        nowMinutes={nowMinutes}
+                        selectedTimelineDate={selectedTimelineDate}
+                        onSelectDay={setSelectedTimelineDate}
+                        onCalendarActivityDrop={applyCalendarDrop}
+                        onCalendarActivityResize={applyCalendarActivityResize}
+                        calendarReadOnly={tripIsReadOnly}
+                        onSelectCalendarItem={(item) =>
+                          setCalendarActivityDetail({
+                            stayId: item.stayId,
+                            activity: item.activity,
+                            bookingRef: item.bookingRef,
+                            stayLocation: item.stayLocation,
+                          })
+                        }
+                        weekStartIndex={calendarWeekStartIndex}
+                        onPrevWeek={() => setCalendarWeekStartIndex((i) => Math.max(0, i - 7))}
+                        onNextWeek={() =>
+                          setCalendarWeekStartIndex((i) => Math.min(calendarMaxStart, i + 7))
+                        }
+                        canPrev={canPrevCalendar}
+                        canNext={canNextCalendar}
+                        onShiftCalendarDays={(delta) =>
+                          setCalendarWeekStartIndex((i) =>
+                            Math.max(0, Math.min(calendarMaxStart, i + delta)),
+                          )
+                        }
+                        canShiftCalendarPrev={calendarWeekStartIndex > 0}
+                        canShiftCalendarNext={calendarWeekStartIndex < calendarMaxStart}
+                      />
+                    </div>
                   </div>
+                  {stayError ? (
+                    <p
+                      className={`mt-3 text-xs text-rose-700${isMobileCalNarrow ? ' max-sm:px-4' : ''}`}
+                    >
+                      {stayError}
+                    </p>
+                  ) : null}
                 </div>
               )}
             </div>
+          </div>
+        )}
 
+        {activeTab === 'budget' && (
+          <div className={`animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}>
+            <div className="rounded-3xl border border-neutral-100 bg-white p-4 shadow-lg sm:p-5 dark:border-neutral-800 dark:bg-neutral-900">
+              {!selectedTrip ? (
+                <p className="text-neutral-500 dark:text-neutral-400">Select a trip to view budget.</p>
+              ) : null}
+
+              {selectedTrip ? (
+                <>
+                  <div className="max-w-md">
+                    {(() => {
+                      const unitRate = budgetFxSnapshot
+                        ? rateBetween(budgetFromCurrency, budgetToCurrency, budgetFxSnapshot)
+                        : null
+                      const rateLabel =
+                        unitRate != null && Number.isFinite(unitRate)
+                          ? formatConverterAmount(unitRate, budgetToCurrency)
+                          : '—'
+                      const fromName = currencyFullName(budgetFromCurrency)
+                      const toName = currencyFullName(budgetToCurrency)
+                      const fieldClass =
+                        'w-full rounded-lg border border-neutral-200 bg-neutral-50 px-2.5 py-2 text-sm font-medium tabular-nums text-neutral-900 outline-none focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-neutral-500'
+                      return (
+                        <>
+                          <div className="mb-2.5">
+                            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                              1 {fromName} equals
+                            </p>
+                            <p className="mt-0.5 text-xl font-semibold tracking-tight">
+                              <span className="tabular-nums text-neutral-900 dark:text-white">
+                                {rateLabel}
+                              </span>{' '}
+                              <span className="font-medium text-neutral-500 dark:text-neutral-400">
+                                {toName}
+                              </span>
+                            </p>
+                          </div>
+                          <div className="grid gap-1.5">
+                            <div className="grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.25fr)] gap-1.5">
+                              <input
+                                id="budget-fx-from"
+                                type="text"
+                                inputMode="decimal"
+                                aria-label="Amount to convert"
+                                value={budgetFromAmount}
+                                onChange={(e) => {
+                                  setBudgetFxLastEdited('from')
+                                  setBudgetFromAmount(e.target.value)
+                                }}
+                                placeholder="0"
+                                className={fieldClass}
+                              />
+                              <CurrencySelect
+                                value={budgetFromCurrency}
+                                currencies={CONVERTER_CURRENCIES}
+                                showFullName
+                                aria-label="From currency"
+                                title="From currency"
+                                onChange={(code) => {
+                                  setBudgetFromCurrency(code)
+                                  setBudgetFxLastEdited('from')
+                                }}
+                                className="w-full outline-none focus:border-neutral-400 dark:focus:border-neutral-500"
+                              />
+                            </div>
+                            <div className="grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.25fr)] gap-1.5">
+                              <input
+                                id="budget-fx-to"
+                                type="text"
+                                inputMode="decimal"
+                                aria-label="Converted amount"
+                                value={budgetToAmount}
+                                onChange={(e) => {
+                                  setBudgetFxLastEdited('to')
+                                  setBudgetToAmount(e.target.value)
+                                }}
+                                placeholder="0"
+                                className={fieldClass}
+                              />
+                              <CurrencySelect
+                                value={budgetToCurrency}
+                                currencies={CONVERTER_CURRENCIES}
+                                showFullName
+                                aria-label="To currency"
+                                title="To currency"
+                                onChange={(code) => {
+                                  setBudgetToCurrency(code)
+                                  setBudgetFxLastEdited('from')
+                                }}
+                                className="w-full outline-none focus:border-neutral-400 dark:focus:border-neutral-500"
+                              />
+                            </div>
+                          </div>
+                        </>
+                      )
+                    })()}
+                  </div>
+
+                  <div className="mt-5 border-t border-neutral-200 pt-4 dark:border-neutral-700">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                      Trip total
+                    </p>
+                    <p className="mt-0.5 text-2xl font-semibold tabular-nums tracking-tight text-neutral-900 dark:text-white">
+                      {tripBudgetSummary.totalDisplay}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-neutral-600 dark:text-neutral-300">
+                      <span>
+                        Paid{' '}
+                        <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+                          {tripBudgetSummary.paidDisplay}
+                        </span>
+                      </span>
+                      <span>
+                        Owing{' '}
+                        <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+                          {tripBudgetSummary.owingDisplay}
+                        </span>
+                      </span>
+                    </div>
+
+                    {tripBudgetSummary.itemCount === 0 ? (
+                      <p className="mt-4 text-sm text-neutral-500 dark:text-neutral-400">
+                        No priced bookings yet. Add costs on flights, cars, lodging, or activities.
+                      </p>
+                    ) : (
+                      <div className="mt-4 space-y-3">
+                        {tripBudgetSummary.categories.map((group) => (
+                          <section
+                            key={group.id}
+                            className="rounded-2xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-700 dark:bg-neutral-950/50"
+                          >
+                            <div className="mb-2 flex items-center justify-between gap-3">
+                              <h3 className="text-sm font-semibold text-neutral-800 dark:text-neutral-100">
+                                {group.label}
+                              </h3>
+                              <span className="text-xs font-semibold tabular-nums text-neutral-600 dark:text-neutral-300">
+                                {group.display}
+                              </span>
+                            </div>
+                            <ul className="space-y-1.5">
+                              {group.items.map((item) => (
+                                <li
+                                  key={item.id}
+                                  className="flex items-start justify-between gap-3 rounded-lg border border-neutral-200 bg-white px-2.5 py-2 dark:border-neutral-700 dark:bg-neutral-900"
+                                >
+                                  <span className="min-w-0 flex-1 truncate text-sm text-neutral-800 dark:text-neutral-200">
+                                    {item.label}
+                                  </span>
+                                  <span className="shrink-0 text-right text-sm font-medium tabular-nums text-neutral-900 dark:text-neutral-100">
+                                    {formatMoneyWithOriginal(item.display, item.original)}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </section>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'map' && (
+          <div className="animate-in fade-in duration-200 max-lg:contents">
+            {/* Phone/tablet: fill main edge-to-edge. Desktop: card shell. */}
+            <div
+              ref={mapStarOriginRef}
+              className={`overflow-hidden max-lg:h-[calc(100dvh-var(--waypoint-map-top,10.5rem)-env(safe-area-inset-bottom,0px))] max-lg:min-h-[280px] max-lg:rounded-none max-lg:shadow-none max-lg:ring-0 lg:h-[640px] lg:min-h-[320px] lg:rounded-2xl lg:shadow-2xl lg:ring-1 lg:ring-white/70 dark:lg:ring-neutral-700/80 ${
+                mapGlobeChrome ? 'bg-transparent' : 'bg-[#02040a]'
+              }`}
+            >
+              {!selectedTrip ? (
+                <div className="flex h-full items-center justify-center text-sm text-neutral-400">
+                  Select a trip to load map locations.
+                </div>
+              ) : (
+                <ErrorBoundary label="Map">
+                  <TripMap
+                    active={activeTab === 'map'}
+                    mapPoints={mapPoints}
+                    mapCategoryVisible={mapCategoryVisible}
+                    stays={stays}
+                    visitPlaces={visitPlaces}
+                    flights={bookings.flights}
+                    rentalCars={bookings.rentalCars}
+                    restaurants={bookings.restaurants}
+                    country={selectedTrip.country}
+                    tripEndDate={selectedTrip.endDate}
+                    resolvedPointCoords={resolvedPointCoords}
+                    cameraFingerprint={mapCameraFingerprint}
+                    pageStarfield
+                    skyLit={mapSkyLit}
+                    onGlobeChromeChange={setMapGlobeChrome}
+                    onBasemapChange={setMapBasemap}
+                    focusStayId={mapFocusStayId}
+                    onFocusStayConsumed={() => setMapFocusStayId(null)}
+                  />
+                </ErrorBoundary>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'tips' && (
+          <div
+            className={`space-y-8 animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
+          >
             <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 p-7">
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div>
@@ -7520,813 +8190,18 @@ export default function App() {
             </div>
           </div>
         )}
-
-        {activeTab === 'itinerary' && (
-          <div
-            className={`animate-in fade-in duration-200${itineraryViewMode === 'timeline' ? ' max-sm:overflow-x-hidden' : ''}${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
-          >
-            <div
-              className={`bg-white rounded-3xl shadow-lg border border-neutral-100 p-4 sm:p-7${
-                itineraryViewMode === 'calendar' && isMobileCalNarrow
-                  ? ' max-sm:bg-transparent max-sm:shadow-none max-sm:border-0 max-sm:p-0 max-sm:rounded-none'
-                  : ''
-              }`}
-            >
-              <div
-                className={`flex items-center justify-between gap-4 flex-wrap${
-                  itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4 max-sm:pb-2' : ''
-                }`}
-              >
-                <div className="min-w-0">
-                  <h2 className="text-2xl font-serif font-bold">Itinerary</h2>
-                  <p
-                    className={`text-neutral-500 text-sm${itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:hidden' : ''}`}
-                  >
-                    Day-by-day planner with a visual timeline and quick context cards.
-                  </p>
-                  {itineraryViewMode === 'calendar' && isMobileCalNarrow ? (
-                    <p className="text-neutral-500 text-xs mt-0.5 sm:hidden">Calendar — scroll hours; tap a day for tips below.</p>
-                  ) : null}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setItineraryViewMode((m) => (m === 'timeline' ? 'calendar' : 'timeline'))}
-                  className="shrink-0 inline-flex items-center gap-2 rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm font-semibold text-neutral-800 hover:bg-neutral-100 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
-                >
-                  <Calendar size={16} aria-hidden />
-                  {itineraryViewMode === 'timeline' ? 'Calendar View' : 'Timeline View'}
-                </button>
-              </div>
-
-              {selectedTrip && timelineDays.length > 0 ? (
-                <div
-                  className={`mt-5 space-y-5${
-                    itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:mt-3 max-sm:space-y-4 max-sm:px-0' : ''
-                  }`}
-                >
-                  {itineraryViewMode === 'timeline' ? (
-                  <div className="itinerary-rail">
-                    {timelineDays.map((day, index) => {
-                      const label = formatSingleDateLabel(day)
-                      const parts = label.split(' ')
-                      const dayNum = parts[1] ?? label
-                      const dayActivities = activitiesByDay.get(day) ?? []
-                      return (
-                        <button
-                          key={day}
-                          type="button"
-                          onClick={() => setSelectedTimelineDate(day)}
-                          className={`itinerary-day-chip ${selectedTimelineDate === day ? 'is-active' : ''}`}
-                        >
-                          <span className="itinerary-day-chip-label">Day {index + 1}</span>
-                          <span className="itinerary-day-chip-date">{dayNum}</span>
-                          <span className="itinerary-day-chip-dot">{dayActivities.length > 0 ? '•' : ''}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                  ) : null}
-
-                  {(() => {
-                    if (itineraryViewMode === 'calendar' && isMobileCalNarrow) return null
-                    const activeStays = staysByDay.get(selectedTimelineDate) ?? []
-                    const anchorStay = activeStays[0]
-                    const selectedActivities = activitiesByDay.get(selectedTimelineDate) ?? []
-                    const highlightedActivity = selectedActivities[0]?.activity
-                    const isTodayCard = selectedTimelineDate === todayIso
-                    const titleName = isTodayCard
-                      ? activeSoonActivity?.name ?? 'Nothing in the next 30 minutes'
-                      : highlightedActivity?.name ?? 'No activity yet'
-                    const titleNotes = isTodayCard
-                      ? activeSoonActivity?.notes ||
-                        (activeSoonActivity ? '' : 'No timed activity starting in the next 30 minutes (needs a parseable time).')
-                      : highlightedActivity?.notes || formatSingleDateLabel(selectedTimelineDate)
-                    const titleTime = isTodayCard
-                      ? activeSoonActivity?.time || (activeSoonActivity ? '' : '—')
-                      : highlightedActivity?.time || 'No time set'
-                    const firstSched = selectedActivities[0]
-                    let highlightDirectionsDest = (activeSoonDirectionsDestination || '').trim()
-                    if (!highlightDirectionsDest && !isTodayCard && firstSched) {
-                      highlightDirectionsDest = directionsDestinationForScheduleItem(firstSched)
-                    }
-                    if (!highlightDirectionsDest) {
-                      highlightDirectionsDest = (anchorStay?.address || anchorStay?.location || '').trim()
-                    }
-                    if (!highlightDirectionsDest && selectedTrip?.country) {
-                      highlightDirectionsDest = selectedTrip.country.trim()
-                    }
-                    const highlightDirectionsHref =
-                      highlightDirectionsDest.length > 0
-                        ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(highlightDirectionsDest)}`
-                        : 'https://www.google.com/maps/'
-
-                    return (
-                      <div className="grid grid-cols-1 gap-4">
-                        <div className="itinerary-summary-card">
-                          <div className="itinerary-summary-map">
-                            <div className="itinerary-summary-pulse" />
-                          </div>
-                          <div className="itinerary-summary-footer">
-                            <div className="min-w-0">
-                              <p className="text-sm font-semibold truncate">{anchorStay?.location || 'No stay selected'}</p>
-                              <p className="text-xs text-neutral-500 truncate">{anchorStay?.address || 'Add an accommodation address to unlock route tips.'}</p>
-                            </div>
-                            <a
-                              href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(anchorStay?.address || anchorStay?.location || '')}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="itinerary-summary-link"
-                            >
-                              <ExternalLink size={12} />
-                              Directions
-                            </a>
-                          </div>
-                        </div>
-
-                        <div className="itinerary-highlight-card md:hidden">
-                          <span className="itinerary-highlight-pill">Active soon</span>
-                          <h3 className="mt-3 text-2xl font-semibold">{titleName}</h3>
-                          <p className="mt-1 text-sm text-neutral-500">{titleNotes}</p>
-                          <div className="mt-4 flex items-center justify-between gap-2 flex-wrap text-xs text-neutral-500">
-                            <span>{titleTime}</span>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <a
-                                href={highlightDirectionsHref}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="itinerary-summary-link"
-                              >
-                                <ExternalLink size={12} aria-hidden />
-                                Directions
-                              </a>
-                              <span>{selectedActivities.length} activities</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })()}
-
-                  <div
-                    className={`itinerary-timeline-shell${
-                      itineraryViewMode === 'calendar' && isMobileCalNarrow
-                        ? ' itinerary-timeline-shell--calendar-mobile max-sm:border-0 max-sm:bg-transparent max-sm:shadow-none max-sm:p-0 max-sm:rounded-none'
-                        : ''
-                    }`}
-                  >
-                    {itineraryViewMode === 'timeline' ? (
-                      <>
-                        <div className="flex items-center justify-between">
-                          <h3 className="text-lg font-semibold">
-                            {selectedDayNumber ? `Day ${selectedDayNumber}: ${formatSingleDateLabel(selectedTimelineDate)}` : `Day: ${formatSingleDateLabel(selectedTimelineDate)}`}
-                          </h3>
-                          <span className="text-xs text-neutral-500">{(activitiesByDay.get(selectedTimelineDate) ?? []).length} activities</span>
-                        </div>
-                        <div className="mt-4 space-y-2">
-                          {(activitiesByDay.get(selectedTimelineDate) ?? []).map((item) => {
-                            const { stayId, activity: a, bookingRef } = item
-                            const rowKey = `${stayId}-${a.id}`
-                            if (bookingRef) {
-                              return (
-                                <div key={rowKey} className="itinerary-activity-row-wrap">
-                                  <div className="itinerary-activity-lane-dot" />
-                                  <div className="itinerary-activity-row">
-                                    <div
-                                      className="itinerary-activity-photo-square itinerary-activity-photo-square--placeholder flex items-center justify-center text-neutral-400 dark:text-neutral-500"
-                                      aria-hidden
-                                    >
-                                      <Car size={20} strokeWidth={1.75} />
-                                    </div>
-                                    <div className="itinerary-activity-main">
-                                      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-start">
-                                        <span className="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-600 text-xs font-medium tabular-nums w-full sm:w-[92px] shrink-0 bg-neutral-50 dark:bg-neutral-800/80">
-                                          {a.time}
-                                        </span>
-                                        <span className="flex-1 min-w-0 w-full sm:min-w-[120px] px-2 py-1 text-xs font-medium text-neutral-800 dark:text-neutral-100">{a.name}</span>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setActiveTab('planner')
-                                            setBookingsTab(bookingRef.tab)
-                                            setBookingFilter(bookingRef.tab)
-                                            openEditBookingForm(bookingRef.tab, bookingRef.id)
-                                          }}
-                                          className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline shrink-0"
-                                        >
-                                          Edit booking
-                                        </button>
-                                      </div>
-                                      {a.notes ? <p className="mt-1 text-xs text-neutral-500">{a.notes}</p> : null}
-                                    </div>
-                                  </div>
-                                </div>
-                              )
-                            }
-                            return (
-                              <div key={rowKey} className="itinerary-activity-row-wrap">
-                                <div className="itinerary-activity-lane-dot" />
-                                <div className="itinerary-activity-row">
-                                  {(a.photoUrl || activityMetaById[a.id]?.photoUrl) ? (
-                                    <img src={a.photoUrl || activityMetaById[a.id]?.photoUrl} alt={a.name} className="itinerary-activity-photo-square" />
-                                  ) : (
-                                    <div className="itinerary-activity-photo-square itinerary-activity-photo-square--placeholder" />
-                                  )}
-                                  <div className="itinerary-activity-main">
-                                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-start">
-                                      <input type="time" value={a.time} onChange={(e) => updateStayActivity(stayId, a.id, { time: e.target.value })} className="px-2 py-1 rounded border border-neutral-200 text-xs w-full sm:w-[92px]" />
-                                      <input value={a.name} onChange={(e) => updateStayActivity(stayId, a.id, { name: e.target.value })} className="flex-1 min-w-0 w-full sm:min-w-[120px] px-2 py-1 rounded border border-neutral-200 text-xs" />
-                                      <input
-                                        value={a.confirmationRef}
-                                        onChange={(e) => updateStayActivity(stayId, a.id, { confirmationRef: e.target.value })}
-                                        placeholder="Conf. #"
-                                        className="px-2 py-1 rounded border border-neutral-200 text-xs w-full sm:w-[100px]"
-                                      />
-                                      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-                                        <input value={a.cost} onChange={(e) => updateStayActivity(stayId, a.id, { cost: e.target.value })} placeholder="Cost" className="flex-1 min-w-0 sm:flex-none px-2 py-1 rounded border border-neutral-200 text-xs sm:w-[88px]" />
-                                        <button type="button" onClick={() => removeStayActivity(stayId, a.id)} className="p-2 rounded text-neutral-500 hover:bg-neutral-100 shrink-0" aria-label="Remove activity"><X size={14} /></button>
-                                      </div>
-                                    </div>
-                                    <input value={a.notes} onChange={(e) => updateStayActivity(stayId, a.id, { notes: e.target.value })} placeholder="Notes" className="mt-1 w-full px-2 py-1 rounded border border-neutral-200 text-xs" />
-                                    {(a.category || activityMetaById[a.id]?.category) ? (
-                                      <span className="itinerary-rec-category mt-1 w-fit">{a.category || activityMetaById[a.id]?.category}</span>
-                                    ) : null}
-                                    {(a.googleMapsUri || activityMetaById[a.id]?.googleMapsUri) ? (
-                                      <a href={a.googleMapsUri || activityMetaById[a.id]?.googleMapsUri} target="_blank" rel="noopener noreferrer" className="itinerary-google-link">
-                                        <ExternalLink size={12} />
-                                        Google
-                                      </a>
-                                    ) : null}
-                                  </div>
-                                </div>
-                              </div>
-                            )
-                          })}
-                          {(activitiesByDay.get(selectedTimelineDate) ?? []).length === 0 ? <p className="text-xs text-neutral-500">No activities for this day yet.</p> : null}
-                        </div>
-                      </>
-                    ) : (
-                      <div className={isMobileCalNarrow ? 'itinerary-calendar-viewport-breakout' : ''}>
-                        {calendarDropError ? (
-                          <p
-                            className={`text-sm text-rose-600 mb-2${isMobileCalNarrow ? ' max-sm:px-4' : ''}`}
-                          >
-                            {calendarDropError}
-                          </p>
-                        ) : null}
-                        {isMobileCalNarrow ? (
-                          <div className="max-sm:px-4 max-sm:pt-3 max-sm:mb-3 itinerary-cal-mobile-upcoming">
-                            <div className="rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 dark:border-neutral-700 dark:bg-neutral-800/60">
-                              <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-                                Accommodation
-                              </p>
-                              {selectedDayPrimaryStay ? (
-                                <div className="mt-1.5 flex items-start justify-between gap-2">
-                                  <div className="min-w-0 flex-1">
-                                    <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate flex items-center gap-1.5">
-                                      <BedDouble size={14} className="shrink-0 opacity-70" aria-hidden />
-                                      {selectedDayPrimaryStay.location || 'Stay'}
-                                    </p>
-                                    {selectedDayPrimaryStay.address?.trim() ? (
-                                      <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400 line-clamp-2">
-                                        {selectedDayPrimaryStay.address.trim()}
-                                      </p>
-                                    ) : null}
-                                  </div>
-                                  {(selectedDayPrimaryStay.address || selectedDayPrimaryStay.location)?.trim() ? (
-                                    <a
-                                      href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
-                                        (selectedDayPrimaryStay.address || selectedDayPrimaryStay.location).trim(),
-                                      )}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-neutral-200 bg-white px-2 py-1 text-[11px] font-semibold text-neutral-700 hover:bg-neutral-100 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
-                                    >
-                                      <MapPin size={12} aria-hidden />
-                                      Map
-                                    </a>
-                                  ) : null}
-                                </div>
-                              ) : (
-                                <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-                                  Add accommodation in Planner to see where you&apos;re staying.
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                        ) : null}
-                        <div className="itinerary-calendar-mode itinerary-calendar-mobile-bleed">
-                        <ItineraryCalendarGrid
-                          visibleDays={visibleCalendarDays}
-                          timelineDays={timelineDays}
-                          activitiesByDay={activitiesByDay}
-                          stays={stays}
-                          staysByDay={staysByDay}
-                          todayIso={todayIso}
-                          nowMinutes={nowMinutes}
-                          selectedTimelineDate={selectedTimelineDate}
-                          onSelectDay={setSelectedTimelineDate}
-                          onCalendarActivityDrop={applyCalendarDrop}
-                          onCalendarActivityResize={applyCalendarActivityResize}
-                          calendarReadOnly={tripIsReadOnly}
-                          onSelectCalendarItem={(item) =>
-                            setCalendarActivityDetail({
-                              stayId: item.stayId,
-                              activity: item.activity,
-                              bookingRef: item.bookingRef,
-                              stayLocation: item.stayLocation,
-                            })
-                          }
-                          weekStartIndex={calendarWeekStartIndex}
-                          onPrevWeek={() => setCalendarWeekStartIndex((i) => Math.max(0, i - 7))}
-                          onNextWeek={() => setCalendarWeekStartIndex((i) => Math.min(calendarMaxStart, i + 7))}
-                          canPrev={canPrevCalendar}
-                          canNext={canNextCalendar}
-                          onShiftCalendarDays={(delta) =>
-                            setCalendarWeekStartIndex((i) => Math.max(0, Math.min(calendarMaxStart, i + delta)))
-                          }
-                          canShiftCalendarPrev={calendarWeekStartIndex > 0}
-                          canShiftCalendarNext={calendarWeekStartIndex < calendarMaxStart}
-                        />
-                        </div>
-                      </div>
-                    )}
-
-                    <div
-                      className={`itinerary-day-recommendations ${
-                        itineraryViewMode === 'calendar'
-                          ? 'mt-8 pt-4 border-t border-neutral-200 dark:border-neutral-700 max-sm:mt-4 max-sm:px-4 max-sm:rounded-xl max-sm:bg-white max-sm:border max-sm:border-neutral-200 max-sm:pt-4 max-sm:shadow-sm dark:max-sm:bg-neutral-900 dark:max-sm:border-neutral-700'
-                          : ''
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <p className="text-sm font-semibold">Recommended for this day</p>
-                        <p className="text-xs text-neutral-500">
-                          Based on {selectedDayPrimaryStay?.location || 'accommodation'} and {selectedDayActivities.length > 0 ? `${selectedDayActivities.length} activities` : 'selected day activity context'}
-                        </p>
-                      </div>
-                      {selectedDayAnchorCoords.length > 0 && !dayRecommendationRadius.isUsing20kmFallback ? (
-                        <p className="mt-1 text-[11px] text-neutral-500">Filtered to within 10km of today’s itinerary anchors.</p>
-                      ) : null}
-                      {dayRecommendationRadius.isUsing20kmFallback ? (
-                        <p className="mt-1 text-[11px] text-neutral-500">Nearby options were limited, increasing search radius to 20km for additional recommendations.</p>
-                      ) : null}
-                      {selectedDayRadiusPartial ? (
-                        <p className="mt-1 text-[11px] text-amber-600">Distance filter is partially applied because some places could not be geo-resolved.</p>
-                      ) : null}
-                      {!selectedDayPrimaryStay ? (
-                        <p className="mt-2 text-xs text-neutral-500">Add accommodation for this day to get stronger recommendations.</p>
-                      ) : recommendedPlaces.loading ? (
-                        <p className="mt-2 text-xs text-neutral-500">Loading recommendations...</p>
-                      ) : recommendedPlaces.error ? (
-                        <p className="mt-2 text-xs text-rose-700">{recommendedPlaces.error}</p>
-                      ) : visibleSelectedDayRecommendations.length > 0 ? (
-                        <ul className="mt-2 space-y-2">
-                          {visibleSelectedDayRecommendations.map((rec) => {
-                            const recTitle = rec.label.split(',')[0]?.trim() || rec.label
-                            const recAddress =
-                              rec.label.split(',').slice(1).join(',').trim() || rec.seedLabel || 'Nearby pick'
-                            return (
-                              <li key={`day-rec-${rec.key}`} className="itinerary-rec-row items-start sm:!items-center">
-                                {rec.photoUrl ? (
-                                  <img src={rec.photoUrl} alt="" className="itinerary-rec-photo" />
-                                ) : (
-                                  <div className="itinerary-rec-photo itinerary-rec-photo--placeholder" />
-                                )}
-                                <div className="min-w-0 flex-1 flex flex-col gap-1">
-                                  <p className="sm:hidden text-sm font-medium text-neutral-800 break-words w-full">{recTitle}</p>
-                                  <div className="sm:hidden flex w-full items-center justify-between gap-2 flex-wrap">
-                                    <a
-                                      href={placeGoogleUrl(rec)}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="itinerary-google-link shrink-0"
-                                    >
-                                      <ExternalLink size={12} />
-                                      Google
-                                    </a>
-                                    <div className="flex items-center gap-1.5 shrink-0">
-                                      <button
-                                        type="button"
-                                        onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
-                                        className="itinerary-rec-dismiss"
-                                        aria-label={`Dismiss ${rec.label}`}
-                                        title="Dismiss recommendation"
-                                      >
-                                        <X size={12} />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => addRecommendationToSelectedDay(rec)}
-                                        className="px-2.5 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold whitespace-nowrap"
-                                      >
-                                        Add to Day
-                                      </button>
-                                    </div>
-                                  </div>
-                                  <div className="hidden sm:flex sm:flex-row sm:items-center sm:gap-3 w-full min-w-0">
-                                    <div className="min-w-0 flex-1 flex flex-col gap-1">
-                                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                                        <p className="text-sm font-medium text-neutral-800 break-words">{recTitle}</p>
-                                        <span className="itinerary-rec-category">{rec.category || 'Other'}</span>
-                                      </div>
-                                      <p className="text-xs text-neutral-500 break-words">{recAddress}</p>
-                                    </div>
-                                    <div className="flex items-center gap-2 shrink-0">
-                                      <a
-                                        href={placeGoogleUrl(rec)}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="itinerary-google-link inline-flex items-center"
-                                      >
-                                        <ExternalLink size={12} />
-                                        Google
-                                      </a>
-                                      <button
-                                        type="button"
-                                        onClick={() => setDismissedRecommendationKeys((prev) => (prev.includes(rec.key) ? prev : [...prev, rec.key]))}
-                                        className="itinerary-rec-dismiss"
-                                        aria-label={`Dismiss ${rec.label}`}
-                                        title="Dismiss recommendation"
-                                      >
-                                        <X size={12} />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => addRecommendationToSelectedDay(rec)}
-                                        className="px-2.5 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold whitespace-nowrap"
-                                      >
-                                        Add to Day
-                                      </button>
-                                    </div>
-                                  </div>
-                                </div>
-                              </li>
-                            )
-                          })}
-                        </ul>
-                      ) : (
-                        <p className="mt-2 text-xs text-neutral-500">No recommendations found for this day yet.</p>
-                      )}
-                    </div>
-
-                    {(() => {
-                      const activeStays = staysByDay.get(selectedTimelineDate) ?? []
-                      const stayOnThisDay = activeStays[0]
-                      const storageStayId = resolveStayIdForActivityStorage(stays, selectedTimelineDate)
-                      const draftKey = `${storageStayId ?? 'none'}|${selectedTimelineDate}`
-                      const draft = activityDrafts[draftKey] ?? { name: '', time: '', confirmationRef: '', cost: '', notes: '' }
-                      if (!storageStayId) {
-                        return (
-                          <p
-                            className={`mt-4 text-xs text-neutral-500${
-                              itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4' : ''
-                            }`}
-                          >
-                            Add at least one accommodation on this trip to save activities (they can be scheduled on any trip day).
-                          </p>
-                        )
-                      }
-                      const activityNamePlaceholder = stayOnThisDay
-                        ? `Add activity for ${stayOnThisDay.location}`
-                        : 'Add activity for this day'
-                      return (
-                        <div
-                          className={`mt-4${
-                            itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4' : ''
-                          }`}
-                        >
-                          <div className="space-y-2">
-                            <input
-                              value={activityPlaceSearchInput}
-                              onChange={(e) => setActivityPlaceSearchInput(e.target.value)}
-                              placeholder="Search activity by name or address"
-                              className="w-full px-2 py-1.5 rounded border border-neutral-200 text-xs"
-                            />
-                            {activityPlaceSearchInput.trim().length >= 2 ? (
-                              <div className="itinerary-search-results">
-                                {activityPlaceSearch.autocompleteError ? (
-                                  <p className="text-xs text-rose-700">{activityPlaceSearch.autocompleteError}</p>
-                                ) : activityPlaceSearch.suggestions.slice(0, 5).map((place) => (
-                                  <button
-                                    key={`activity-place-${place.key}`}
-                                    type="button"
-                                    onClick={() => {
-                                      const placeName = place.label.split(',')[0]?.trim() || place.label
-                                      const placeAddress = place.label.split(',').slice(1).join(',').trim()
-                                      setActivityDrafts((prev) => ({
-                                        ...prev,
-                                        [draftKey]: {
-                                          ...draft,
-                                          name: placeName || draft.name,
-                                          notes: placeAddress || draft.notes,
-                                          confirmationRef: draft.confirmationRef,
-                                        },
-                                      }))
-                                      setDraftPlaceMeta((prev) => ({
-                                        ...prev,
-                                        [draftKey]: {
-                                          ...place,
-                                          googleMapsUri: placeGoogleUrl(place),
-                                          category: resolveRecommendationCategory(place.category, place.label, place.primaryType, place.types),
-                                        },
-                                      }))
-                                      setActivityPlaceSearchInput('')
-                                    }}
-                                    className="itinerary-search-item"
-                                  >
-                                    {place.label}
-                                  </button>
-                                ))
-                                }
-                              </div>
-                            ) : null}
-                          </div>
-                        <div className="mt-2 grid grid-cols-1 md:grid-cols-[1fr_90px_100px_90px_auto] gap-2">
-                          <input value={draft.name} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, name: e.target.value } }))} placeholder={activityNamePlaceholder} className="px-2 py-1.5 rounded border border-neutral-200 text-xs w-full" />
-                          <input type="time" value={draft.time} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, time: e.target.value } }))} className="px-2 py-1.5 rounded border border-neutral-200 text-xs w-full md:w-auto" />
-                          <input
-                            value={draft.confirmationRef}
-                            onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, confirmationRef: e.target.value } }))}
-                            placeholder="Conf. #"
-                            className="px-2 py-1.5 rounded border border-neutral-200 text-xs w-full md:w-auto"
-                          />
-                          <input value={draft.cost} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, cost: e.target.value } }))} placeholder="Cost" className="px-2 py-1.5 rounded border border-neutral-200 text-xs w-full md:w-auto" />
-                          <button type="button" onClick={() => addStayActivity(storageStayId, selectedTimelineDate)} className="px-3 py-2.5 rounded bg-blue-600 text-white text-xs font-semibold w-full md:w-auto min-h-10">Add</button>
-                          <input value={draft.notes} onChange={(e) => setActivityDrafts((prev) => ({ ...prev, [draftKey]: { ...draft, notes: e.target.value } }))} placeholder="Notes" className="md:col-span-5 px-2 py-1.5 rounded border border-neutral-200 text-xs" />
-                          {draftPlaceMeta[draftKey] ? (
-                            <div className="md:col-span-5 flex flex-col items-start gap-2 sm:flex-row sm:items-center text-xs text-neutral-500">
-                              {draftPlaceMeta[draftKey].photoUrl ? <img src={draftPlaceMeta[draftKey].photoUrl} alt={draftPlaceMeta[draftKey].label} className="itinerary-inline-thumb" /> : null}
-                              <span className="truncate">Selected place: {draftPlaceMeta[draftKey].label}</span>
-                              <a href={placeGoogleUrl(draftPlaceMeta[draftKey])} target="_blank" rel="noopener noreferrer" className="itinerary-google-link"><ExternalLink size={12} />Google</a>
-                            </div>
-                          ) : null}
-                        </div>
-                        </div>
-                      )
-                    })()}
-                  </div>
-
-                  {stayError ? (
-                    <p
-                      className={`text-xs text-rose-700${
-                        itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4' : ''
-                      }`}
-                    >
-                      {stayError}
-                    </p>
-                  ) : null}
-                </div>
-              ) : (
-                <p className="mt-6 text-sm text-neutral-500">
-                  {selectedTrip ? 'Set trip dates and add stays to build your day-by-day timeline.' : 'Select a trip to plan your timeline.'}
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'budget' && (
-          <div className={`animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}>
-            <div className="bg-white rounded-3xl shadow-lg p-4 sm:p-8 border border-neutral-100">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-                <div className="min-w-0">
-                  <h2 className="text-3xl font-serif font-bold">Budget</h2>
-                  <p className="text-neutral-500 mt-2">
-                    {selectedTrip
-                      ? `Live totals for ${selectedTrip.country}.`
-                      : 'Select a trip to view categorized budget totals.'}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-indigo-200 bg-indigo-50 pl-4 pr-3 py-3 sm:min-w-[250px] w-full sm:w-fit">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Estimated Budget</p>
-                  <p className="text-4xl font-bold text-indigo-900 mt-1 leading-none">{formatMoneyAmount(budgetTotals.total, displayCurrency)}</p>
-                  <p className="mt-1 text-xs text-indigo-700/80">
-                    {budgetPerDay ? `${formatMoneyAmount(budgetPerDay.total, displayCurrency)}/day` : 'Set trip dates for per-day average'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="mt-6 space-y-3">
-                <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="h-9 w-9 rounded-xl bg-sky-100 text-sky-700 inline-flex items-center justify-center shrink-0">
-                      <Car size={18} />
-                    </span>
-                    <p className="font-bold text-neutral-900">Vehicle</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.vehicle, displayCurrency)}</p>
-                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.vehicle, displayCurrency)}/day` : '—'}</p>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="h-9 w-9 rounded-xl bg-violet-100 text-violet-700 inline-flex items-center justify-center shrink-0">
-                      <Plane size={18} />
-                    </span>
-                    <p className="font-bold text-neutral-900">Flights</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.flights, displayCurrency)}</p>
-                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.flights, displayCurrency)}/day` : '—'}</p>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="h-9 w-9 rounded-xl bg-emerald-100 text-emerald-700 inline-flex items-center justify-center shrink-0">
-                      <BedDouble size={18} />
-                    </span>
-                    <p className="font-bold text-neutral-900">Accommodation</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.accommodation, displayCurrency)}</p>
-                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.accommodation, displayCurrency)}/day` : '—'}</p>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="h-9 w-9 rounded-xl bg-amber-100 text-amber-700 inline-flex items-center justify-center shrink-0">
-                      <Compass size={18} />
-                    </span>
-                    <p className="font-bold text-neutral-900">Activities</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.activities, displayCurrency)}</p>
-                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.activities, displayCurrency)}/day` : '—'}</p>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="h-9 w-9 rounded-xl bg-rose-100 text-rose-700 inline-flex items-center justify-center shrink-0">
-                      <UtensilsCrossed size={18} />
-                    </span>
-                    <p className="font-bold text-neutral-900">Food</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xl font-bold text-neutral-900">{formatMoneyAmount(budgetTotals.food, displayCurrency)}</p>
-                    <p className="text-xs text-neutral-500">{budgetPerDay ? `${formatMoneyAmount(budgetPerDay.food, displayCurrency)}/day` : '—'}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-5 text-xs text-neutral-500">
-                Uses prices from rental car bookings, flight bookings, accommodation entries, restaurant bookings, and activity costs from places to visit.
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'map' && (
-          <div className="animate-in fade-in duration-200">
-            <div className="bg-white rounded-3xl shadow-lg p-4 sm:p-7 border border-neutral-100">
-              <div className="flex flex-col gap-3 min-[480px]:flex-row min-[480px]:items-start min-[480px]:justify-between">
-                <div className="min-w-0">
-                  <h2 className="text-2xl font-serif font-bold">Map</h2>
-                  <p className="text-neutral-500 text-sm">
-                    {selectedTrip ? 'Polarsteps-style route on free OpenStreetMap tiles.' : 'Select a trip to see the map.'}
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  <span className="px-3 py-1 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-semibold">
-                    Overall progress: {overallTripProgressPct !== null ? `${overallTripProgressPct}%` : 'N/A'}
-                  </span>
-                  <span className="px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 text-xs font-semibold">
-                    {currentStay ? `Current stay: ${currentStay.location}` : 'No active stay today'}
-                  </span>
-                </div>
-              </div>
-
-              {selectedTrip ? (
-                <ul className="mt-4 list-none space-y-2.5 text-sm">
-                  {MAP_CATEGORIES.map((c) => {
-                    const vis = mapCategoryVisible[c]
-                    const label = MAP_LEGEND_LABELS[c]
-                    const ariaLabel = `${vis ? 'Hide' : 'Show'} ${MAP_CATEGORY_LABELS[c]} on map`
-                    const Icon = MAP_LEGEND_ICON[c]
-                    const circleBg =
-                      c === 'accommodation'
-                        ? 'bg-blue-600'
-                        : c === 'place'
-                          ? 'bg-emerald-600'
-                          : c === 'flight'
-                            ? 'bg-violet-600'
-                            : c === 'rental'
-                              ? 'bg-indigo-600'
-                              : c === 'dining'
-                                ? 'bg-amber-600'
-                                : 'bg-rose-600'
-                    return (
-                      <li key={c} className="flex items-center gap-3 min-w-0">
-                        <button
-                          type="button"
-                          onClick={() => setMapCategoryVisible((prev) => ({ ...prev, [c]: !prev[c] }))}
-                          aria-pressed={vis}
-                          aria-label={ariaLabel}
-                          className={`inline-flex h-7 w-7 shrink-0 rounded-full items-center justify-center shadow transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 ${circleBg} ${
-                            vis ? '' : 'opacity-45 grayscale'
-                          }`}
-                        >
-                          <Icon className="h-3.5 w-3.5 text-white" strokeWidth={2} aria-hidden />
-                        </button>
-                        <span className={`text-neutral-800 ${vis ? '' : 'text-neutral-400'}`}>{label}</span>
-                      </li>
-                    )
-                  })}
-                  <li className="flex items-center gap-3 min-w-0 pt-1 border-t border-neutral-200 mt-1">
-                    <span className="inline-block h-1 w-8 shrink-0 rounded-full bg-blue-600 opacity-90" aria-hidden />
-                    <span className="text-neutral-700">Outbound: stays and flights (straight line)</span>
-                  </li>
-                  <li className="flex items-center gap-3 min-w-0">
-                    <span
-                      className="inline-block h-1 w-8 shrink-0 border-t-2 border-dotted border-neutral-500 opacity-90"
-                      aria-hidden
-                    />
-                    <span className="text-neutral-700">Return leg</span>
-                  </li>
-                </ul>
-              ) : null}
-
-              <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 p-2 h-[min(520px,calc(100dvh-12rem))] min-h-[280px] sm:h-[520px] sm:min-h-0">
-                {!selectedTrip ? (
-                  <div className="h-full flex items-center justify-center text-sm text-neutral-500">Select a trip to load map locations.</div>
-                ) : (
-                  <TripMap
-                    active={activeTab === 'map'}
-                    mapPoints={mapPoints}
-                    mapCategoryVisible={mapCategoryVisible}
-                    stays={stays}
-                    visitPlaces={visitPlaces}
-                    flights={bookings.flights}
-                    rentalCars={bookings.rentalCars}
-                    restaurants={bookings.restaurants}
-                    country={selectedTrip.country}
-                    tripEndDate={selectedTrip.endDate}
-                    resolvedPointCoords={resolvedPointCoords}
-                    cameraFingerprint={mapCameraFingerprint}
-                  />
-                )}
-              </div>
-
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-                  <p className="text-sm font-semibold">Stay route order</p>
-                  <ol className="mt-2 space-y-1 text-sm text-neutral-700 list-decimal list-inside">
-                    {stays.length === 0 ? <li className="text-neutral-500">No stays added yet.</li> : null}
-                    {stays.map((s) => {
-                      const cinT = (s.checkInTime ?? '').trim()
-                      const coutT = (s.checkOutTime ?? '').trim()
-                      const cinOk = cinT && parseTimeToMinutes(cinT) !== null
-                      const coutOk = coutT && parseTimeToMinutes(coutT) !== null
-                      const timeSuffix =
-                        cinOk || coutOk
-                          ? ` · ${[cinOk ? `in ${normalizeHhMmTime(cinT)}` : '', coutOk ? `out ${normalizeHhMmTime(coutT)}` : '']
-                              .filter(Boolean)
-                              .join(', ')}`
-                          : ''
-                      return (
-                        <li key={s.id}>
-                          {s.location}{' '}
-                          {s.startDate || s.endDate ? `(${formatDateRangeLabel(s.startDate, s.endDate)}${timeSuffix})` : ''}
-                        </li>
-                      )
-                    })}
-                  </ol>
-                </div>
-                <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-                  <p className="text-sm font-semibold">Key locations</p>
-                  <ul className="mt-2 space-y-1 text-sm text-neutral-700">
-                    {mapPoints.length === 0 ? <li className="text-neutral-500">No map locations available.</li> : null}
-                    {mapPoints.slice(0, 16).map((p) => (
-                      <li key={p.key}>
-                        <span className="font-medium">{MAP_CATEGORY_LABELS[p.category]}:</span> {p.label}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'tips' && (
-          <div className="animate-in fade-in duration-200">
-            <div className="bg-white rounded-3xl shadow-lg p-4 sm:p-8 border border-neutral-100">
-              <h2 className="text-3xl font-serif font-bold">Tips</h2>
-              <p className="text-neutral-500 mt-2">Coming next. This area can host packing, timing, and safety notes.</p>
-            </div>
-          </div>
-        )}
         </main>
-        </div>
       </div>
 
       <footer className="relative z-10 bg-neutral-900 text-white/50 py-10 px-4 text-center text-sm">
         <p className="mb-2">{BRAND_FOOTER_TAGLINE}</p>
-        <p>Local-first • Saved in your browser</p>
+        <p>
+          {isSupabaseConfigured() && authSession && !isDevAuthBypass()
+            ? 'Synced to your account • PocketBase'
+            : isSupabaseConfigured()
+              ? 'Sign in to sync • Browser draft until then'
+              : 'Local-only • Saved in this browser'}
+        </p>
       </footer>
     </div>
     <p

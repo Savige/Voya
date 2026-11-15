@@ -82,9 +82,18 @@ export function createMapMarkerContent(kind: MapMarkerKind): HTMLElement {
           : kind === 'restaurant'
             ? 'bg-amber-600'
             : kind === 'activity'
-              ? 'bg-rose-600'
+              ? 'bg-rose-500'
               : 'bg-emerald-600'
-  wrap.className = `h-7 w-7 rounded-full ${color} text-white flex items-center justify-center shadow`
-  wrap.appendChild(createIconSvg(kind))
+  // Stops (activities) use a smaller pin so destinations stay primary on the map.
+  wrap.className =
+    kind === 'activity'
+      ? `h-4 w-4 rounded-full ${color} text-white flex items-center justify-center shadow ring-2 ring-white/90`
+      : `h-7 w-7 rounded-full ${color} text-white flex items-center justify-center shadow`
+  const icon = createIconSvg(kind)
+  if (kind === 'activity') {
+    icon.setAttribute('width', '10')
+    icon.setAttribute('height', '10')
+  }
+  wrap.appendChild(icon)
   return wrap
 }

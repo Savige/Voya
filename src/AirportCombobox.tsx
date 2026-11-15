@@ -91,7 +91,7 @@ export function AirportCombobox({
                 setOpen(false)
               }}
               disabled={disabled}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-lg text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+              className="absolute right-2 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-full text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
               aria-label="Clear airport"
             >
               <X size={16} />

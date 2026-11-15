@@ -2,7 +2,11 @@ import { normalizeEmail } from './auth'
 import { getPocketBase } from './pocketbaseClient'
 import type { Trip, TripsState } from './tripTypes'
 import { stripSharingFromTrip } from './tripTypes'
-import { parseSingleTripFromUnknown, parseTripsFromUnknown } from './tripStorage'
+import {
+  dedupeOverlappingStays,
+  parseSingleTripFromUnknown,
+  parseTripsFromUnknown,
+} from './tripStorage'
 
 type UserTripsRow = {
   id: string
@@ -39,6 +43,12 @@ function requireUserId(): string {
   return id
 }
 
+function isNotFoundError(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false
+  const status = (e as { status?: number }).status
+  return status === 404
+}
+
 export async function fetchUserTripsState(): Promise<TripsState> {
   const pb = getPocketBase()
   const userId = pb.authStore.record?.id
@@ -48,10 +58,16 @@ export async function fetchUserTripsState(): Promise<TripsState> {
     const row = await pb.collection('user_trips').getFirstListItem<UserTripsRow>(`user="${userId}"`)
     if (row.payload == null) return { trips: [], selectedTripId: null }
     return parseTripsFromUnknown(row.payload)
-  } catch {
-    return { trips: [], selectedTripId: null }
+  } catch (e) {
+    // Missing row = empty. Network / 5xx must not look like "no trips".
+    if (isNotFoundError(e)) return { trips: [], selectedTripId: null }
+    throw e
   }
 }
+
+export type FetchMergedResult =
+  | { ok: true; state: TripsState }
+  | { ok: false; error: string }
 
 function mergePersonalAndShared(
   personal: TripsState,
@@ -106,9 +122,16 @@ function mergePersonalAndShared(
 }
 
 export async function fetchMergedTripsState(): Promise<TripsState> {
+  const result = await fetchMergedTripsStateSafe()
+  if (!result.ok) throw new Error(result.error)
+  return result.state
+}
+
+/** Load trips without treating network failures as an empty account. */
+export async function fetchMergedTripsStateSafe(): Promise<FetchMergedResult> {
   const pb = getPocketBase()
   const userId = pb.authStore.record?.id
-  if (!userId) return { trips: [], selectedTripId: null }
+  if (!userId) return { ok: true, state: { trips: [], selectedTripId: null } }
 
   let personal: TripsState = { trips: [], selectedTripId: null }
   let preferredSelectedId: string | null = null
@@ -121,8 +144,11 @@ export async function fetchMergedTripsState(): Promise<TripsState> {
         preferredSelectedId = typeof raw === 'string' ? raw : null
       }
     }
-  } catch {
-    // no personal row yet
+  } catch (e) {
+    if (!isNotFoundError(e)) {
+      const msg = e instanceof Error ? e.message : 'Failed to load trips'
+      return { ok: false, error: msg }
+    }
   }
 
   let ownedRows: SharedItineraryRow[] = []
@@ -132,6 +158,8 @@ export async function fetchMergedTripsState(): Promise<TripsState> {
     })
     ownedRows = owned.filter((r) => !r.revoked_at)
   } catch (e) {
+    // Shared fetch failure should not wipe personal trips, but if personal
+    // also failed we'd already have returned. Log and continue with personal.
     console.warn('shared_itineraries owned fetch', e)
   }
 
@@ -146,18 +174,63 @@ export async function fetchMergedTripsState(): Promise<TripsState> {
     console.warn('shared_itinerary_members fetch', e)
   }
 
-  return mergePersonalAndShared(personal, ownedRows, memberRows, preferredSelectedId)
+  return {
+    ok: true,
+    state: mergePersonalAndShared(personal, ownedRows, memberRows, preferredSelectedId),
+  }
 }
 
-export async function upsertUserTrips(payload: TripsState): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function upsertUserTrips(
+  payload: TripsState,
+  opts?: { allowStayReduction?: boolean },
+): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const pb = getPocketBase()
     const userId = requireUserId()
+    const cleaned: TripsState = {
+      ...payload,
+      trips: payload.trips.map((t) => ({
+        ...t,
+        stays: dedupeOverlappingStays(t.stays ?? []),
+      })),
+    }
     try {
       const existing = await pb.collection('user_trips').getFirstListItem<UserTripsRow>(`user="${userId}"`)
-      await pb.collection('user_trips').update(existing.id, { payload })
-    } catch {
-      await pb.collection('user_trips').create({ user: userId, payload })
+      const existingState = existing.payload != null ? parseTripsFromUnknown(existing.payload) : null
+      // Block accidental wipe: empty trip list overwriting a non-empty account.
+      if (
+        existingState &&
+        cleaned.trips.length === 0 &&
+        existingState.trips.length > 0
+      ) {
+        console.warn('user_trips save blocked: refusing to overwrite with empty trips')
+        return { ok: false, error: 'blocked-empty-trips-overwrite' }
+      }
+      // Block stay-count regression on trips that still exist (stale tabs /
+      // shared→personal races). Whole-trip deletes remain allowed.
+      // Intentional stop deletes pass allowStayReduction.
+      // Compare against deduped previous counts so collapsing recovery dups is allowed.
+      if (existingState && !opts?.allowStayReduction) {
+        const existingById = new Map(existingState.trips.map((t) => [t.id, t]))
+        for (const next of cleaned.trips) {
+          const prev = existingById.get(next.id)
+          if (!prev) continue
+          const prevN = dedupeOverlappingStays(prev.stays ?? []).length
+          const nextN = next.stays?.length ?? 0
+          if (nextN < prevN) {
+            console.warn('user_trips save blocked: refusing stay loss', {
+              tripId: next.id,
+              prevN,
+              nextN,
+            })
+            return { ok: false, error: 'blocked-stay-loss' }
+          }
+        }
+      }
+      await pb.collection('user_trips').update(existing.id, { payload: cleaned })
+    } catch (e) {
+      if (!isNotFoundError(e)) throw e
+      await pb.collection('user_trips').create({ user: userId, payload: cleaned })
     }
     return { ok: true }
   } catch (e) {
@@ -281,6 +354,29 @@ export async function revokeSharedItineraryEntire(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const pb = getPocketBase()
+    const userId = requireUserId()
+    // Snapshot shared trip_json into personal user_trips BEFORE revoking, so we
+    // never fall back to a stale personal copy that omitted the shared trip.
+    try {
+      const share = await pb.collection('shared_itineraries').getOne<SharedItineraryRow>(sharedItineraryId)
+      const parsed = parseSingleTripFromUnknown(share.trip_json)
+      if (parsed && share.owner === userId) {
+        const personal = await fetchUserTripsState()
+        const sourceId = share.source_trip_id || parsed.id
+        const withId = { ...parsed, id: sourceId }
+        const others = personal.trips.filter((t) => t.id !== sourceId && t.id !== parsed.id)
+        const next: TripsState = {
+          trips: [...others, withId],
+          selectedTripId: personal.selectedTripId || sourceId,
+        }
+        const saved = await upsertUserTrips(next)
+        if (!saved.ok) {
+          console.warn('revoke: personal snapshot save failed', saved.error)
+        }
+      }
+    } catch (e) {
+      console.warn('revoke: could not mirror shared trip to personal', e)
+    }
     await pb.collection('shared_itineraries').update(sharedItineraryId, {
       revoked_at: new Date().toISOString(),
     })
@@ -397,6 +493,67 @@ export async function upsertProfileDisplayName(displayName: string): Promise<voi
   } catch {
     // optional
   }
+}
+
+/** Parse one or more send-from addresses (comma/semicolon/whitespace separated). */
+export function parseBookingFromEmails(raw: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const part of raw.split(/[,;\s]+/)) {
+    const e = part.trim() ? normalizeEmail(part) : ''
+    if (!e || seen.has(e)) continue
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) continue
+    seen.add(e)
+    out.push(e)
+  }
+  return out
+}
+
+/** Email address(es) you forward booking confirmations from (may differ from login email). */
+export async function upsertBookingFromEmail(fromEmail: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const pb = getPocketBase()
+    const userId = pb.authStore.record?.id
+    if (!userId) return { ok: false, error: 'Not signed in.' }
+    const trimmed = fromEmail.trim()
+    if (!trimmed) {
+      const updated = await pb.collection('users').update(userId, { booking_from_email: null })
+      pb.authStore.save(pb.authStore.token, updated)
+      return { ok: true }
+    }
+    const emails = parseBookingFromEmails(trimmed)
+    if (emails.length === 0) {
+      return { ok: false, error: 'Enter one or more valid email addresses (comma-separated).' }
+    }
+    // Reject if any token looked like an email but failed validation.
+    const tokens = trimmed.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean)
+    if (tokens.length !== emails.length) {
+      return { ok: false, error: 'Enter one or more valid email addresses (comma-separated).' }
+    }
+    const normalized = emails.join(', ')
+    const updated = await pb.collection('users').update(userId, {
+      booking_from_email: normalized,
+    })
+    pb.authStore.save(pb.authStore.token, updated)
+    return { ok: true }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Could not save forwarding email.'
+    if (/unique|already|duplicate/i.test(msg)) {
+      return { ok: false, error: 'That email is already used by another Waypoint account.' }
+    }
+    return { ok: false, error: msg }
+  }
+}
+
+export function bookingFromEmailFromAuthRecord(record: { booking_from_email?: unknown; email?: unknown } | null | undefined): string {
+  if (record && typeof record.booking_from_email === 'string' && record.booking_from_email.trim()) {
+    const list = parseBookingFromEmails(record.booking_from_email)
+    if (list.length > 0) return list.join(', ')
+  }
+  if (record && typeof record.email === 'string' && record.email.trim()) {
+    return normalizeEmail(record.email)
+  }
+  return ''
 }
 
 export function authSessionFromPocketBaseUser(user: {

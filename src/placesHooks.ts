@@ -80,12 +80,17 @@ export function useDestinationSuggestions(query: string) {
   const suggestions = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return []
-    const source = remoteSuggestions.length > 0 ? remoteSuggestions : allFallbackSuggestions
-    return source
+    // Remote Nominatim labels are already matched server-side — don't over-filter
+    // (e.g. "東京都, 日本" for "tokyo"). Fallbacks still use prefix matching.
+    if (remoteSuggestions.length > 0) {
+      return remoteSuggestions.slice(0, 9)
+    }
+    return allFallbackSuggestions
       .filter((name) => {
         const lower = name.toLowerCase()
         if (lower.startsWith(q)) return true
-        return lower.split(/\s+/).some((part) => part.startsWith(q))
+        if (lower.includes(q)) return true
+        return lower.split(/[\s,]+/).some((part) => part.startsWith(q))
       })
       .slice(0, 9)
   }, [query, remoteSuggestions, allFallbackSuggestions])

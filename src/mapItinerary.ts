@@ -26,7 +26,7 @@ export const MAP_CATEGORY_LABELS: Record<MapCategory, string> = {
   flight: 'Flights',
   rental: 'Rental cars',
   dining: 'Dining',
-  activity: 'Activities',
+  activity: 'Stops',
 }
 
 /** Short map legend text (client-facing). */
@@ -36,7 +36,7 @@ export const MAP_LEGEND_LABELS: Record<MapCategory, string> = {
   flight: 'Flight airports',
   rental: 'Car pickup and drop-off',
   dining: 'Restaurant bookings',
-  activity: 'Planned activities',
+  activity: 'Places of interest',
 }
 
 /** Visual marker variant for DOM marker content. */
@@ -61,7 +61,7 @@ export const defaultMapCategoryVisibility = (): Record<MapCategory, boolean> =>
     flight: true,
     rental: true,
     dining: true,
-    activity: false,
+    activity: true,
   }) as Record<MapCategory, boolean>
 
 function parseIsoDate(iso?: string): Date | null {
@@ -132,7 +132,10 @@ export function buildMapPointsFromTrip(
       label: s.location,
       markerKind: 'stay',
       category: 'accommodation',
-      addressHint: s.address || s.location,
+      addressHint:
+        s.accommodations?.find((a) => a.confirmationRef.trim())?.address ||
+        s.accommodations?.[0]?.address ||
+        s.location,
       startDate: s.startDate,
       endDate: s.endDate,
       lat: s.lat,
@@ -272,10 +275,13 @@ export function buildRouteEvents(
   }
 
   for (const s of stays) {
-    const cinT = (s.checkInTime ?? '').trim()
+    const primary =
+      s.accommodations?.find((a) => a.confirmationRef.trim()) || s.accommodations?.[0] || null
+    const cinT = (primary?.checkInTime ?? '').trim()
     const hasCin = cinT.length > 0 && parseTimeToMinutes(cinT) !== null
+    const start = (primary?.checkIn || s.startDate || '').trim()
     const ts =
-      s.startDate && hasCin ? pointTs(s.startDate, cinT, s.createdAt) : tsFromIso(s.startDate, s.createdAt)
+      start && hasCin ? pointTs(start, cinT, s.createdAt) : tsFromIso(start || s.startDate, s.createdAt)
     pushIf('accommodation', ts, `stay:${s.id}`)
   }
 
