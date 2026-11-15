@@ -960,7 +960,6 @@ type TripRoutePlannerProps = {
   onAddAccommodation: (stayId: string, lodgingId?: string | 'new') => void
   onDeleteStay: (stayId: string) => void
   onAddFlight: () => void
-  onOpenCar: (carId?: string) => void
   onUpdateStayDates: (patches: Array<{ id: string; startDate: string; endDate: string }>) => void
   /** Preferred nights +/- — App applies from latest trip state (avoids stale jumps). */
   onAdjustStayNights?: (stayId: string, delta: number) => void
@@ -981,7 +980,6 @@ export function TripRoutePlanner({
   onAddAccommodation,
   onDeleteStay,
   onAddFlight,
-  onOpenCar,
   onUpdateStayDates,
   onAdjustStayNights,
   onOpenFlight,

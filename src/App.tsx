@@ -4911,24 +4911,6 @@ export default function App() {
     setFlightWizardOpen(false)
   }
 
-  const openAddCarFromPlanner = () => {
-    if (tripIsReadOnly) return
-    resetBookingFormInputs()
-    setEditingBookingForm(null)
-    setEditingStayId(null)
-    setBookingsTab('rentalCar')
-    setIsBookingFormOpen(true)
-  }
-
-  const openEditCarFromPlanner = (carId?: string) => {
-    if (tripIsReadOnly) return
-    if (carId) {
-      openEditBookingForm('rentalCar', carId)
-      return
-    }
-    openAddCarFromPlanner()
-  }
-
   const saveTripDates = (startDate = tripStartDateInput, endDate = tripEndDateInput) => {
     if (!selectedTrip || !state.selectedTripId) return false
     if (tripIsReadOnly) return false
@@ -7142,7 +7124,6 @@ export default function App() {
                 })
               }}
               onAddFlight={openAddFlightFromPlanner}
-              onOpenCar={openEditCarFromPlanner}
               onUpdateStayDates={updateStayDates}
               onAdjustStayNights={adjustStayNights}
               onOpenFlight={(id) => setEditingFlightId(id)}
