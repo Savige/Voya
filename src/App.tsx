@@ -7174,6 +7174,518 @@ export default function App() {
                 })()
               : null}
 
+          </div>
+        )}
+
+        {activeTab === 'itinerary' && (
+          <div
+            className={`animate-in fade-in duration-200${itineraryViewMode === 'calendar' ? ' max-sm:overflow-x-hidden' : ''}${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
+          >
+            <div
+              className={`bg-white rounded-3xl shadow-lg border border-neutral-100 p-4 sm:p-7 dark:border-neutral-800 dark:bg-neutral-900${
+                itineraryViewMode === 'calendar' && isMobileCalNarrow
+                  ? ' max-sm:bg-transparent max-sm:shadow-none max-sm:border-0 max-sm:p-0 max-sm:rounded-none'
+                  : ''
+              }`}
+            >
+              <div
+                className={`flex items-center justify-between gap-4 flex-wrap${
+                  itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4 max-sm:pb-2' : ''
+                }`}
+              >
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                    Journey
+                  </p>
+                  <h2 className="text-2xl font-serif font-bold">Itinerary</h2>
+                  <p
+                    className={`text-neutral-500 text-sm${itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:hidden' : ''}`}
+                  >
+                    Your path through the destinations — add stops along the way.
+                  </p>
+                </div>
+                <div className="flex shrink-0 rounded-full border border-neutral-200 bg-neutral-50 p-1 dark:border-neutral-600 dark:bg-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => setItineraryViewMode('destinations')}
+                    className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
+                      itineraryViewMode === 'destinations'
+                        ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-950 dark:text-neutral-100'
+                        : 'text-neutral-600 dark:text-neutral-300'
+                    }`}
+                  >
+                    Destinations
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setItineraryViewMode('calendar')}
+                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-semibold ${
+                      itineraryViewMode === 'calendar'
+                        ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-950 dark:text-neutral-100'
+                        : 'text-neutral-600 dark:text-neutral-300'
+                    }`}
+                  >
+                    <Calendar size={14} aria-hidden />
+                    Calendar
+                  </button>
+                </div>
+              </div>
+
+              {!selectedTrip ? (
+                <p className="mt-6 text-sm text-neutral-500">Select a trip to plan stops.</p>
+              ) : timelineDays.length === 0 ? (
+                <p className="mt-6 text-sm text-neutral-500">
+                  Set trip dates and add destinations in Planner to build your itinerary.
+                </p>
+              ) : itineraryViewMode === 'destinations' ? (
+                <ItineraryDestinationsView
+                  stays={stays}
+                  readOnly={tripIsReadOnly}
+                  tripCountry={selectedTrip.country}
+                  stopComposer={stopComposer}
+                  onOpenStopComposer={(stayId, date) => {
+                    setStopComposer({ stayId, date })
+                    setActivityPlaceSearchInput('')
+                    setSelectedTimelineDate(date)
+                  }}
+                  onCloseStopComposer={() => setStopComposer(null)}
+                  activityDrafts={activityDrafts}
+                  setActivityDrafts={setActivityDrafts}
+                  draftPlaceMeta={draftPlaceMeta}
+                  setDraftPlaceMeta={setDraftPlaceMeta}
+                  activityPlaceSearchInput={activityPlaceSearchInput}
+                  setActivityPlaceSearchInput={setActivityPlaceSearchInput}
+                  activityPlaceSuggestions={activityPlaceSearch.suggestions}
+                  activityPlaceSearchError={activityPlaceSearch.autocompleteError}
+                  placeGoogleUrl={placeGoogleUrl}
+                  resolveRecommendationCategory={resolveRecommendationCategory}
+                  onAddStop={addStayActivity}
+                  onRemoveStop={removeStayActivity}
+                  onOpenStop={(stayId, activity, stayLocation) =>
+                    setCalendarActivityDetail({
+                      stayId,
+                      activity,
+                      stayLocation,
+                    })
+                  }
+                  onOpenPlanner={() => {
+                    setActiveTab('planner')
+                    openAddStayFromPlanner()
+                  }}
+                  onOpenOnMap={(stayId) => {
+                    setMapFocusStayId(stayId)
+                    setActiveTab('map')
+                  }}
+                  onEditLodging={(stayId, lodgingId) => {
+                    openAddAccommodationForStay(stayId, lodgingId)
+                  }}
+                  formatDayLabel={formatSingleDateLabel}
+                  formatStayRange={(start, end) => formatDateRangeLabel(start, end)}
+                />
+              ) : (
+                <div
+                  className={`mt-5${
+                    isMobileCalNarrow ? ' max-sm:mt-3 max-sm:px-0' : ''
+                  }`}
+                >
+                  {calendarDropError ? (
+                    <p className={`text-sm text-rose-600 mb-2${isMobileCalNarrow ? ' max-sm:px-4' : ''}`}>
+                      {calendarDropError}
+                    </p>
+                  ) : null}
+                  {isMobileCalNarrow ? (
+                    <div className="max-sm:px-4 max-sm:pt-1 max-sm:mb-3">
+                      <div className="rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 dark:border-neutral-700 dark:bg-neutral-800/60">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                          Lodging
+                        </p>
+                        {selectedDayPrimaryStay ? (
+                          <div className="mt-1.5 min-w-0">
+                            {(() => {
+                              const dayLodging = stayAccommodationForDate(
+                                selectedDayPrimaryStay,
+                                selectedTimelineDate,
+                              )
+                              const label = dayLodging
+                                ? (dayLodging.name || dayLodging.confirmationRef || '').trim()
+                                : ''
+                              const addr = stayLodgingAddress(
+                                selectedDayPrimaryStay,
+                                selectedTimelineDate,
+                              )
+                              return (
+                                <>
+                                  <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate flex items-center gap-1.5">
+                                    <BedDouble size={14} className="shrink-0 opacity-70" aria-hidden />
+                                    {label || selectedDayPrimaryStay.location || 'No lodging'}
+                                  </p>
+                                  {addr ? (
+                                    <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400 line-clamp-2">
+                                      {addr}
+                                    </p>
+                                  ) : null}
+                                </>
+                              )
+                            })()}
+                          </div>
+                        ) : (
+                          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+                            Add destinations in Planner to see lodging by day.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className={isMobileCalNarrow ? 'itinerary-calendar-viewport-breakout' : ''}>
+                    <div className="itinerary-calendar-mode itinerary-calendar-mobile-bleed">
+                      <ItineraryCalendarGrid
+                        visibleDays={visibleCalendarDays}
+                        timelineDays={timelineDays}
+                        activitiesByDay={activitiesByDay}
+                        stays={stays}
+                        staysByDay={staysByDay}
+                        todayIso={todayIso}
+                        nowMinutes={nowMinutes}
+                        selectedTimelineDate={selectedTimelineDate}
+                        onSelectDay={setSelectedTimelineDate}
+                        onCalendarActivityDrop={applyCalendarDrop}
+                        onCalendarActivityResize={applyCalendarActivityResize}
+                        calendarReadOnly={tripIsReadOnly}
+                        onSelectCalendarItem={(item) =>
+                          setCalendarActivityDetail({
+                            stayId: item.stayId,
+                            activity: item.activity,
+                            bookingRef: item.bookingRef,
+                            stayLocation: item.stayLocation,
+                          })
+                        }
+                        weekStartIndex={calendarWeekStartIndex}
+                        onPrevWeek={() => setCalendarWeekStartIndex((i) => Math.max(0, i - 7))}
+                        onNextWeek={() =>
+                          setCalendarWeekStartIndex((i) => Math.min(calendarMaxStart, i + 7))
+                        }
+                        canPrev={canPrevCalendar}
+                        canNext={canNextCalendar}
+                        onShiftCalendarDays={(delta) =>
+                          setCalendarWeekStartIndex((i) =>
+                            Math.max(0, Math.min(calendarMaxStart, i + delta)),
+                          )
+                        }
+                        canShiftCalendarPrev={calendarWeekStartIndex > 0}
+                        canShiftCalendarNext={calendarWeekStartIndex < calendarMaxStart}
+                      />
+                    </div>
+                  </div>
+                  {stayError ? (
+                    <p
+                      className={`mt-3 text-xs text-rose-700${isMobileCalNarrow ? ' max-sm:px-4' : ''}`}
+                    >
+                      {stayError}
+                    </p>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'budget' && (
+          <div className={`animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}>
+            <div className="rounded-3xl border border-neutral-100 bg-white p-4 shadow-lg sm:p-5 dark:border-neutral-800 dark:bg-neutral-900">
+              {!selectedTrip ? (
+                <p className="text-neutral-500 dark:text-neutral-400">Select a trip to view budget.</p>
+              ) : null}
+
+              {selectedTrip ? (
+                <>
+                  <div className="max-w-md">
+                    {(() => {
+                      const unitRate = budgetFxSnapshot
+                        ? rateBetween(budgetFromCurrency, budgetToCurrency, budgetFxSnapshot)
+                        : null
+                      const rateLabel =
+                        unitRate != null && Number.isFinite(unitRate)
+                          ? formatConverterAmount(unitRate, budgetToCurrency)
+                          : '—'
+                      const fromName = currencyFullName(budgetFromCurrency)
+                      const toName = currencyFullName(budgetToCurrency)
+                      const fieldClass =
+                        'w-full rounded-lg border border-neutral-200 bg-neutral-50 px-2.5 py-2 text-sm font-medium tabular-nums text-neutral-900 outline-none focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-neutral-500'
+                      return (
+                        <>
+                          <div className="mb-2.5">
+                            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                              1 {fromName} equals
+                            </p>
+                            <p className="mt-0.5 text-xl font-semibold tracking-tight">
+                              <span className="tabular-nums text-neutral-900 dark:text-white">
+                                {rateLabel}
+                              </span>{' '}
+                              <span className="font-medium text-neutral-500 dark:text-neutral-400">
+                                {toName}
+                              </span>
+                            </p>
+                          </div>
+                          <div className="grid gap-1.5">
+                            <div className="grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.25fr)] gap-1.5">
+                              <input
+                                id="budget-fx-from"
+                                type="text"
+                                inputMode="decimal"
+                                aria-label="Amount to convert"
+                                value={budgetFromAmount}
+                                onChange={(e) => {
+                                  setBudgetFxLastEdited('from')
+                                  setBudgetFromAmount(e.target.value)
+                                }}
+                                placeholder="0"
+                                className={fieldClass}
+                              />
+                              <CurrencySelect
+                                value={budgetFromCurrency}
+                                currencies={CONVERTER_CURRENCIES}
+                                showFullName
+                                aria-label="From currency"
+                                title="From currency"
+                                onChange={(code) => {
+                                  setBudgetFromCurrency(code)
+                                  setBudgetFxLastEdited('from')
+                                }}
+                                className="w-full outline-none focus:border-neutral-400 dark:focus:border-neutral-500"
+                              />
+                            </div>
+                            <div className="grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.25fr)] gap-1.5">
+                              <input
+                                id="budget-fx-to"
+                                type="text"
+                                inputMode="decimal"
+                                aria-label="Converted amount"
+                                value={budgetToAmount}
+                                onChange={(e) => {
+                                  setBudgetFxLastEdited('to')
+                                  setBudgetToAmount(e.target.value)
+                                }}
+                                placeholder="0"
+                                className={fieldClass}
+                              />
+                              <CurrencySelect
+                                value={budgetToCurrency}
+                                currencies={CONVERTER_CURRENCIES}
+                                showFullName
+                                aria-label="To currency"
+                                title="To currency"
+                                onChange={(code) => {
+                                  setBudgetToCurrency(code)
+                                  setBudgetFxLastEdited('from')
+                                }}
+                                className="w-full outline-none focus:border-neutral-400 dark:focus:border-neutral-500"
+                              />
+                            </div>
+                          </div>
+                        </>
+                      )
+                    })()}
+                  </div>
+
+                  <div className="mt-5 border-t border-neutral-200 pt-4 dark:border-neutral-700">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                      Trip total
+                    </p>
+                    <p className="mt-0.5 text-2xl font-semibold tabular-nums tracking-tight text-neutral-900 dark:text-white">
+                      {tripBudgetSummary.totalDisplay}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-neutral-600 dark:text-neutral-300">
+                      <span>
+                        Paid{' '}
+                        <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+                          {tripBudgetSummary.paidDisplay}
+                        </span>
+                      </span>
+                      <span>
+                        Owing{' '}
+                        <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+                          {tripBudgetSummary.owingDisplay}
+                        </span>
+                      </span>
+                    </div>
+
+                    {tripBudgetSummary.itemCount === 0 ? (
+                      <p className="mt-4 text-sm text-neutral-500 dark:text-neutral-400">
+                        No priced bookings yet. Add costs on flights, cars, lodging, or activities.
+                      </p>
+                    ) : (
+                      <div className="mt-4 space-y-3">
+                        {tripBudgetSummary.categories.map((group) => (
+                          <section
+                            key={group.id}
+                            className="rounded-2xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-700 dark:bg-neutral-950/50"
+                          >
+                            <div className="mb-2 flex items-center justify-between gap-3">
+                              <h3 className="text-sm font-semibold text-neutral-800 dark:text-neutral-100">
+                                {group.label}
+                              </h3>
+                              <span className="text-xs font-semibold tabular-nums text-neutral-600 dark:text-neutral-300">
+                                {group.display}
+                              </span>
+                            </div>
+                            <ul className="space-y-1.5">
+                              {group.items.map((item) => (
+                                <li
+                                  key={item.id}
+                                  className="flex items-start justify-between gap-3 rounded-lg border border-neutral-200 bg-white px-2.5 py-2 dark:border-neutral-700 dark:bg-neutral-900"
+                                >
+                                  <span className="min-w-0 flex-1 truncate text-sm text-neutral-800 dark:text-neutral-200">
+                                    {item.label}
+                                  </span>
+                                  <span className="shrink-0 text-right text-sm font-medium tabular-nums text-neutral-900 dark:text-neutral-100">
+                                    {formatMoneyWithOriginal(item.display, item.original)}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </section>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'map' && (
+          <div className="animate-in fade-in duration-200 max-lg:contents">
+            {/* Phone/tablet: fill main edge-to-edge. Desktop: card shell. */}
+            <div
+              ref={mapStarOriginRef}
+              className={`overflow-hidden max-lg:h-[calc(100dvh-var(--waypoint-map-top,10.5rem)-env(safe-area-inset-bottom,0px))] max-lg:min-h-[280px] max-lg:rounded-none max-lg:shadow-none max-lg:ring-0 lg:h-[640px] lg:min-h-[320px] lg:rounded-2xl lg:shadow-2xl lg:ring-1 lg:ring-white/70 dark:lg:ring-neutral-700/80 ${
+                mapGlobeChrome ? 'bg-transparent' : 'bg-[#02040a]'
+              }`}
+            >
+              {!selectedTrip ? (
+                <div className="flex h-full items-center justify-center text-sm text-neutral-400">
+                  Select a trip to load map locations.
+                </div>
+              ) : (
+                <ErrorBoundary label="Map">
+                  <Suspense
+                    fallback={
+                      <div className="flex h-full items-center justify-center text-sm text-neutral-400">
+                        Loading map…
+                      </div>
+                    }
+                  >
+                    <TripMap
+                      active={activeTab === 'map'}
+                      mapPoints={mapPoints}
+                      mapCategoryVisible={mapCategoryVisible}
+                      stays={stays}
+                      visitPlaces={visitPlaces}
+                      flights={bookings.flights}
+                      rentalCars={bookings.rentalCars}
+                      restaurants={bookings.restaurants}
+                      country={selectedTrip.country}
+                      tripEndDate={selectedTrip.endDate}
+                      resolvedPointCoords={resolvedPointCoords}
+                      cameraFingerprint={mapCameraFingerprint}
+                      pageStarfield
+                      skyLit={mapSkyLit}
+                      onGlobeChromeChange={setMapGlobeChrome}
+                      onBasemapChange={setMapBasemap}
+                      focusStayId={mapFocusStayId}
+                      onFocusStayConsumed={() => setMapFocusStayId(null)}
+                    />
+                  </Suspense>
+                </ErrorBoundary>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'tips' && (
+          <div
+            className={`space-y-8 animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
+          >
+            <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 p-7">
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div>
+                  <h2 className="text-2xl font-serif font-bold">Pack List</h2>
+                  <p className="text-neutral-500 text-sm">Group what to bring by category and track packing progress.</p>
+                </div>
+                <span className="px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 text-xs font-semibold">
+                  {packedCount} / {packList.length} packed
+                </span>
+              </div>
+
+              <form
+                className="mt-4 grid grid-cols-1 md:grid-cols-[1fr_220px_auto] gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  addPackListItem()
+                }}
+              >
+                <input
+                  value={packListTextInput}
+                  onChange={(e) => setPackListTextInput(e.target.value)}
+                  disabled={!selectedTrip}
+                  placeholder={selectedTrip ? 'Add item (e.g. Passport, Charger, Jacket)' : 'Select a trip first'}
+                  className="px-3 py-2 rounded-xl border border-neutral-200"
+                />
+                <input
+                  value={packListCategoryInput}
+                  onChange={(e) => setPackListCategoryInput(e.target.value)}
+                  disabled={!selectedTrip}
+                  list="pack-list-categories"
+                  placeholder="Category"
+                  className="px-3 py-2 rounded-xl border border-neutral-200"
+                />
+                <datalist id="pack-list-categories">
+                  {PACK_LIST_CATEGORIES.map((category) => (
+                    <option key={category} value={category} />
+                  ))}
+                </datalist>
+                <button type="submit" disabled={!selectedTrip} className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold disabled:opacity-50">
+                  Add
+                </button>
+              </form>
+
+              {packList.length === 0 ? (
+                <p className="mt-5 text-sm text-neutral-500">{selectedTrip ? 'No items yet. Add your first packing item above.' : 'Select a trip to build a pack list.'}</p>
+              ) : (
+                <div className="mt-5 space-y-4">
+                  {packListGroups.map(([category, items]) => (
+                    <section key={category} className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <h3 className="text-sm font-semibold text-neutral-800">{category}</h3>
+                        <span className="text-xs text-neutral-500">
+                          {items.filter((x) => x.done).length} / {items.length}
+                        </span>
+                      </div>
+                      <ul className="space-y-2">
+                        {items.map((item) => (
+                          <li key={item.id} className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2">
+                            <input
+                              type="checkbox"
+                              checked={item.done}
+                              onChange={() => togglePackListItem(item.id)}
+                              className="h-4 w-4 rounded border-neutral-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className={`flex-1 text-sm ${item.done ? 'line-through text-neutral-400' : 'text-neutral-800'}`}>{item.text}</span>
+                            <button type="button" onClick={() => deletePackListItem(item.id)} className="text-xs text-neutral-600 hover:text-neutral-900">
+                              Delete
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
             {isBookingFormOpen
               ? createPortal(
               <div className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-4">
@@ -7825,517 +8337,7 @@ export default function App() {
                   )
                 })()
               : null}
-          </div>
-        )}
 
-        {activeTab === 'itinerary' && (
-          <div
-            className={`animate-in fade-in duration-200${itineraryViewMode === 'calendar' ? ' max-sm:overflow-x-hidden' : ''}${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
-          >
-            <div
-              className={`bg-white rounded-3xl shadow-lg border border-neutral-100 p-4 sm:p-7 dark:border-neutral-800 dark:bg-neutral-900${
-                itineraryViewMode === 'calendar' && isMobileCalNarrow
-                  ? ' max-sm:bg-transparent max-sm:shadow-none max-sm:border-0 max-sm:p-0 max-sm:rounded-none'
-                  : ''
-              }`}
-            >
-              <div
-                className={`flex items-center justify-between gap-4 flex-wrap${
-                  itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:px-4 max-sm:pb-2' : ''
-                }`}
-              >
-                <div className="min-w-0">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-                    Journey
-                  </p>
-                  <h2 className="text-2xl font-serif font-bold">Itinerary</h2>
-                  <p
-                    className={`text-neutral-500 text-sm${itineraryViewMode === 'calendar' && isMobileCalNarrow ? ' max-sm:hidden' : ''}`}
-                  >
-                    Your path through the destinations — add stops along the way.
-                  </p>
-                </div>
-                <div className="flex shrink-0 rounded-full border border-neutral-200 bg-neutral-50 p-1 dark:border-neutral-600 dark:bg-neutral-800">
-                  <button
-                    type="button"
-                    onClick={() => setItineraryViewMode('destinations')}
-                    className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
-                      itineraryViewMode === 'destinations'
-                        ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-950 dark:text-neutral-100'
-                        : 'text-neutral-600 dark:text-neutral-300'
-                    }`}
-                  >
-                    Destinations
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setItineraryViewMode('calendar')}
-                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-semibold ${
-                      itineraryViewMode === 'calendar'
-                        ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-950 dark:text-neutral-100'
-                        : 'text-neutral-600 dark:text-neutral-300'
-                    }`}
-                  >
-                    <Calendar size={14} aria-hidden />
-                    Calendar
-                  </button>
-                </div>
-              </div>
-
-              {!selectedTrip ? (
-                <p className="mt-6 text-sm text-neutral-500">Select a trip to plan stops.</p>
-              ) : timelineDays.length === 0 ? (
-                <p className="mt-6 text-sm text-neutral-500">
-                  Set trip dates and add destinations in Planner to build your itinerary.
-                </p>
-              ) : itineraryViewMode === 'destinations' ? (
-                <ItineraryDestinationsView
-                  stays={stays}
-                  readOnly={tripIsReadOnly}
-                  tripCountry={selectedTrip.country}
-                  stopComposer={stopComposer}
-                  onOpenStopComposer={(stayId, date) => {
-                    setStopComposer({ stayId, date })
-                    setActivityPlaceSearchInput('')
-                    setSelectedTimelineDate(date)
-                  }}
-                  onCloseStopComposer={() => setStopComposer(null)}
-                  activityDrafts={activityDrafts}
-                  setActivityDrafts={setActivityDrafts}
-                  draftPlaceMeta={draftPlaceMeta}
-                  setDraftPlaceMeta={setDraftPlaceMeta}
-                  activityPlaceSearchInput={activityPlaceSearchInput}
-                  setActivityPlaceSearchInput={setActivityPlaceSearchInput}
-                  activityPlaceSuggestions={activityPlaceSearch.suggestions}
-                  activityPlaceSearchError={activityPlaceSearch.autocompleteError}
-                  placeGoogleUrl={placeGoogleUrl}
-                  resolveRecommendationCategory={resolveRecommendationCategory}
-                  onAddStop={addStayActivity}
-                  onRemoveStop={removeStayActivity}
-                  onOpenStop={(stayId, activity, stayLocation) =>
-                    setCalendarActivityDetail({
-                      stayId,
-                      activity,
-                      stayLocation,
-                    })
-                  }
-                  onOpenPlanner={() => {
-                    setActiveTab('planner')
-                    openAddStayFromPlanner()
-                  }}
-                  onOpenOnMap={(stayId) => {
-                    setMapFocusStayId(stayId)
-                    setActiveTab('map')
-                  }}
-                  onEditLodging={(stayId, lodgingId) => {
-                    openAddAccommodationForStay(stayId, lodgingId)
-                  }}
-                  formatDayLabel={formatSingleDateLabel}
-                  formatStayRange={(start, end) => formatDateRangeLabel(start, end)}
-                />
-              ) : (
-                <div
-                  className={`mt-5${
-                    isMobileCalNarrow ? ' max-sm:mt-3 max-sm:px-0' : ''
-                  }`}
-                >
-                  {calendarDropError ? (
-                    <p className={`text-sm text-rose-600 mb-2${isMobileCalNarrow ? ' max-sm:px-4' : ''}`}>
-                      {calendarDropError}
-                    </p>
-                  ) : null}
-                  {isMobileCalNarrow ? (
-                    <div className="max-sm:px-4 max-sm:pt-1 max-sm:mb-3">
-                      <div className="rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2.5 dark:border-neutral-700 dark:bg-neutral-800/60">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-                          Lodging
-                        </p>
-                        {selectedDayPrimaryStay ? (
-                          <div className="mt-1.5 min-w-0">
-                            {(() => {
-                              const dayLodging = stayAccommodationForDate(
-                                selectedDayPrimaryStay,
-                                selectedTimelineDate,
-                              )
-                              const label = dayLodging
-                                ? (dayLodging.name || dayLodging.confirmationRef || '').trim()
-                                : ''
-                              const addr = stayLodgingAddress(
-                                selectedDayPrimaryStay,
-                                selectedTimelineDate,
-                              )
-                              return (
-                                <>
-                                  <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate flex items-center gap-1.5">
-                                    <BedDouble size={14} className="shrink-0 opacity-70" aria-hidden />
-                                    {label || selectedDayPrimaryStay.location || 'No lodging'}
-                                  </p>
-                                  {addr ? (
-                                    <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400 line-clamp-2">
-                                      {addr}
-                                    </p>
-                                  ) : null}
-                                </>
-                              )
-                            })()}
-                          </div>
-                        ) : (
-                          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-                            Add destinations in Planner to see lodging by day.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  ) : null}
-                  <div className={isMobileCalNarrow ? 'itinerary-calendar-viewport-breakout' : ''}>
-                    <div className="itinerary-calendar-mode itinerary-calendar-mobile-bleed">
-                      <ItineraryCalendarGrid
-                        visibleDays={visibleCalendarDays}
-                        timelineDays={timelineDays}
-                        activitiesByDay={activitiesByDay}
-                        stays={stays}
-                        staysByDay={staysByDay}
-                        todayIso={todayIso}
-                        nowMinutes={nowMinutes}
-                        selectedTimelineDate={selectedTimelineDate}
-                        onSelectDay={setSelectedTimelineDate}
-                        onCalendarActivityDrop={applyCalendarDrop}
-                        onCalendarActivityResize={applyCalendarActivityResize}
-                        calendarReadOnly={tripIsReadOnly}
-                        onSelectCalendarItem={(item) =>
-                          setCalendarActivityDetail({
-                            stayId: item.stayId,
-                            activity: item.activity,
-                            bookingRef: item.bookingRef,
-                            stayLocation: item.stayLocation,
-                          })
-                        }
-                        weekStartIndex={calendarWeekStartIndex}
-                        onPrevWeek={() => setCalendarWeekStartIndex((i) => Math.max(0, i - 7))}
-                        onNextWeek={() =>
-                          setCalendarWeekStartIndex((i) => Math.min(calendarMaxStart, i + 7))
-                        }
-                        canPrev={canPrevCalendar}
-                        canNext={canNextCalendar}
-                        onShiftCalendarDays={(delta) =>
-                          setCalendarWeekStartIndex((i) =>
-                            Math.max(0, Math.min(calendarMaxStart, i + delta)),
-                          )
-                        }
-                        canShiftCalendarPrev={calendarWeekStartIndex > 0}
-                        canShiftCalendarNext={calendarWeekStartIndex < calendarMaxStart}
-                      />
-                    </div>
-                  </div>
-                  {stayError ? (
-                    <p
-                      className={`mt-3 text-xs text-rose-700${isMobileCalNarrow ? ' max-sm:px-4' : ''}`}
-                    >
-                      {stayError}
-                    </p>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'budget' && (
-          <div className={`animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}>
-            <div className="rounded-3xl border border-neutral-100 bg-white p-4 shadow-lg sm:p-5 dark:border-neutral-800 dark:bg-neutral-900">
-              {!selectedTrip ? (
-                <p className="text-neutral-500 dark:text-neutral-400">Select a trip to view budget.</p>
-              ) : null}
-
-              {selectedTrip ? (
-                <>
-                  <div className="max-w-md">
-                    {(() => {
-                      const unitRate = budgetFxSnapshot
-                        ? rateBetween(budgetFromCurrency, budgetToCurrency, budgetFxSnapshot)
-                        : null
-                      const rateLabel =
-                        unitRate != null && Number.isFinite(unitRate)
-                          ? formatConverterAmount(unitRate, budgetToCurrency)
-                          : '—'
-                      const fromName = currencyFullName(budgetFromCurrency)
-                      const toName = currencyFullName(budgetToCurrency)
-                      const fieldClass =
-                        'w-full rounded-lg border border-neutral-200 bg-neutral-50 px-2.5 py-2 text-sm font-medium tabular-nums text-neutral-900 outline-none focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-neutral-500'
-                      return (
-                        <>
-                          <div className="mb-2.5">
-                            <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                              1 {fromName} equals
-                            </p>
-                            <p className="mt-0.5 text-xl font-semibold tracking-tight">
-                              <span className="tabular-nums text-neutral-900 dark:text-white">
-                                {rateLabel}
-                              </span>{' '}
-                              <span className="font-medium text-neutral-500 dark:text-neutral-400">
-                                {toName}
-                              </span>
-                            </p>
-                          </div>
-                          <div className="grid gap-1.5">
-                            <div className="grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.25fr)] gap-1.5">
-                              <input
-                                id="budget-fx-from"
-                                type="text"
-                                inputMode="decimal"
-                                aria-label="Amount to convert"
-                                value={budgetFromAmount}
-                                onChange={(e) => {
-                                  setBudgetFxLastEdited('from')
-                                  setBudgetFromAmount(e.target.value)
-                                }}
-                                placeholder="0"
-                                className={fieldClass}
-                              />
-                              <CurrencySelect
-                                value={budgetFromCurrency}
-                                currencies={CONVERTER_CURRENCIES}
-                                showFullName
-                                aria-label="From currency"
-                                title="From currency"
-                                onChange={(code) => {
-                                  setBudgetFromCurrency(code)
-                                  setBudgetFxLastEdited('from')
-                                }}
-                                className="w-full outline-none focus:border-neutral-400 dark:focus:border-neutral-500"
-                              />
-                            </div>
-                            <div className="grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.25fr)] gap-1.5">
-                              <input
-                                id="budget-fx-to"
-                                type="text"
-                                inputMode="decimal"
-                                aria-label="Converted amount"
-                                value={budgetToAmount}
-                                onChange={(e) => {
-                                  setBudgetFxLastEdited('to')
-                                  setBudgetToAmount(e.target.value)
-                                }}
-                                placeholder="0"
-                                className={fieldClass}
-                              />
-                              <CurrencySelect
-                                value={budgetToCurrency}
-                                currencies={CONVERTER_CURRENCIES}
-                                showFullName
-                                aria-label="To currency"
-                                title="To currency"
-                                onChange={(code) => {
-                                  setBudgetToCurrency(code)
-                                  setBudgetFxLastEdited('from')
-                                }}
-                                className="w-full outline-none focus:border-neutral-400 dark:focus:border-neutral-500"
-                              />
-                            </div>
-                          </div>
-                        </>
-                      )
-                    })()}
-                  </div>
-
-                  <div className="mt-5 border-t border-neutral-200 pt-4 dark:border-neutral-700">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-                      Trip total
-                    </p>
-                    <p className="mt-0.5 text-2xl font-semibold tabular-nums tracking-tight text-neutral-900 dark:text-white">
-                      {tripBudgetSummary.totalDisplay}
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-neutral-600 dark:text-neutral-300">
-                      <span>
-                        Paid{' '}
-                        <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
-                          {tripBudgetSummary.paidDisplay}
-                        </span>
-                      </span>
-                      <span>
-                        Owing{' '}
-                        <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
-                          {tripBudgetSummary.owingDisplay}
-                        </span>
-                      </span>
-                    </div>
-
-                    {tripBudgetSummary.itemCount === 0 ? (
-                      <p className="mt-4 text-sm text-neutral-500 dark:text-neutral-400">
-                        No priced bookings yet. Add costs on flights, cars, lodging, or activities.
-                      </p>
-                    ) : (
-                      <div className="mt-4 space-y-3">
-                        {tripBudgetSummary.categories.map((group) => (
-                          <section
-                            key={group.id}
-                            className="rounded-2xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-700 dark:bg-neutral-950/50"
-                          >
-                            <div className="mb-2 flex items-center justify-between gap-3">
-                              <h3 className="text-sm font-semibold text-neutral-800 dark:text-neutral-100">
-                                {group.label}
-                              </h3>
-                              <span className="text-xs font-semibold tabular-nums text-neutral-600 dark:text-neutral-300">
-                                {group.display}
-                              </span>
-                            </div>
-                            <ul className="space-y-1.5">
-                              {group.items.map((item) => (
-                                <li
-                                  key={item.id}
-                                  className="flex items-start justify-between gap-3 rounded-lg border border-neutral-200 bg-white px-2.5 py-2 dark:border-neutral-700 dark:bg-neutral-900"
-                                >
-                                  <span className="min-w-0 flex-1 truncate text-sm text-neutral-800 dark:text-neutral-200">
-                                    {item.label}
-                                  </span>
-                                  <span className="shrink-0 text-right text-sm font-medium tabular-nums text-neutral-900 dark:text-neutral-100">
-                                    {formatMoneyWithOriginal(item.display, item.original)}
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
-                          </section>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </>
-              ) : null}
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'map' && (
-          <div className="animate-in fade-in duration-200 max-lg:contents">
-            {/* Phone/tablet: fill main edge-to-edge. Desktop: card shell. */}
-            <div
-              ref={mapStarOriginRef}
-              className={`overflow-hidden max-lg:h-[calc(100dvh-var(--waypoint-map-top,10.5rem)-env(safe-area-inset-bottom,0px))] max-lg:min-h-[280px] max-lg:rounded-none max-lg:shadow-none max-lg:ring-0 lg:h-[640px] lg:min-h-[320px] lg:rounded-2xl lg:shadow-2xl lg:ring-1 lg:ring-white/70 dark:lg:ring-neutral-700/80 ${
-                mapGlobeChrome ? 'bg-transparent' : 'bg-[#02040a]'
-              }`}
-            >
-              {!selectedTrip ? (
-                <div className="flex h-full items-center justify-center text-sm text-neutral-400">
-                  Select a trip to load map locations.
-                </div>
-              ) : (
-                <ErrorBoundary label="Map">
-                  <Suspense
-                    fallback={
-                      <div className="flex h-full items-center justify-center text-sm text-neutral-400">
-                        Loading map…
-                      </div>
-                    }
-                  >
-                    <TripMap
-                      active={activeTab === 'map'}
-                      mapPoints={mapPoints}
-                      mapCategoryVisible={mapCategoryVisible}
-                      stays={stays}
-                      visitPlaces={visitPlaces}
-                      flights={bookings.flights}
-                      rentalCars={bookings.rentalCars}
-                      restaurants={bookings.restaurants}
-                      country={selectedTrip.country}
-                      tripEndDate={selectedTrip.endDate}
-                      resolvedPointCoords={resolvedPointCoords}
-                      cameraFingerprint={mapCameraFingerprint}
-                      pageStarfield
-                      skyLit={mapSkyLit}
-                      onGlobeChromeChange={setMapGlobeChrome}
-                      onBasemapChange={setMapBasemap}
-                      focusStayId={mapFocusStayId}
-                      onFocusStayConsumed={() => setMapFocusStayId(null)}
-                    />
-                  </Suspense>
-                </ErrorBoundary>
-              )}
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'tips' && (
-          <div
-            className={`space-y-8 animate-in fade-in duration-200${tripIsReadOnly ? ' pointer-events-none opacity-[0.82]' : ''}`}
-          >
-            <div className="bg-white rounded-3xl shadow-lg border border-neutral-100 p-7">
-              <div className="flex items-center justify-between gap-4 flex-wrap">
-                <div>
-                  <h2 className="text-2xl font-serif font-bold">Pack List</h2>
-                  <p className="text-neutral-500 text-sm">Group what to bring by category and track packing progress.</p>
-                </div>
-                <span className="px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 text-xs font-semibold">
-                  {packedCount} / {packList.length} packed
-                </span>
-              </div>
-
-              <form
-                className="mt-4 grid grid-cols-1 md:grid-cols-[1fr_220px_auto] gap-2"
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  addPackListItem()
-                }}
-              >
-                <input
-                  value={packListTextInput}
-                  onChange={(e) => setPackListTextInput(e.target.value)}
-                  disabled={!selectedTrip}
-                  placeholder={selectedTrip ? 'Add item (e.g. Passport, Charger, Jacket)' : 'Select a trip first'}
-                  className="px-3 py-2 rounded-xl border border-neutral-200"
-                />
-                <input
-                  value={packListCategoryInput}
-                  onChange={(e) => setPackListCategoryInput(e.target.value)}
-                  disabled={!selectedTrip}
-                  list="pack-list-categories"
-                  placeholder="Category"
-                  className="px-3 py-2 rounded-xl border border-neutral-200"
-                />
-                <datalist id="pack-list-categories">
-                  {PACK_LIST_CATEGORIES.map((category) => (
-                    <option key={category} value={category} />
-                  ))}
-                </datalist>
-                <button type="submit" disabled={!selectedTrip} className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold disabled:opacity-50">
-                  Add
-                </button>
-              </form>
-
-              {packList.length === 0 ? (
-                <p className="mt-5 text-sm text-neutral-500">{selectedTrip ? 'No items yet. Add your first packing item above.' : 'Select a trip to build a pack list.'}</p>
-              ) : (
-                <div className="mt-5 space-y-4">
-                  {packListGroups.map(([category, items]) => (
-                    <section key={category} className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-                      <div className="mb-2 flex items-center justify-between gap-3">
-                        <h3 className="text-sm font-semibold text-neutral-800">{category}</h3>
-                        <span className="text-xs text-neutral-500">
-                          {items.filter((x) => x.done).length} / {items.length}
-                        </span>
-                      </div>
-                      <ul className="space-y-2">
-                        {items.map((item) => (
-                          <li key={item.id} className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2">
-                            <input
-                              type="checkbox"
-                              checked={item.done}
-                              onChange={() => togglePackListItem(item.id)}
-                              className="h-4 w-4 rounded border-neutral-300 text-blue-600 focus:ring-blue-500"
-                            />
-                            <span className={`flex-1 text-sm ${item.done ? 'line-through text-neutral-400' : 'text-neutral-800'}`}>{item.text}</span>
-                            <button type="button" onClick={() => deletePackListItem(item.id)} className="text-xs text-neutral-600 hover:text-neutral-900">
-                              Delete
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </section>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
         </main>
       </div>
 

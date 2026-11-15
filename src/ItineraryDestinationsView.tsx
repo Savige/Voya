@@ -313,20 +313,23 @@ export function ItineraryDestinationsView({
                         {formatStayRange(stay.startDate, stay.endDate)}
                         {nights > 0 ? ` · ${nights} night${nights === 1 ? '' : 's'}` : ''}
                       </p>
-                      {onEditLodging && !readOnly ? (
+                      {onEditLodging ? (
                         <button
                           type="button"
+                          disabled={readOnly}
                           onClick={() =>
                             onEditLodging(
                               stay.id,
                               lodgings.length === 1 ? lodgings[0].id : lodgings[0]?.id || 'new',
                             )
                           }
-                          className="mt-1 flex max-w-full items-center gap-1.5 rounded-md text-left text-xs font-medium text-slate-400 underline-offset-2 hover:text-sky-200 hover:underline"
+                          className="mt-1 flex max-w-full items-center gap-1.5 rounded-md text-left text-xs font-medium text-slate-400 underline-offset-2 hover:text-sky-200 hover:underline disabled:cursor-default disabled:no-underline disabled:hover:text-slate-400"
                           title={
-                            lodgings.length
-                              ? 'Edit lodging'
-                              : 'Add lodging'
+                            readOnly
+                              ? lodgingLabel
+                              : lodgings.length
+                                ? 'Edit lodging'
+                                : 'Add lodging'
                           }
                         >
                           <MapPin size={12} className="shrink-0 opacity-70" aria-hidden />
@@ -397,15 +400,30 @@ export function ItineraryDestinationsView({
                                   <p className="text-sm font-semibold text-slate-100">
                                     {formatDayLabel(day)}
                                   </p>
-                                  {dayLodgingName ? (
+                                  {dayLodgingName && dayLodging && onEditLodging && !readOnly ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => onEditLodging(stay.id, dayLodging.id)}
+                                      className="truncate text-left text-[11px] text-slate-400 underline-offset-2 hover:text-sky-200 hover:underline"
+                                      title="Edit lodging"
+                                    >
+                                      {dayLodgingName}
+                                    </button>
+                                  ) : dayLodgingName ? (
                                     <p className="text-[11px] text-slate-400 truncate">
                                       {dayLodgingName}
                                     </p>
                                   ) : coverage.partialCoverage &&
                                     coverage.uncoveredNights.includes(day) ? (
-                                    <p className="text-[11px] font-medium text-amber-300/90">
+                                    <button
+                                      type="button"
+                                      disabled={readOnly || !onEditLodging}
+                                      onClick={() => onEditLodging?.(stay.id, 'new')}
+                                      className="text-left text-[11px] font-medium text-amber-300/90 underline-offset-2 hover:underline disabled:no-underline"
+                                      title="Add lodging for this night"
+                                    >
                                       No lodging this night
-                                    </p>
+                                    </button>
                                   ) : (
                                     <p className="text-[11px] text-slate-500">
                                       {stopTotal === 0
